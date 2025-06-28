@@ -37,7 +37,7 @@
   "A simple Nostr client in Emacs."
   :group 'applications)
 
-(defcustom nostr-relay-urls '("wss://relay.damus.io")
+(defcustom nostr-relay-urls '("wss://relay.primal.net")
   "The websocket URLs for select relays."
   :type '(repeat string)
   :group 'nostr)
@@ -137,7 +137,9 @@
               picture])])
   (emacsql nostr--db
            [:create-table follows
-            ([(pubkey :primary-key)])])
+            ([pubkey
+              contact])])
+  (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
   (emacsql nostr--db
            [:create-table relays
             ([(url :primary-key)
@@ -164,8 +166,29 @@
              'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
              'excluded:content 'excluded:sig 'excluded:relay 'events:created_at)))
 
-(defun nostr--fetch-user-posts (since)
-  "Gets all user posts from the database SINCE given timestamp."
+(defun nostr--store-follows (pubkey tags)
+  "Parse TAGS and store PUBKEYs follows in database."
+  ;; delete old contacts for this pubkey and re-insert
+  (emacsql nostr--db
+           [:delete-from follows :where (= pubkey $s1)]
+           pubkey)
+  (dolist (tag tags)
+    (when (and (equal (car tag) "p")
+               (stringp (cadr tag)))
+      (emacsql nostr--db
+               [:insert :into follows :values [$s1 $s2]]
+               pubkey (cadr tag)))))
+
+(defun nostr--store-metadata (pubkey content)
+  "Parse CONTENT from metadata event for PUBKEY."
+  (let-alist (ignore-errors (json-parse-string content :object-type 'alist))
+    (emacsql nostr--db
+             [:insert-or-replace :into users
+              :values [$s1 $s2 $s3 $s4]]
+             pubkey .name .about .picture)))
+
+(defun nostr--fetch-text-posts (since limit)
+  "Gets all text posts from the database SINCE given timestamp and LIMIT."
   (emacsql nostr--db
            [:select
             [events:id events:pubkey users:name users:picture events:created_at events:content]
@@ -173,8 +196,16 @@
             :inner-join users :on (= events:pubkey users:pubkey)
             :where (and (= events:kind 1)
                         (>= events:created_at $s1))
-            :order-by [(desc events:created_at)]]
-           (or since 0)))
+            :order-by [(desc events:created_at)]
+            :limit $s2]
+           (or since 0) limit))
+
+(defun nostr--fetch-contacts (pubkey)
+  "Fetch contacts for PUBKEY."
+  (flatten-list
+   (emacsql nostr--db
+            [:select contact :from follows :where (= pubkey $s1)]
+            "e00a4fad5eab0a0e07ba0b7a3f98b8205db3ef9bbc21283099801398919a15ee")))
 
 ;; TODO: fix this query and make it useful
 ;; Probably start with joining the tables and making a complete "post"
@@ -192,9 +223,7 @@
   (let ((data (json-parse-string frame :object-type 'alist :array-type 'list :false-object nil)))
     (pcase data
       (`("EVENT" ,sub-id ,event)        ; a regular nostr event
-       (nostr--handle-event relay sub-id event)
-       ;; todo: update ui or return some command?
-       )
+       (nostr--handle-event relay sub-id event))
       (`("EOSE" ,sub-id)                ; end of stored events
        (nostr--handle-eose sub-id))
       (`("NOTICE" ,msg)                 ; human readable error message for client
@@ -214,24 +243,11 @@
       (pcase .kind
         ;; Kind 0 — Metadata (replaceable)
         (0
-         (let-alist (ignore-errors (json-parse-string .content :object-type 'alist))
-           (emacsql nostr--db
-                    [:insert-or-replace :into users
-                     :values [$s1 $s2 $s3 $s4]]
-                    ..pubkey .name .about .picture)))
+         (nostr--store-metadata .pubkey .content))
 
         ;; Kind 3 — Contact list (replaceable)
         (3
-         ;; Just delete old contacts for this pubkey and re-insert
-         (emacsql nostr--db
-                  [:delete-from follows :where (= pubkey $s1)]
-                  .pubkey)
-         (dolist (tag .tags)
-           (when (and (equal (car tag) "p")
-                      (stringp (cadr tag)))
-             (emacsql nostr--db
-                      [:insert :into follows :values [$s1]]
-                      (cadr tag)))))
+         (nostr--store-follows .pubkey .tags))
 
         ;; Kind 1 — Text note
         (1
@@ -250,8 +266,7 @@
 
 (defun nostr--handle-eose (sub-id)
   "Handles an EOSE message for SUB-ID in `nostr--subscriptions'."
-  (debug-message "EOSE for subscription %s" sub-id)
-  (nostr-refresh))
+  (debug-message "EOSE for subscription %s" sub-id))
 
 (defun nostr--handle-notice (msg)
   "Handles a notice MSG."
@@ -283,7 +298,10 @@
                    (nostr--handle-frame url payload)))
    :on-open (lambda (ws)
               (debug-message "WebSocket opened: %s" url)
-              (nostr--subscribe url ws '(nostr--req-personal nostr--req-contacts-posts)))
+              (nostr--subscribe
+               url ws
+               '(nostr--req-personal nostr--req-contacts-posts
+                                     nostr--req-contacts-metadata)))
    :on-close (lambda (_ws)
                (debug-message "Disconnected from relay"))))
 
@@ -304,11 +322,6 @@
            nostr--relay-connections)
   (clrhash nostr--relay-connections)
   (debug-message "Disconnected from all relays."))
-
-(defun nostr--generate-sub-id ()
-  "Generate a random subscription id to sent to the relay."
-  ;; TODO: check how others do this
-  (substring (md5 (format "%s" (current-time))) 0 10))
 
 (defun nostr--subscribe (relay ws reqs)
   "Send a subscription REQ for KINDS over websocket WS connection to RELAY.
@@ -335,21 +348,29 @@ limited by LIMIT."
 
 (defun nostr--req-personal (pubkey)
   "Build a request for PUBKEY's metadata, contacts and personal feed."
-  `["REQ" ,(nostr--generate-sub-id)
-    (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts))
+  `["REQ" "personal"
+    (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts ,nostr--kind-text-note))
      ("authors" . (,pubkey)))])
 
 (defun nostr--req-contacts-posts (pubkey)
   "Build a request for PUBKEY to get its contacts' posts."
-  `["REQ" ,(nostr--generate-sub-id)
+  `["REQ" "contacts-posts"
     (("kinds" . (,nostr--kind-text-note))
-     ("authors" . (,pubkey)))])
+     ("authors" . ,(nostr--fetch-contacts pubkey))
+     ("limit" . 50))])
 
+(defun nostr--req-contacts-metadata (pubkey)
+  "Build a request for PUBKEY to get its contacts' metadata."
+  `["REQ" "contacts-metadata"
+    (("kinds" . (,nostr--kind-metadata))
+     ("authors" . ,(nostr--fetch-contacts pubkey)))])
+
+;; probably too crazy
 (defun nostr--req-simple-global-feed (since &optional limit)
   "Build a request to fetch recent global notes.
 Query after SINCE with an optional LIMIT."
-  `["REQ" ,(nostr--generate-sub-id)
-    (("kinds" . (1))
+  `["REQ" "global-feed"
+    (("kinds" . (,nostr--kind-text-note))
      ("since" . ,since)
      ("limit" . ,(or limit 20)))])
 
@@ -382,11 +403,15 @@ Query after SINCE with an optional LIMIT."
   "Replace newlines with spaces in CONTENT for compact display."
   (replace-regexp-in-string "\n" " " content))
 
+(defun nostr--one-week-ago ()
+  "Unix timestamp from one week ago."
+  (- (truncate (float-time)) (* 7 24 60 60)))
+
 (defun nostr-refresh ()
   "Refresh the Nostr post list."
   (interactive)
   (let ((inhibit-read-only t)
-        (posts (nostr--fetch-user-posts nil)))
+        (posts (nostr--fetch-text-posts nil 100)))
     (setq-local
      tabulated-list-entries
      (seq-map

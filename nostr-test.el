@@ -118,7 +118,7 @@
                   (sig . "sig")
                   (relay . "r"))))
      (nostr--handle-event "r" "sub" event)
-     (let ((contacts (emacsql nostr--db [:select [pubkey] :from follows])))
+     (let ((contacts (emacsql nostr--db [:select [contact] :from follows :where (= pubkey "pubkey2")])))
        (should (equal contacts '(("contact1") ("contact2"))))))))
 
 (ert-deftest nostr--handle-event-text-note ()
