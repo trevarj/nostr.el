@@ -184,13 +184,10 @@
            (content (nth (random (length content-pool)) content-pool)))
       (emacsql nostr--db
                [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-               id pubkey created-at 1 '() content "sig" "relay")))
+               id pubkey created-at 1 '() content "sig" "relay"))))
 
-  ;; Preview output
-  (emacsql nostr--db
-           [:select [created_at pubkey content] :from events :order-by [(desc created_at)]]))
-(nostr--random-test-data)
-(nostr--fetch-user-posts 1700008716)
+;; (nostr--random-test-data)
+;; (nostr--fetch-user-posts 1700008716)
 
 
 (provide 'nostr-test)
