@@ -204,54 +204,38 @@
                                  :values [$s1 $s2 $s3 $s4]]
              pubkey .name .about .picture)))
 
-(defun nostr--fetch-text-notes (since limit)
-  "Gets all text notes from the database SINCE given timestamp and LIMIT."
-  (emacsql nostr--db
-           [:select
-            [events:id
-             events:pubkey
-             users:name
-             users:picture
-             events:created_at
-             events:content
-             events:tags]
-            :from events
-            :inner-join users :on (= events:pubkey users:pubkey)
-            :where (and (= events:kind 1)
-                        (>= events:created_at $s1))
-            :order-by [(desc events:created_at)]
-            :limit $s2]
-           (or since 0) limit))
-
-(defun nostr--fetch-root-text-notes (since limit)
-  "Gets all root text notes and from the database SINCE given timestamp and LIMIT.
-Includes reply count."
-  (emacsql nostr--db
-           [:select
-            [events:id
-             events:pubkey
-             users:name
-             users:picture
-             events:created_at
-             events:content
-             events:tags
-             (funcall count replies:child_id)]
-            :from events
-            :left-join event_relations :as replies
-            :on (= events:id replies:parent_id)
-            :left-join event_relations :as root
-            :on (= events:id root:child_id)
-            :inner-join users :on (= events:pubkey users:pubkey)
-            :where (and (= events:kind 1)
-                        (>= events:created_at $s1)
-                        (or (is root:marker nil)
-                            (<> root:marker "reply"))
-                        (or (is replies:marker nil)
-                            (= replies:marker "reply")))
-            :group-by [events:id]
-            :order-by [(desc events:created_at)]
-            :limit $s2]
-           (or since 0) (or limit 50)))
+(defun nostr--fetch-text-notes (since limit root)
+  "Gets all text notes and from the database SINCE given timestamp and LIMIT.
+Includes reply count.  If ROOT is t only root notes are returned."
+  (let ((root-filter (if root '(or (is root:marker nil)
+                                   (<> root:marker "reply"))
+                       'true))
+        (reply-count-filter '(or (is replies:marker nil)
+                                 (= replies:marker "reply"))))
+    (emacsql nostr--db
+             `[:select
+               [events:id
+                events:pubkey
+                users:name
+                users:picture
+                events:created_at
+                events:content
+                events:tags
+                (funcall count replies:child_id)]
+               :from events
+               :left-join event_relations :as replies
+               :on (= events:id replies:parent_id)
+               :left-join event_relations :as root
+               :on (= events:id root:child_id)
+               :inner-join users :on (= events:pubkey users:pubkey)
+               :where (and (= events:kind 1)
+                           (>= events:created_at $s1)
+                           ,root-filter
+                           ,reply-count-filter)
+               :group-by [events:id]
+               :order-by [(desc events:created_at)]
+               :limit $s2]
+             (or since 0) (or limit 50))))
 
 (defun nostr--fetch-contacts (pubkey)
   "Fetch contacts for PUBKEY."
@@ -465,7 +449,7 @@ Query after SINCE with an optional LIMIT."
   "Refresh the Nostr note list."
   (interactive)
   (let ((inhibit-read-only t)
-        (notes (nostr--fetch-text-notes nil 100)))
+        (notes (nostr--fetch-text-notes nil 100 t)))
     (setq-local
      tabulated-list-entries
      (seq-map

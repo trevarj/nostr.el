@@ -178,7 +178,7 @@
                     '(("reply789" "abc123" "reply")
                       ("root456" "abc123" "root")))))))
 
-(ert-deftest nostr--fetch-root-text-notes ()
+(ert-deftest nostr--fetch-text-notes ()
   "Test that only root text notes are returned with proper joins and filters."
   (with-temp-nostr-db
    (emacsql nostr--db
@@ -193,9 +193,8 @@
    (emacsql nostr--db
             [:insert :into event_relations :values [$s1 $s2 $s3]]
             "root1" "reply1" "reply")
-   (let ((results (nostr--fetch-root-text-notes nil 10)))
-     (should (= (length results) 1))
-     (should (equal (caar results) "root1")))))
+   (let ((results (nostr--fetch-text-notes nil 10 nil)))
+     (should (= (length results) 2)))))
 
 (ert-deftest nostr--fetch-root-text-notes-with-reply-count ()
   "Test that root notes return with correct reply counts."
@@ -223,7 +222,7 @@
             [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
             "root456" "pubkey1" 1020 1 "[]" "Second root" "sig" "relay")
 
-   (let ((results (nostr--fetch-root-text-notes nil 10)))
+   (let ((results (nostr--fetch-text-notes nil 10 t)))
      (message "%s" results)
      (should (= (length results) 2))
      (let ((r1 (assoc "root123" results))
