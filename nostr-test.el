@@ -128,7 +128,8 @@
                   (pubkey . "noteuser")
                   (created_at . 1020)
                   (kind . 1)
-                  (tags . [])
+                  (tags . (("e" "root456" "" "root")
+                           ("e" "reply789" "" "reply")))
                   (content . "Hello world")
                   (sig . "sig")
                   (relay . "r"))))
@@ -137,7 +138,13 @@
                              [:select *
                                       :from events
                                       :where (= id "note123")])
-                    (list (mapcar #'cdr event)))))))
+                    (list (mapcar #'cdr event))))
+     (should (equal (emacsql nostr--db
+                             [:select [parent_id child_id marker]
+                                      :from event_relations
+                                      :order-by [(asc parent_id)]])
+                    '(("reply789" "note123" "reply")
+                      ("root456" "note123" "root")))))))
 
 (ert-deftest nostr--handle-event-unknown-kind ()
   "Test handling of unknown kind event."
@@ -157,6 +164,75 @@
                                       :where (= id "xyz")])
                     nil)))))
 
+(ert-deftest nostr--store-relations ()
+  "Test that `nostr--store-relations' correctly inserts e-tag relations."
+  (with-temp-nostr-db
+   (let ((event '((id . "abc123")
+                  (tags . (("e" "root456" "" "root")
+                           ("e" "reply789" "" "reply"))))))
+     (nostr--store-relations event)
+     (should (equal (emacsql nostr--db
+                             [:select [parent_id child_id marker]
+                                      :from event_relations
+                                      :order-by [(asc parent_id)]])
+                    '(("reply789" "abc123" "reply")
+                      ("root456" "abc123" "root")))))))
+
+(ert-deftest nostr--fetch-root-text-notes ()
+  "Test that only root text notes are returned with proper joins and filters."
+  (with-temp-nostr-db
+   (emacsql nostr--db
+            [:insert :into users :values [$s1 $s2 $s3 $s4]]
+            "pubkey1" "" "" "")
+   (emacsql nostr--db
+            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+            "root1" "pubkey1" 1000 1 "[]" "Root content" "sig" "relay")
+   (emacsql nostr--db
+            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+            "reply1" "pubkey1" 1010 1 "[]" "Reply content" "sig" "relay")
+   (emacsql nostr--db
+            [:insert :into event_relations :values [$s1 $s2 $s3]]
+            "root1" "reply1" "reply")
+   (let ((results (nostr--fetch-root-text-notes nil 10)))
+     (should (= (length results) 1))
+     (should (equal (caar results) "root1")))))
+
+(ert-deftest nostr--fetch-root-text-notes-with-reply-count ()
+  "Test that root notes return with correct reply counts."
+  (with-temp-nostr-db
+   (emacsql nostr--db
+            [:insert :into users :values [$s1 $s2 $s3 $s4]]
+            "pubkey1" "Alice" "About" "pic.png")
+
+   ;; Insert root note
+   (emacsql nostr--db
+            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+            "root123" "pubkey1" 1000 1 "[]" "I am root" "sig" "relay")
+
+   ;; Insert two replies to it
+   (dolist (reply-id '("reply1" "reply2"))
+     (emacsql nostr--db
+              [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+              reply-id "pubkey1" 1010 1 "[]" "Reply" "sig" "relay")
+     (emacsql nostr--db
+              [:insert :into event_relations :values [$s1 $s2 $s3]]
+              "root123" reply-id "reply"))
+
+   ;; Insert a second root note with no replies
+   (emacsql nostr--db
+            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+            "root456" "pubkey1" 1020 1 "[]" "Second root" "sig" "relay")
+
+   (let ((results (nostr--fetch-root-text-notes nil 10)))
+     (message "%s" results)
+     (should (= (length results) 2))
+     (let ((r1 (assoc "root123" results))
+           (r2 (assoc "root456" results)))
+       (should r1)
+       (should r2)
+       (should (= (car (last r1)) 2))
+       (should (= (car (last r2)) 0))))))
+
 (defun nostr--random-test-data ()
   "Generate some random test data into `nostr--db'."
   (setq nostr--db nil)
@@ -172,8 +248,8 @@
            user))
 
   ;; Random message pool
-  (setq content-pool '("Hello world!" "Test post" "Just checking in" "What’s up?"
-                       "Random message here" "Another day, another post" "Coffee time ☕"
+  (setq content-pool '("Hello world!" "Test note" "Just checking in" "What’s up?"
+                       "Random message here" "Another day, another note" "Coffee time ☕"
                        "Working on Emacs stuff" "Nostr is neat" "How’s everyone doing?"))
 
   ;; Generate 15 events with random content, randomized timestamps, and rotating authors
@@ -187,44 +263,44 @@
                id pubkey created-at 1 '() content "sig" "relay"))))
 
 ;; (nostr--random-test-data)
-;; (nostr--fetch-user-posts 1700008716)
+;; (nostr--fetch-user-notes 1700008716)
 
-(ert-deftest nostr--build-post-tags-top-level ()
-  "Replying to a top-level post (no tags)."
-  (let* ((post '(:id "abc123" :pubkey "bobpubkey" :tags nil))
-         (tags (nostr--build-post-tags post)))
+(ert-deftest nostr--build-note-tags-top-level ()
+  "Replying to a top-level note (no tags)."
+  (let* ((note '(:id "abc123" :pubkey "bobpubkey" :tags nil))
+         (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "abc123" "" "root")
                      ("e" "abc123" "" "reply")
                      ("p" "bobpubkey"))))))
 
-(ert-deftest nostr--build-post-tags-threaded ()
-  "Replying to a post that has a root e-tag."
-  (let* ((post '(:id "def456"
+(ert-deftest nostr--build-note-tags-threaded ()
+  "Replying to a note that has a root e-tag."
+  (let* ((note '(:id "def456"
                      :pubkey "carolpubkey"
                      :tags (("e" "root999" "" "root")
                             ("e" "def456" "" "reply")
                             ("p" "alicepubkey"))))
-         (tags (nostr--build-post-tags post)))
+         (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "root999" "" "root")
                      ("e" "def456" "" "reply")
                      ("p" "carolpubkey"))))))
 
-(ert-deftest nostr--build-post-tags-no-root-but-e-tag ()
-  "Replying to a post that has e-tags but no 'root' marker."
-  (let* ((post '(:id "ghi789"
+(ert-deftest nostr--build-note-tags-no-root-but-e-tag ()
+  "Replying to a note that has e-tags but no 'root' marker."
+  (let* ((note '(:id "ghi789"
                      :pubkey "danpubkey"
                      :tags (("e" "" "aaa111") ("p" "someone"))))
-         (tags (nostr--build-post-tags post)))
+         (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "ghi789" "" "root")
                      ("e" "ghi789" "" "reply")
                      ("p" "danpubkey"))))))
 
-(ert-deftest nostr--build-post-tags-nil-input ()
-  "Should return nil when input is nil (new root post)."
-  (should (equal (nostr--build-post-tags nil) nil)))
+(ert-deftest nostr--build-note-tags-nil-input ()
+  "Should return nil when input is nil (new root note)."
+  (should (equal (nostr--build-note-tags nil) nil)))
 
 (provide 'nostr-test)
 ;;; nostr-test.el ends here

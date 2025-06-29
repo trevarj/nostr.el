@@ -60,7 +60,7 @@
   :group 'nostr)
 
 (defcustom nostr-timestamp-format "%Y-%m-%d %H:%M"
-  "Formatting for a posts timestamp."
+  "Formatting for a notes timestamp."
   :type 'string
   :group 'nostr)
 
@@ -142,6 +142,8 @@
                           ([pubkey
                             contact])])
   (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
+  (emacsql nostr--db [:create-table event_relations ([parent_id child_id marker])])
+  (emacsql nostr--db [:create-index idx_event_relations_parent :on event_relations ([parent_id])])
   (emacsql nostr--db
            [:create-table relays
                           ([(url :primary-key)
@@ -168,6 +170,19 @@
              'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
              'excluded:content 'excluded:sig 'excluded:relay 'events:created_at)))
 
+(defun nostr--store-relations (event)
+  "Store a relation for EVENT based on its tags."
+  (let* ((id (alist-get 'id event))
+         (tags (alist-get 'tags event)))
+    (dolist (tag tags)
+      (when (equal (car tag) "e")
+        (let ((parent-id (nth 1 tag))
+              (marker (or (nth 3 tag) "")))
+          (emacsql nostr--db
+                   [:insert :into event_relations
+                            :values [$s1 $s2 $s3]]
+                   parent-id id marker))))))
+
 (defun nostr--store-follows (pubkey tags)
   "Parse TAGS and store PUBKEYs follows in database."
   ;; delete old contacts for this pubkey and re-insert
@@ -189,8 +204,8 @@
                                  :values [$s1 $s2 $s3 $s4]]
              pubkey .name .about .picture)))
 
-(defun nostr--fetch-text-posts (since limit)
-  "Gets all text posts from the database SINCE given timestamp and LIMIT."
+(defun nostr--fetch-text-notes (since limit)
+  "Gets all text notes from the database SINCE given timestamp and LIMIT."
   (emacsql nostr--db
            [:select
             [events:id
@@ -208,15 +223,45 @@
             :limit $s2]
            (or since 0) limit))
 
+(defun nostr--fetch-root-text-notes (since limit)
+  "Gets all root text notes and from the database SINCE given timestamp and LIMIT.
+Includes reply count."
+  (emacsql nostr--db
+           [:select
+            [events:id
+             events:pubkey
+             users:name
+             users:picture
+             events:created_at
+             events:content
+             events:tags
+             (funcall count replies:child_id)]
+            :from events
+            :left-join event_relations :as replies
+            :on (= events:id replies:parent_id)
+            :left-join event_relations :as root
+            :on (= events:id root:child_id)
+            :inner-join users :on (= events:pubkey users:pubkey)
+            :where (and (= events:kind 1)
+                        (>= events:created_at $s1)
+                        (or (is root:marker nil)
+                            (<> root:marker "reply"))
+                        (or (is replies:marker nil)
+                            (= replies:marker "reply")))
+            :group-by [events:id]
+            :order-by [(desc events:created_at)]
+            :limit $s2]
+           (or since 0) (or limit 50)))
+
 (defun nostr--fetch-contacts (pubkey)
   "Fetch contacts for PUBKEY."
   (flatten-list
    (emacsql nostr--db
             [:select contact :from follows :where (= pubkey $s1)]
-            "e00a4fad5eab0a0e07ba0b7a3f98b8205db3ef9bbc21283099801398919a15ee")))
+            pubkey)))
 
 ;; TODO: fix this query and make it useful
-;; Probably start with joining the tables and making a complete "post"
+;; Probably start with joining the tables and making a complete "note"
 (defun nostr--fetch-events-from-db ()
   "Fetch events from the database."
   (emacsql nostr--db
@@ -259,7 +304,8 @@
 
         ;; Kind 1 — Text note
         (1
-         (nostr--store-event relay event))
+         (nostr--store-event relay event)
+         (nostr--store-relations event))
 
         ;; Default: ignore it, but log
         (_
@@ -308,7 +354,7 @@
               (debug-message "WebSocket opened: %s" url)
               (nostr--subscribe
                url ws
-               '(nostr--req-personal nostr--req-contacts-posts
+               '(nostr--req-personal nostr--req-contacts-notes
                                      nostr--req-contacts-metadata)))
    :on-close (lambda (_ws)
                (debug-message "Disconnected from relay"))))
@@ -360,9 +406,9 @@ limited by LIMIT."
     (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts ,nostr--kind-text-note))
      ("authors" . (,pubkey)))])
 
-(defun nostr--req-contacts-posts (pubkey)
-  "Build a request for PUBKEY to get its contacts' posts."
-  `["REQ" "contacts-posts"
+(defun nostr--req-contacts-notes (pubkey)
+  "Build a request for PUBKEY to get its contacts' notes."
+  `["REQ" "contacts-notes"
     (("kinds" . (,nostr--kind-text-note))
      ("authors" . ,(nostr--fetch-contacts pubkey))
      ("limit" . 50))])
@@ -388,13 +434,13 @@ Query after SINCE with an optional LIMIT."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'nostr-refresh)
     (define-key map (kbd "?") #'nostr-ui-popup-actions)
-    (define-key map (kbd "r") #'nostr-reply-to-post)
-    (define-key map (kbd "c") #'nostr-create-post)
+    (define-key map (kbd "r") #'nostr-reply-to-note)
+    (define-key map (kbd "c") #'nostr-create-note)
     map)
   "Keymap for `nostr-mode'.")
 
 (define-derived-mode nostr-mode tabulated-list-mode "Nostr"
-  "Major mode for viewing Nostr posts in a list."
+  "Major mode for viewing Nostr notes in a list."
   (setq tabulated-list-format [("Author" 20 t)
                                ("Time" 20 t)
                                ("Content" 0 nil)])
@@ -416,15 +462,15 @@ Query after SINCE with an optional LIMIT."
   (- (truncate (float-time)) (* 7 24 60 60)))
 
 (defun nostr-refresh ()
-  "Refresh the Nostr post list."
+  "Refresh the Nostr note list."
   (interactive)
   (let ((inhibit-read-only t)
-        (posts (nostr--fetch-text-posts nil 100)))
+        (notes (nostr--fetch-text-notes nil 100)))
     (setq-local
      tabulated-list-entries
      (seq-map
-      (lambda (post)
-        (pcase post
+      (lambda (note)
+        (pcase note
           (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags)
            (list
             ;; the key which is also the metadata
@@ -433,40 +479,40 @@ Query after SINCE with an optional LIMIT."
             (vector name
                     (nostr--format-timestamp created-at)
                     (nostr--format-content content))))))
-      posts))
+      notes))
     (tabulated-list-print t)))
 
 (transient-define-prefix nostr-ui-popup-actions ()
-  "Actions for a selected Nostr post."
+  "Actions for a selected Nostr note."
   [["Nostr Actions"
-    ("r" "Reply to post" nostr-reply-to-post)
+    ("r" "Reply to note" nostr-reply-to-note)
     ;; other actions can go here
     ]])
 
-(defun nostr--get-selected-post ()
-  "Return data for the currently selected post metadata as a plist."
+(defun nostr--get-selected-note ()
+  "Return data for the currently selected note metadata as a plist."
   (tabulated-list-get-id))
 
-(defvar nostr-post-mode-map
+(defvar nostr-note-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'nostr-send-current-post)
+    (define-key map (kbd "C-c C-c") #'nostr-send-current-note)
     map)
-  "Keymap for `nostr-post-mode'.")
+  "Keymap for `nostr-note-mode'.")
 
-(define-derived-mode nostr-post-mode text-mode "Nostr-Post"
-  "Major mode for composing a Nostr post or reply.")
+(define-derived-mode nostr-note-mode text-mode "Nostr-Note"
+  "Major mode for composing a Nostr note or reply.")
 
 (defvar-local nostr--reply-context nil
   "If non-nil, contains the event being replied to.")
 
 (defun nostr--compose (&optional reply-context)
-  "Open a new buffer to compose a post.
+  "Open a new buffer to compose a note.
 Optionally pass REPLY-CONTEXT to
 reply to an event."
   (let ((buf (generate-new-buffer "*Nostr Compose*")))
     (with-current-buffer buf
       (erase-buffer)
-      (nostr-post-mode)
+      (nostr-note-mode)
       (when reply-context
         (setq nostr--reply-context reply-context)
         (insert (format ";; Replying to %s:\n\n;; %s\n\n"
@@ -484,24 +530,24 @@ reply to an event."
                      (append (list "--tagn" (number-to-string n)) tag)))
                  tags)))
 
-(defun nostr--build-post-tags (reply-to-post)
-  "Build tags for a post using REPLY-TO-POST tags.
-Empty if root post."
-  (when reply-to-post
-    (let* ((r reply-to-post)
+(defun nostr--build-note-tags (reply-to-note)
+  "Build tags for a note using REPLY-TO-NOTE tags.
+Empty if root note."
+  (when reply-to-note
+    (let* ((r reply-to-note)
            (parent-tags (plist-get r :tags))
            (reply-to-id (plist-get r :id))
            (reply-to-pubkey (plist-get r :pubkey))
            (e-tags
-            (seq-filter (lambda (t) (equal (car t) "e")) parent-tags))
+            (seq-filter (lambda (tag) (equal (car tag) "e")) parent-tags))
            (root-id
-            (nth 1 (seq-find (lambda (t) (equal (last t) '("root"))) e-tags))))
+            (nth 1 (seq-find (lambda (tag) (equal (last tag) '("root"))) e-tags))))
       `(("e" ,(or root-id reply-to-id) "" "root")
         ("e" ,reply-to-id "" "reply")
         ("p" ,reply-to-pubkey)))))
 
-(defun nostr--get-post-buffer-content ()
-  "Return post content excluding comment lines."
+(defun nostr--get-note-buffer-content ()
+  "Return note content excluding comment lines."
   (let ((lines
          (split-string (buffer-substring-no-properties (point-min) (point-max)) "\n")))
     (string-trim
@@ -509,15 +555,15 @@ Empty if root post."
       (seq-remove (lambda (line) (string-prefix-p ";;" (string-trim-left line))) lines)
       "\n"))))
 
-(defun nostr-send-current-post ()
-  "Collect, sign, and send post in `nostr-post-mode` buffer."
+(defun nostr-send-current-note ()
+  "Collect, sign, and send note in `nostr-note-mode` buffer."
   (interactive)
-  (let ((content (nostr--get-post-buffer-content))
+  (let ((content (nostr--get-note-buffer-content))
         (reply-to nostr--reply-context))
     (unless (string-empty-p content)
       (let* ((privkey (nostr--load-private-key))
              (tag-args (nostr--flatten-tags-for-nostril
-                        (nostr--build-post-tags reply-to)))
+                        (nostr--build-note-tags reply-to)))
              (args (append (list "nostril"
                                  "--envelope"
                                  "--kind" "1"
@@ -536,26 +582,26 @@ Empty if root post."
                (lambda (url ws)
                  (when (websocket-openp ws)
                    (websocket-send-text ws (cdr result))
-                   (debug-message "post sent to relay %s" url)))
+                   (debug-message "note sent to relay %s" url)))
                nostr--relay-connections)
-              (message "Post sent!"))
+              (message "Note sent!"))
           (message "Error creating event with nostril: %s" (cdr result)))
         (kill-buffer)))))
 
-(defun nostr-reply-to-post ()
-  "Reply to the post at point."
+(defun nostr-reply-to-note ()
+  "Reply to the note at point."
   (interactive)
-  (let* ((context (nostr--get-selected-post)))
+  (let* ((context (nostr--get-selected-note)))
     (when context
       (nostr--compose context))))
 
-(defun nostr-create-post ()
-  "Start composing a new post."
+(defun nostr-create-note ()
+  "Start composing a new note."
   (interactive)
   (nostr--compose))
 
 (defun nostr-open ()
-  "Open the Nostr client buffer and display posts."
+  "Open the Nostr client buffer and display notes."
   (interactive)
   (unless nostr--db
     (nostr--open-db nostr-db-path))
