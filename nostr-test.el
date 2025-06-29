@@ -102,8 +102,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select [name about picture]
-                              :from users
-                              :where (= pubkey "pubkey1")])
+                                      :from users
+                                      :where (= pubkey "pubkey1")])
                     '(("Alice" "Dev" "http://img")))))))
 
 (ert-deftest nostr--handle-event-contacts ()
@@ -135,8 +135,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                              :from events
-                              :where (= id "note123")])
+                                      :from events
+                                      :where (= id "note123")])
                     (list (mapcar #'cdr event)))))))
 
 (ert-deftest nostr--handle-event-unknown-kind ()
@@ -153,8 +153,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                              :from events
-                              :where (= id "xyz")])
+                                      :from events
+                                      :where (= id "xyz")])
                     nil)))))
 
 (defun nostr--random-test-data ()
@@ -189,6 +189,42 @@
 ;; (nostr--random-test-data)
 ;; (nostr--fetch-user-posts 1700008716)
 
+(ert-deftest nostr--build-post-tags-top-level ()
+  "Replying to a top-level post (no tags)."
+  (let* ((post '(:id "abc123" :pubkey "bobpubkey" :tags nil))
+         (tags (nostr--build-post-tags post)))
+    (should (equal tags
+                   '(("e" "abc123" "" "root")
+                     ("e" "abc123" "" "reply")
+                     ("p" "bobpubkey"))))))
+
+(ert-deftest nostr--build-post-tags-threaded ()
+  "Replying to a post that has a root e-tag."
+  (let* ((post '(:id "def456"
+                     :pubkey "carolpubkey"
+                     :tags (("e" "root999" "" "root")
+                            ("e" "def456" "" "reply")
+                            ("p" "alicepubkey"))))
+         (tags (nostr--build-post-tags post)))
+    (should (equal tags
+                   '(("e" "root999" "" "root")
+                     ("e" "def456" "" "reply")
+                     ("p" "carolpubkey"))))))
+
+(ert-deftest nostr--build-post-tags-no-root-but-e-tag ()
+  "Replying to a post that has e-tags but no 'root' marker."
+  (let* ((post '(:id "ghi789"
+                     :pubkey "danpubkey"
+                     :tags (("e" "" "aaa111") ("p" "someone"))))
+         (tags (nostr--build-post-tags post)))
+    (should (equal tags
+                   '(("e" "ghi789" "" "root")
+                     ("e" "ghi789" "" "reply")
+                     ("p" "danpubkey"))))))
+
+(ert-deftest nostr--build-post-tags-nil-input ()
+  "Should return nil when input is nil (new root post)."
+  (should (equal (nostr--build-post-tags nil) nil)))
 
 (provide 'nostr-test)
 ;;; nostr-test.el ends here

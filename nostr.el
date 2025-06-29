@@ -37,7 +37,9 @@
   "A simple Nostr client in Emacs."
   :group 'applications)
 
-(defcustom nostr-relay-urls '("wss://relay.primal.net")
+(defcustom nostr-relay-urls '("wss://relay.primal.net"
+                              "wss://relay.damus.io"
+                              "wss://nos.lol")
   "The websocket URLs for select relays."
   :type '(repeat string)
   :group 'nostr)
@@ -118,32 +120,32 @@
   "Initialize the database scheme on the database DB."
   (emacsql nostr--db
            [:create-table events
-            ([(id :primary-key)
-              pubkey
-              (created_at integer)
-              (kind integer)
-              tags
-              content
-              sig
-              relay])])
+                          ([(id :primary-key)
+                            pubkey
+                            (created_at integer)
+                            (kind integer)
+                            tags
+                            content
+                            sig
+                            relay])])
   (emacsql nostr--db [:create-index idx_events_created_at :on events ([created_at])])
   (emacsql nostr--db [:create-index idx_events_kind :on events ([kind])])
   (emacsql nostr--db [:create-index idx_events_pubkey :on events ([pubkey])])
   (emacsql nostr--db
            [:create-table users
-            ([(pubkey :primary-key)
-              name
-              about
-              picture])])
+                          ([(pubkey :primary-key)
+                            name
+                            about
+                            picture])])
   (emacsql nostr--db
            [:create-table follows
-            ([pubkey
-              contact])])
+                          ([pubkey
+                            contact])])
   (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
   (emacsql nostr--db
            [:create-table relays
-            ([(url :primary-key)
-              (last_connected_at integer)])]))
+                          ([(url :primary-key)
+                            (last_connected_at integer)])]))
 
 (defun nostr--store-event (relay event)
   "Store a single EVENT (alist) from RELAY into DB."
@@ -151,17 +153,17 @@
   (let-alist event
     (emacsql nostr--db
              [:insert :into events
-              :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]
-              :on-conflict ([id])
-              :do :update
-              :set [(= pubkey $i9)
-                    (= created_at $i10)
-                    (= kind $i11)
-                    (= tags $i12)
-                    (= content $i13)
-                    (= sig $i14)
-                    (= relay $i15)]
-              :where (> $i10 $i16)]
+                      :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]
+                      :on-conflict ([id])
+                      :do :update
+                      :set [(= pubkey $i9)
+                            (= created_at $i10)
+                            (= kind $i11)
+                            (= tags $i12)
+                            (= content $i13)
+                            (= sig $i14)
+                            (= relay $i15)]
+                      :where (> $i10 $i16)]
              .id .pubkey .created_at .kind .tags .content .sig relay
              'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
              'excluded:content 'excluded:sig 'excluded:relay 'events:created_at)))
@@ -184,14 +186,20 @@
   (let-alist (ignore-errors (json-parse-string content :object-type 'alist))
     (emacsql nostr--db
              [:insert-or-replace :into users
-              :values [$s1 $s2 $s3 $s4]]
+                                 :values [$s1 $s2 $s3 $s4]]
              pubkey .name .about .picture)))
 
 (defun nostr--fetch-text-posts (since limit)
   "Gets all text posts from the database SINCE given timestamp and LIMIT."
   (emacsql nostr--db
            [:select
-            [events:id events:pubkey users:name users:picture events:created_at events:content]
+            [events:id
+             events:pubkey
+             users:name
+             users:picture
+             events:created_at
+             events:content
+             events:tags]
             :from events
             :inner-join users :on (= events:pubkey users:pubkey)
             :where (and (= events:kind 1)
@@ -213,8 +221,8 @@
   "Fetch events from the database."
   (emacsql nostr--db
            [:select [created_at pubkey content]
-            :from events
-            :order-by [(desc created_at)]]))
+                    :from events
+                    :order-by [(desc created_at)]]))
 
 ;;; Frame Handling
 
@@ -417,11 +425,14 @@ Query after SINCE with an optional LIMIT."
      (seq-map
       (lambda (post)
         (pcase post
-          (`(,id ,pubkey ,name ,_pic ,created-at ,content)
-           (list `(:id ,id :pubkey ,pubkey :author ,name :content ,content)
-                 (vector name
-                         (nostr--format-timestamp created-at)
-                         (nostr--format-content content))))))
+          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags)
+           (list
+            ;; the key which is also the metadata
+            `(:id ,id :pubkey ,pubkey :author ,name :content ,content :tags ,tags)
+            ;; displayed content
+            (vector name
+                    (nostr--format-timestamp created-at)
+                    (nostr--format-content content))))))
       posts))
     (tabulated-list-print t)))
 
@@ -456,9 +467,9 @@ reply to an event."
     (with-current-buffer buf
       (erase-buffer)
       (nostr-post-mode)
-      (setq nostr--reply-context reply-context)
       (when reply-context
-        (insert (format "Replying to %s:\n\n%s\n--\n"
+        (setq nostr--reply-context reply-context)
+        (insert (format ";; Replying to %s:\n\n;; %s\n\n"
                         (plist-get reply-context :author)
                         (truncate-string-to-width
                          (plist-get reply-context :content) 80 nil nil t))))
@@ -473,21 +484,40 @@ reply to an event."
                      (append (list "--tagn" (number-to-string n)) tag)))
                  tags)))
 
+(defun nostr--build-post-tags (reply-to-post)
+  "Build tags for a post using REPLY-TO-POST tags.
+Empty if root post."
+  (when reply-to-post
+    (let* ((r reply-to-post)
+           (parent-tags (plist-get r :tags))
+           (reply-to-id (plist-get r :id))
+           (reply-to-pubkey (plist-get r :pubkey))
+           (e-tags
+            (seq-filter (lambda (t) (equal (car t) "e")) parent-tags))
+           (root-id
+            (nth 1 (seq-find (lambda (t) (equal (last t) '("root"))) e-tags))))
+      `(("e" ,(or root-id reply-to-id) "" "root")
+        ("e" ,reply-to-id "" "reply")
+        ("p" ,reply-to-pubkey)))))
+
+(defun nostr--get-post-buffer-content ()
+  "Return post content excluding comment lines."
+  (let ((lines
+         (split-string (buffer-substring-no-properties (point-min) (point-max)) "\n")))
+    (string-trim
+     (string-join
+      (seq-remove (lambda (line) (string-prefix-p ";;" (string-trim-left line))) lines)
+      "\n"))))
+
 (defun nostr-send-current-post ()
   "Collect, sign, and send post in `nostr-post-mode` buffer."
   (interactive)
-  (let ((content (string-trim
-                  (cadr (split-string
-                         (buffer-substring-no-properties (point-min) (point-max))
-                         "--"))))
+  (let ((content (nostr--get-post-buffer-content))
         (reply-to nostr--reply-context))
     (unless (string-empty-p content)
       (let* ((privkey (nostr--load-private-key))
-             (tags (when reply-to
-                     (list
-                      (list "e" (plist-get reply-to :id) "" "reply")
-                      (list "p" (plist-get reply-to :pubkey)))))
-             (tag-args (nostr--flatten-tags-for-nostril tags))
+             (tag-args (nostr--flatten-tags-for-nostril
+                        (nostr--build-post-tags reply-to)))
              (args (append (list "nostril"
                                  "--envelope"
                                  "--kind" "1"
