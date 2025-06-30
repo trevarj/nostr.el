@@ -179,22 +179,31 @@
                       ("root456" "abc123" "root")))))))
 
 (ert-deftest nostr--fetch-text-notes ()
-  "Test that only root text notes are returned with proper joins and filters."
+  "Test that text notes are returned with proper joins and filters."
   (with-temp-nostr-db
-   (emacsql nostr--db
-            [:insert :into users :values [$s1 $s2 $s3 $s4]]
-            "pubkey1" "" "" "")
-   (emacsql nostr--db
-            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-            "root1" "pubkey1" 1000 1 "[]" "Root content" "sig" "relay")
-   (emacsql nostr--db
-            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-            "reply1" "pubkey1" 1010 1 "[]" "Reply content" "sig" "relay")
-   (emacsql nostr--db
-            [:insert :into event_relations :values [$s1 $s2 $s3]]
-            "root1" "reply1" "reply")
-   (let ((results (nostr--fetch-text-notes nil 10 nil)))
-     (should (= (length results) 2)))))
+   (let ((root-event '((id . "root123")
+                       (pubkey . "root_pubkey")
+                       (created_at . 1020)
+                       (kind . 1)
+                       (tags . nil)
+                       (content . "Root content")
+                       (sig . "sig")
+                       (relay . "r")))
+         (reply-event '((id . "reply123")
+                        (pubkey . "reply_pubkey")
+                        (created_at . 1020)
+                        (kind . 1)
+                        (tags . (("e" "root123" "" "root")
+                                 ("e" "otherreply123" "" "reply")))
+                        (content . "Reply content")
+                        (sig . "sig")
+                        (relay . "r"))))
+     (nostr--handle-event root-event)
+     (nostr--handle-event reply-event)
+     (let ((all (nostr--fetch-text-notes nil 10 nil))
+           (roots (nostr--fetch-text-notes nil 10 t)))
+       (should (= (length all) 2))
+       (should (= (length roots) 1))))))
 
 (ert-deftest nostr--fetch-root-text-notes-with-reply-count ()
   "Test that root notes return with correct reply counts."

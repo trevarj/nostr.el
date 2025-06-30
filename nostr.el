@@ -204,9 +204,7 @@
 (defun nostr--fetch-text-notes (since limit root)
   "Gets all text notes and from the database SINCE given timestamp and LIMIT.
 Includes reply count.  If ROOT is t only root notes are returned."
-  (let ((root-filter (if root '(or (is root:marker nil)
-                                   (<> root:marker "reply"))
-                       'true))
+  (let ((root-filter (if root '(is root:marker nil) 'true))
         (reply-count-filter '(or (is replies:marker nil)
                                  (= replies:marker "reply"))))
     (emacsql nostr--db
