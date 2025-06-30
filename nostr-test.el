@@ -232,38 +232,6 @@
        (should (= (car (last r1)) 2))
        (should (= (car (last r2)) 0))))))
 
-(defun nostr--random-test-data ()
-  "Generate some random test data into `nostr--db'."
-  (setq nostr--db nil)
-  (nostr--open-db nil)
-  (nostr--init-db)
-
-  ;; Insert authors
-  (dolist (user '(("1" "Bob"   "About Bob"   "https://pic.com/1")
-                  ("2" "Alice" "About Alice" "https://pic.com/2")
-                  ("3" "Cody"  "About Cody"  "https://pic.com/3")))
-    (apply #'emacsql nostr--db
-           [:insert :into users :values [$s1 $s2 $s3 $s4]]
-           user))
-
-  ;; Random message pool
-  (setq content-pool '("Hello world!" "Test note" "Just checking in" "What’s up?"
-                       "Random message here" "Another day, another note" "Coffee time ☕"
-                       "Working on Emacs stuff" "Nostr is neat" "How’s everyone doing?"))
-
-  ;; Generate 15 events with random content, randomized timestamps, and rotating authors
-  (dotimes (i 15)
-    (let* ((id (format "e%d" i))
-           (pubkey (nth (mod i 3) '("1" "2" "3")))
-           (created-at (+ 1700000000 (random 10000)))
-           (content (nth (random (length content-pool)) content-pool)))
-      (emacsql nostr--db
-               [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-               id pubkey created-at 1 '() content "sig" "relay"))))
-
-;; (nostr--random-test-data)
-;; (nostr--fetch-user-notes 1700008716)
-
 (ert-deftest nostr--build-note-tags-top-level ()
   "Replying to a top-level note (no tags)."
   (let* ((note '(:id "abc123" :pubkey "bobpubkey" :tags nil))

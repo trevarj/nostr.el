@@ -425,8 +425,9 @@ Query after SINCE with an optional LIMIT."
 
 (define-derived-mode nostr-mode tabulated-list-mode "Nostr"
   "Major mode for viewing Nostr notes in a list."
-  (setq tabulated-list-format [("Author" 20 t)
+  (setq tabulated-list-format [("Author" 20 t :right-align)
                                ("Time" 20 t)
+                               ("Replies" 3 nil)
                                ("Content" 0 nil)])
   (setq tabulated-list-padding 2)
   (hl-line-mode)
@@ -455,13 +456,14 @@ Query after SINCE with an optional LIMIT."
      (seq-map
       (lambda (note)
         (pcase note
-          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags)
+          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags ,replies)
            (list
             ;; the key which is also the metadata
-            `(:id ,id :pubkey ,pubkey :author ,name :content ,content :tags ,tags)
+            `(:id ,id :pubkey ,pubkey :author ,name :content ,content :tags ,tags :replies ,replies)
             ;; displayed content
             (vector name
                     (nostr--format-timestamp created-at)
+                    (number-to-string replies)
                     (nostr--format-content content))))))
       notes))
     (tabulated-list-print t)))
