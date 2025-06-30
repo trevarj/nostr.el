@@ -137,12 +137,9 @@
                             name
                             about
                             picture])])
-  (emacsql nostr--db
-           [:create-table follows
-                          ([pubkey
-                            contact])])
+  (emacsql nostr--db [:create-table follows ([pubkey contact] (:unique [pubkey contact]))])
   (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
-  (emacsql nostr--db [:create-table event_relations ([parent_id child_id marker])])
+  (emacsql nostr--db [:create-table event_relations ([parent_id child_id marker ] (:unique [parent_id child_id marker]))])
   (emacsql nostr--db [:create-index idx_event_relations_parent :on event_relations ([parent_id])])
   (emacsql nostr--db
            [:create-table relays
@@ -179,8 +176,8 @@
         (let ((parent-id (nth 1 tag))
               (marker (or (nth 3 tag) "")))
           (emacsql nostr--db
-                   [:insert :into event_relations
-                            :values [$s1 $s2 $s3]]
+                   [:insert-or-ignore :into event_relations
+                                      :values [$s1 $s2 $s3]]
                    parent-id id marker))))))
 
 (defun nostr--store-follows (pubkey tags)
@@ -193,7 +190,7 @@
     (when (and (equal (car tag) "p")
                (stringp (cadr tag)))
       (emacsql nostr--db
-               [:insert :into follows :values [$s1 $s2]]
+               [:insert-or-ignore :into follows :values [$s1 $s2]]
                pubkey (cadr tag)))))
 
 (defun nostr--store-metadata (pubkey content)
