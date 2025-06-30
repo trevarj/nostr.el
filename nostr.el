@@ -64,6 +64,11 @@
   :type 'string
   :group 'nostr)
 
+(defcustom nostr-backend 'nostril
+  "The preferred nostr backend tool for signing and other things."
+  :type '(choice (const nostril))
+  :group 'nostr)
+
 (defconst nostr-buffer-name "*Nostr*")
 (defconst nostr--kind-metadata 0)
 (defconst nostr--kind-text-note 1)
@@ -92,7 +97,12 @@
     (string-trim (epg-decrypt-file ctx (expand-file-name nostr-private-key-path) nil))))
 
 (defun nostr--load-pubkey ()
-  "Get public key from nostril."
+  "Get public key from nostr backend."
+  (pcase nostr-backend
+    ('nostril (nostr--nostril-get-pubkey))))
+
+(defun nostr--nostril-get-pubkey ()
+  "Call to nostril and get pubkey from a random event."
   (let* ((cmd (list "nostril" "--sec" (nostr--load-private-key)))
          (result (with-temp-buffer
                    (let ((exit-code (apply #'call-process (car cmd) nil t nil (cdr cmd)))
@@ -373,6 +383,36 @@ limited by LIMIT."
   (debug-message "Unsubscribing from subscription %s" sub-id)
   (websocket-send-text ws (json-encode `["CLOSE" ,sub-id])))
 
+(defun nostr--build-event (kind privkey tags content)
+  "Delegate event creation to `nostr-backend'.
+Using KIND, PRIVKEY, TAGS and CONTENT."
+  (pcase nostr-backend
+    ('nostril (nostr--nostril-build-event kind privkey tags content))))
+
+(defun nostr--nostril-flatten-tags (tags)
+  "Convert nested TAGS list into a flat list of --tagn args for nostril."
+  (apply #'append
+         (mapcar (lambda (tag)
+                   (let ((n (length tag)))
+                     (append (list "--tagn" (number-to-string n)) tag)))
+                 tags)))
+
+(defun nostr--nostril-build-event (kind privkey tags content)
+  "Call to nostril to build and sign an event.
+Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
+  (let* ((args (append (list "nostril"
+                             "--envelope"
+                             "--kind" (number-to-string kind)
+                             "--content" content
+                             "--sec" privkey)
+                       (nostr--nostril-flatten-tags tags))))
+    (with-temp-buffer
+      (let ((exit-code (apply #'call-process (car args) nil t nil (cdr args)))
+            (output (buffer-string)))
+        (if exit-code
+            output
+          (debug-message "couldn't create event using nostril"))))))
+
 (defun nostr--send-event (ws event)
   "Sends EVENT object as json to WS."
   (debug-message "Sending event %s to relay %s" event ws)
@@ -504,14 +544,6 @@ reply to an event."
       (goto-char (point-max)))
     (switch-to-buffer buf)))
 
-(defun nostr--flatten-tags-for-nostril (tags)
-  "Convert nested TAGS list into a flat list of --tagn args for nostril."
-  (apply #'append
-         (mapcar (lambda (tag)
-                   (let ((n (length tag)))
-                     (append (list "--tagn" (number-to-string n)) tag)))
-                 tags)))
-
 (defun nostr--build-note-tags (reply-to-note)
   "Build tags for a note using REPLY-TO-NOTE tags.
 Empty if root note."
@@ -544,30 +576,18 @@ Empty if root note."
         (reply-to nostr--reply-context))
     (unless (string-empty-p content)
       (let* ((privkey (nostr--load-private-key))
-             (tag-args (nostr--flatten-tags-for-nostril
-                        (nostr--build-note-tags reply-to)))
-             (args (append (list "nostril"
-                                 "--envelope"
-                                 "--kind" "1"
-                                 "--content" content
-                                 "--sec" privkey)
-                           tag-args))
-             (result (with-temp-buffer
-                       (let ((exit-code (apply #'call-process (car args) nil t nil (cdr args)))
-                             (output (buffer-string)))
-                         (cons exit-code output)))))
+             (tags (nostr--build-note-tags reply-to))
+             (event (nostr--build-event 1 privkey tags content)))
         ;; try to send
-        (if (car result)
-            (progn
-              (debug-message "got result from nostril: %s" (cdr result))
-              (maphash
-               (lambda (url ws)
-                 (when (websocket-openp ws)
-                   (websocket-send-text ws (cdr result))
-                   (debug-message "note sent to relay %s" url)))
-               nostr--relay-connections)
-              (message "Note sent!"))
-          (message "Error creating event with nostril: %s" (cdr result)))
+        (when event
+          (progn
+            (maphash
+             (lambda (url ws)
+               (when (websocket-openp ws)
+                 (websocket-send-text ws event)
+                 (debug-message "note sent to relay %s" url)))
+             nostr--relay-connections)
+            (message "Note sent!")))
         (kill-buffer)))))
 
 (defun nostr-reply-to-note ()
@@ -590,9 +610,14 @@ Empty if root note."
   (nostr--connect-to-all-relays)
   (let ((buf (get-buffer-create nostr-buffer-name)))
     (with-current-buffer buf
+      (add-hook 'kill-buffer-hook #'nostr--cleanup nil t)
       (nostr-mode)
       (nostr-refresh))
     (switch-to-buffer buf)))
+
+(defun nostr--cleanup ()
+  "Cleanup when buffer is killed."
+  (nostr--disconnect-all-relays))
 
 (provide 'nostr)
 ;;; nostr.el ends here
