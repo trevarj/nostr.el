@@ -289,7 +289,8 @@ Includes reply count.  If ROOT is t only root notes are returned."
         ;; Default: ignore it, but log
         (_
          (debug-message "skipping event %s" event))))
-    (nostr-refresh) ; refresh for UI updates
+    (with-current-buffer (get-buffer-create nostr-buffer-name)
+      (nostr-refresh)) ; refresh for UI updates
     (debug-message "Handled event kind %s from %s" (alist-get 'kind event) relay)))
 
 (defun nostr--validate-event (_event)
