@@ -422,10 +422,10 @@ Query after SINCE with an optional LIMIT."
 
 (define-derived-mode nostr-mode tabulated-list-mode "Nostr"
   "Major mode for viewing Nostr notes in a list."
-  (setq tabulated-list-format [("Author" 20 t :right-align)
-                               ("Time" 20 t)
-                               ("Replies" 3 nil)
-                               ("Content" 0 nil)])
+  (setq tabulated-list-format `[("Author" 20 t . (:right-align nil))
+                                ("Time" ,(length (nostr--format-timestamp 0)) t)
+                                ("Replies" 7 nil . (:right-align t))
+                                ("Content" 0 nil)])
   (setq tabulated-list-padding 2)
   (hl-line-mode)
   (add-hook 'tabulated-list-revert-hook #'nostr-refresh nil t)
