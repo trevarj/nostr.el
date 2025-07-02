@@ -25,7 +25,7 @@
 
 ;;; Code:
 
-(defconst bech32--alphabet "qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+(defconst bech32--charset (string-to-list "qpzry9x8gf2tvdw0s3jn54khce6mua7l"))
 
 (defun bech32--hex-string-decode (hex-string)
   "Decodes a HEX-STRING to raw byte list."
@@ -95,7 +95,7 @@
 
 (defun bech32--verify-checksum (hrp data)
   "Verify the checksum on the HRP and DATA parts of the address string."
-  (eq 1 (bech32--polymod (+ (bech32--hrp-expand hrp) data))))
+  (eq 1 (bech32--polymod (append (bech32--hrp-expand hrp) data))))
 
 ;; def bech32_create_checksum(hrp, data):
 ;;   values = bech32_hrp_expand(hrp) + data
@@ -123,12 +123,11 @@ Returns a string."
 (defun bech32-encode (hrp data)
   "Compute a Bech32 string given HRP and DATA as hex string."
   (let* ((data (bech32--convert-bits (bech32--hex-string-decode data)))
-         (combined (append data (bech32--create-checksum hrp data)))
-         (char-set (string-to-list bech32--alphabet)))
+         (combined (append data (bech32--create-checksum hrp data))))
     (concat
      (append (string-to-list hrp)
              '(?1)
-             (seq-map (lambda (d) (nth d char-set)) combined)))))
+             (seq-map (lambda (d) (nth d bech32--charset)) combined)))))
 
 ;; def bech32_decode(bech):
 ;;     """Validate a Bech32/Bech32m string, and determine HRP and data."""
@@ -147,6 +146,26 @@ Returns a string."
 ;;     if spec is None:
 ;;         return (None, None, None)
 ;;     return (hrp, data[:-6], spec)
+
+(defun bech32-decode (addr)
+  "Validate Bech32 ADDR and determine HRP and data."
+  (let ((bech (string-to-list (downcase addr))))
+    (unless (or (seq-some (lambda (ch) (or (< ch 33) (> ch 126))) (string-to-list addr))
+                (and (not (equal (downcase addr) addr))
+                     (not (equal (upcase addr) addr))))
+      (if-let* ((pos (seq-position bech ?1))
+                (len (length bech))
+                (_ (or (> pos 1)
+                       (> (+ pos 7) len)
+                       (> len 90)))
+                (suffix (seq-subseq bech (1+ pos)))
+                (_ (seq-every-p (lambda (ch) (memq ch bech32--charset))
+                                suffix))
+                (hrp (concat (seq-subseq bech 0 pos)))
+                (data (seq-map
+                       (lambda (ch) (seq-position bech32--charset ch)) suffix))
+                (spec (bech32--verify-checksum hrp data)))
+          (list hrp (seq-subseq data 0 -6) spec)))))
 
 (provide 'bech32)
 ;;; bech32.el ends here
