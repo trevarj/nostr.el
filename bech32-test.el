@@ -98,5 +98,13 @@
        (should (equal hrp expected-hrp))
        (should (equal data expected-data))))))
 
+(ert-deftest bech32-data-to-hex-test ()
+  (let ((bech (plist-get bech32--test-npub :bech))
+        (expected-hex (plist-get bech32--test-npub :hex)))
+    (pcase (bech32-decode bech)
+      (`(,_ ,data t)
+       (should (equal (bech32-data-to-hex data)
+                      expected-hex))))))
+
 (provide 'bech32-test)
 ;;; bech32-test.el ends here

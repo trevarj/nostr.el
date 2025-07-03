@@ -50,7 +50,8 @@
   :group 'nostr)
 
 (defcustom nostr-private-key-path "~/.nostr-private.gpg"
-  "Path to GPG-encrypted private key file."
+  "Path to GPG-encrypted private key file.
+Which contains a hex or nsec private key."
   :type 'string
   :group 'nostr)
 
@@ -92,9 +93,13 @@
 ;;; Keys / Account
 
 (defun nostr--load-private-key ()
-  "Decrypt and return your Nostr private key."
-  (let ((ctx (epg-make-context 'OpenPGP)))
-    (string-trim (epg-decrypt-file ctx (expand-file-name nostr-private-key-path) nil))))
+  "Decrypt and return nostr private key hex string."
+  (let* ((ctx (epg-make-context 'OpenPGP))
+         (key (string-trim (epg-decrypt-file ctx (expand-file-name nostr-private-key-path) nil))))
+    (if (string-prefix-p "nsec" key)
+        (pcase (bech32-decode key)
+          (`(,_ ,data t) (bech32-data-to-hex data)))
+      key)))
 
 (defun nostr--load-pubkey ()
   "Get public key from nostr backend."

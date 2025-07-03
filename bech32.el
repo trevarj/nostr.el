@@ -34,6 +34,13 @@
      (lambda (two-chs) (string-to-number (concat two-chs) 16))
      (seq-partition chars 2))))
 
+(defun bech32-data-to-hex (data)
+  "Converts 5-bit integer DATA list to hex string."
+  (substring (seq-mapcat (lambda (n) (format "%02x" n) )
+                         (bech32--convert-bits data 5 8)
+                         'string)
+             0 64))
+
 ;; def convertbits(data, frombits, tobits, pad=True):
 ;;     """General power-of-2 base conversion."""
 ;;     acc = 0
@@ -56,9 +63,11 @@
 ;;         return None
 ;;     return ret
 
-(defun bech32--convert-bits (data from-bits to-bits)
-  "Convert DATA list from FROM-BITS bit integers to TO-BITS integers."
-  (let ((out '())
+(defun bech32--convert-bits (data from-bits to-bits &optional pad)
+  "Convert DATA list from FROM-BITS bit integers to TO-BITS integers.
+Optionally, PAD can be t or nil and will pad with zeros."
+  (let ((pad (or pad t))
+        (out '())
         (acc 0)
         (bits 0)
         (max-val (1- (ash 1 to-bits)))
@@ -70,7 +79,7 @@
       (while (>= bits to-bits)
         (setq bits (- bits to-bits))
         (push (logand (ash acc (- bits)) max-val) out)))
-    (when (> bits 0)
+    (when (and pad (> bits 0))
       (push (logand (ash acc (- to-bits bits)) max-val) out))
     (nreverse out)))
 
