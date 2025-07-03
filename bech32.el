@@ -34,19 +34,44 @@
      (lambda (two-chs) (string-to-number (concat two-chs) 16))
      (seq-partition chars 2))))
 
-(defun bech32--convert-bits (data)
-  "Convert DATA list from 8 bit integers to 5 bit."
+;; def convertbits(data, frombits, tobits, pad=True):
+;;     """General power-of-2 base conversion."""
+;;     acc = 0
+;;     bits = 0
+;;     ret = []
+;;     maxv = (1 << tobits) - 1
+;;     max_acc = (1 << (frombits + tobits - 1)) - 1
+;;     for value in data:
+;;         if value < 0 or (value >> frombits):
+;;             return None
+;;         acc = ((acc << frombits) | value) & max_acc
+;;         bits += frombits
+;;         while bits >= tobits:
+;;             bits -= tobits
+;;             ret.append((acc >> bits) & maxv)
+;;     if pad:
+;;         if bits:
+;;             ret.append((acc << (tobits - bits)) & maxv)
+;;     elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+;;         return None
+;;     return ret
+
+(defun bech32--convert-bits (data from-bits to-bits)
+  "Convert DATA list from FROM-BITS bit integers to TO-BITS integers."
   (let ((out '())
         (acc 0)
-        (bits 0))
-    (dolist (byte data)
-      (setq acc (logior (ash acc 8) byte)
-            bits (+ bits 8))
-      (while (>= bits 5)
-        (setq bits (- bits 5))
-        (push (logand (ash acc (- bits)) #x1F) out)))
+        (bits 0)
+        (max-val (1- (ash 1 to-bits)))
+        (max-acc (1- (ash 1 (1- (+ from-bits to-bits))))))
+    (dolist (val data)
+      (setq acc (logand (logior (ash acc from-bits) val)
+                        max-acc)
+            bits (+ bits from-bits))
+      (while (>= bits to-bits)
+        (setq bits (- bits to-bits))
+        (push (logand (ash acc (- bits)) max-val) out)))
     (when (> bits 0)
-      (push (logand (ash acc (- 5 bits)) #x1F) out))
+      (push (logand (ash acc (- to-bits bits)) max-val) out))
     (nreverse out)))
 
 ;; def bech32_polymod(values):
@@ -122,7 +147,7 @@ Returns a string."
 
 (defun bech32-encode (hrp data)
   "Compute a Bech32 string given HRP and DATA as hex string."
-  (let* ((data (bech32--convert-bits (bech32--hex-string-decode data)))
+  (let* ((data (bech32--convert-bits (bech32--hex-string-decode data) 8 5))
          (combined (append data (bech32--create-checksum hrp data))))
     (concat
      (append (string-to-list hrp)

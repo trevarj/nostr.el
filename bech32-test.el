@@ -45,14 +45,17 @@
 
 (ert-deftest bech32--convert-bits-test ()
   ;; 0xFF = 11111111 => 5-bit chunks: 11111 11100 => 31 28
-  (should (equal (bech32--convert-bits '(255))
+  (should (equal (bech32--convert-bits '(255) 8 5)
                  '(31 28)))
   ;; 1 2 3 4 = 00000001 00000010 00000011 00000100
   ;;           00000 00100 00001 00000 00110 00001 00000
   ;;             0     4     1     0     6     1     0
   ;; => big-endian packed 5-bit groups
-  (should (equal (bech32--convert-bits '(1 2 3 4))
-                 '(0 4 1 0 6 1 0))))
+  (should (equal (bech32--convert-bits '(1 2 3 4) 8 5)
+                 '(0 4 1 0 6 1 0)))
+  ;; reverse
+  (should (equal (bech32--convert-bits '(0 4 1 0 6 1 0) 5 8)
+                 '(1 2 3 4 0))))
 
 ;;; Test vectors
 
@@ -88,7 +91,8 @@
   (let ((bech (plist-get bech32--test-npub :bech))
         (expected-hrp (plist-get bech32--test-npub :hrp))
         (expected-data (bech32--convert-bits
-                        (bech32--hex-string-decode (plist-get bech32--test-npub :hex)))))
+                        (bech32--hex-string-decode (plist-get bech32--test-npub :hex))
+                        8 5)))
     (pcase (bech32-decode bech)
       (`(,hrp ,data t)
        (should (equal hrp expected-hrp))
