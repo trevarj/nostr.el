@@ -42,9 +42,9 @@
   "Test that `nostr--store-event` upserts events based on id."
   (with-temp-nostr-db
    (let ((event1 '((id . "e1") (pubkey . "pk1") (created_at . 1000)
-                   (kind . 1) (tags . []) (content . "first") (sig . "s1") (relay . "r1")))
+                   (kind . 1) (tags . ()) (content . "first") (sig . "s1") (relay . "r1")))
          (event2 '((id . "e1") (pubkey . "pk1") (created_at . 2000)
-                   (kind . 1) (tags . []) (content . "updated") (sig . "s2") (relay . "r2"))))
+                   (kind . 1) (tags . ()) (content . "updated") (sig . "s2") (relay . "r2"))))
      ;; Store first event
      (nostr--store-event "r1" event1)
      ;; Verify inserted
@@ -132,19 +132,16 @@
                            ("e" "reply789" "" "reply")))
                   (content . "Hello world")
                   (sig . "sig")
-                  (relay . "r"))))
+                  (relay . "r")
+                  (reply_id . "reply789")
+                  (reply_count . 0)
+                  (root_id . "root456"))))
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
                                       :from events
                                       :where (= id "note123")])
-                    (list (mapcar #'cdr event))))
-     (should (equal (emacsql nostr--db
-                             [:select [parent_id child_id marker]
-                                      :from event_relations
-                                      :order-by [(asc parent_id)]])
-                    '(("reply789" "note123" "reply")
-                      ("root456" "note123" "root")))))))
+                    (list (mapcar #'cdr event)))))))
 
 (ert-deftest nostr--handle-event-unknown-kind ()
   "Test handling of unknown kind event."
@@ -164,20 +161,6 @@
                                       :where (= id "xyz")])
                     nil)))))
 
-(ert-deftest nostr--store-relations ()
-  "Test that `nostr--store-relations' correctly inserts e-tag relations."
-  (with-temp-nostr-db
-   (let ((event '((id . "abc123")
-                  (tags . (("e" "root456" "" "root")
-                           ("e" "reply789" "" "reply"))))))
-     (nostr--store-relations event)
-     (should (equal (emacsql nostr--db
-                             [:select [parent_id child_id marker]
-                                      :from event_relations
-                                      :order-by [(asc parent_id)]])
-                    '(("reply789" "abc123" "reply")
-                      ("root456" "abc123" "root")))))))
-
 (ert-deftest nostr--fetch-text-notes ()
   "Test that text notes are returned with proper joins and filters."
   (with-temp-nostr-db
@@ -193,53 +176,18 @@
                         (pubkey . "reply_pubkey")
                         (created_at . 1020)
                         (kind . 1)
-                        (tags . (("e" "root123" "" "root")
-                                 ("e" "otherreply123" "" "reply")))
+                        (tags . (("e" "root123" "" "root")))
                         (content . "Reply content")
                         (sig . "sig")
                         (relay . "r"))))
-     (nostr--handle-event root-event)
-     (nostr--handle-event reply-event)
+     (nostr--handle-event "r" "" root-event)
+     (nostr--handle-event "r" "" reply-event)
      (let ((all (nostr--fetch-text-notes nil 10 nil))
            (roots (nostr--fetch-text-notes nil 10 t)))
        (should (= (length all) 2))
-       (should (= (length roots) 1))))))
-
-(ert-deftest nostr--fetch-root-text-notes-with-reply-count ()
-  "Test that root notes return with correct reply counts."
-  (with-temp-nostr-db
-   (emacsql nostr--db
-            [:insert :into users :values [$s1 $s2 $s3 $s4]]
-            "pubkey1" "Alice" "About" "pic.png")
-
-   ;; Insert root note
-   (emacsql nostr--db
-            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-            "root123" "pubkey1" 1000 1 "[]" "I am root" "sig" "relay")
-
-   ;; Insert two replies to it
-   (dolist (reply-id '("reply1" "reply2"))
-     (emacsql nostr--db
-              [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-              reply-id "pubkey1" 1010 1 "[]" "Reply" "sig" "relay")
-     (emacsql nostr--db
-              [:insert :into event_relations :values [$s1 $s2 $s3]]
-              "root123" reply-id "reply"))
-
-   ;; Insert a second root note with no replies
-   (emacsql nostr--db
-            [:insert :into events :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
-            "root456" "pubkey1" 1020 1 "[]" "Second root" "sig" "relay")
-
-   (let ((results (nostr--fetch-text-notes nil 10 t)))
-     (message "%s" results)
-     (should (= (length results) 2))
-     (let ((r1 (assoc "root123" results))
-           (r2 (assoc "root456" results)))
-       (should r1)
-       (should r2)
-       (should (= (car (last r1)) 2))
-       (should (= (car (last r2)) 0))))))
+       (message "%s" roots)
+       (should (= (length roots) 1))
+       (should (= (nth 8 (car roots)) 1))))))
 
 (ert-deftest nostr--build-note-tags-top-level ()
   "Replying to a top-level note (no tags)."
@@ -277,6 +225,23 @@
 (ert-deftest nostr--build-note-tags-nil-input ()
   "Should return nil when input is nil (new root note)."
   (should (equal (nostr--build-note-tags nil) nil)))
+
+(ert-deftest nostr--parse-e-tags-by-marker-test ()
+  "Test parsing of e-tags by marker."
+  (let* ((tags '(("e" "id1" "relay.example.com" "root")
+                 ("e" "id2" "relay.example.com" "reply")
+                 ("e" "id3" "relay.example.com")
+                 ("e" "id4")
+                 ("p" "pubkey"))) ;; Non-e tag, should be ignored
+         (expected '(:root ("id1")
+                           :reply ("id2")
+                           :mention ("id3" "id4")))
+         (result (nostr--parse-e-tags-by-marker tags)))
+    ;; Compare sorted lists for determinism
+    (should (equal (plist-get result :root) (plist-get expected :root)))
+    (should (equal (plist-get result :reply) (plist-get expected :reply)))
+    (should (equal (sort (plist-get result :mention) #'string<)
+                   (sort (plist-get expected :mention) #'string<)))))
 
 (provide 'nostr-test)
 ;;; nostr-test.el ends here
