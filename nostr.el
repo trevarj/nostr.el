@@ -25,6 +25,7 @@
 
 ;;; Code:
 
+(require 'bech32)
 (require 'json)
 (require 'epg)
 (require 'tabulated-list)
@@ -247,6 +248,25 @@ Includes reply count.  If ROOT is t only root notes are returned."
                :limit $s2]
              (or since 0) (or limit 50))))
 
+(defun nostr--fetch-replies-from-db (note-id)
+  "Fetching replies of a NOTE-ID."
+  (emacsql nostr--db
+           [:select [events:id
+                     events:pubkey
+                     users:name
+                     users:picture
+                     events:created_at
+                     events:content
+                     events:tags]
+                    :from events
+                    :inner-join event_relations
+                    :on (= events:id event_relations:child_id)
+                    :inner-join users :on (= events:pubkey users:pubkey)
+                    :where (and (= event_relations:parent_id $s1)
+                                (= event_relations:marker "reply"))
+                    :order-by [(asc events:created_at)]]
+           note-id))
+
 (defun nostr--fetch-contacts (pubkey)
   "Fetch contacts for PUBKEY."
   (flatten-list
@@ -314,8 +334,15 @@ Includes reply count.  If ROOT is t only root notes are returned."
   t)
 
 (defun nostr--handle-eose (sub-id)
-  "Handles an EOSE message for SUB-ID in `nostr--subscriptions'."
-  (debug-message "EOSE for subscription %s" sub-id))
+  "Handles EOSE for SUB-ID.  Auto-unsubscribe for one-off subs."
+  (debug-message "EOSE for subscription %s" sub-id)
+  (when (string-match-p "\\`\\(replies\\|note\\)-" sub-id)
+    (maphash
+     (lambda (_url ws)
+       (when (websocket-openp ws)
+         (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
+     nostr--relay-connections)
+    (remhash sub-id nostr--subscriptions)))
 
 (defun nostr--handle-notice (msg)
   "Handles a notice MSG."
@@ -349,8 +376,10 @@ Includes reply count.  If ROOT is t only root notes are returned."
               (debug-message "WebSocket opened: %s" url)
               (nostr--subscribe
                url ws
-               '(nostr--req-personal nostr--req-contacts-notes
-                                     nostr--req-contacts-metadata)))
+               (let ((pubkey (nostr--load-pubkey)))
+                 (list (nostr--req-personal pubkey)
+                       (nostr--req-contacts-notes pubkey)
+                       (nostr--req-contacts-metadata pubkey)))))
    :on-close (lambda (_ws)
                (debug-message "Disconnected from relay"))))
 
@@ -373,15 +402,23 @@ Includes reply count.  If ROOT is t only root notes are returned."
   (debug-message "Disconnected from all relays."))
 
 (defun nostr--subscribe (relay ws reqs)
-  "Send a subscription REQ for KINDS over websocket WS connection to RELAY.
+  "Send a subscription for each request in REQS over websocket WS connection to RELAY.
 limited by LIMIT."
-  (dolist (req-fn reqs)
-    (let* ((req (funcall req-fn (nostr--load-pubkey)))
-           (sub-id (elt req 1))
+  (dolist (req reqs)
+    (let* ((sub-id (elt req 1))
            (json (json-encode req)))
       (puthash sub-id t nostr--subscriptions)
       (debug-message "Sending subscription %s to relay %s" json relay)
       (websocket-send-text ws json))))
+
+(defun nostr--subscribe-to-replies (note-id)
+  "Subscribe to events that reference NOTE-ID.
+Usually the root note that the user will click to open."
+  (let ((req (nostr--req-replies-to-note note-id)))
+    (maphash
+     (lambda (url relay-ws)
+       (nostr--subscribe url ws (list (nostr--replies-to-note note-id))))
+     nostr--relay-connections)))
 
 (defun nostr--unsubscribe (ws sub-id)
   "Sends CLOSE message to unsubscribe from subscription SUB-ID on WS."
@@ -444,6 +481,12 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
     (("kinds" . (,nostr--kind-metadata))
      ("authors" . ,(nostr--fetch-contacts pubkey)))])
 
+(defun nostr--replies-to-note (event-id)
+  "A request that references the note with EVENT-ID."
+  `["REQ" ,(format "note-%s" event-id)
+    (("kinds" . (,nostr--kind-text-note))
+     ("#e" . (,event-id)))])
+
 ;; probably too crazy
 (defun nostr--req-simple-global-feed (since &optional limit)
   "Build a request to fetch recent global notes.
@@ -461,6 +504,7 @@ Query after SINCE with an optional LIMIT."
     (define-key map (kbd "?") #'nostr-ui-popup-actions)
     (define-key map (kbd "r") #'nostr-reply-to-note)
     (define-key map (kbd "c") #'nostr-create-note)
+    (define-key map (kbd "RET") #'nostr-open-thread)
     map)
   "Keymap for `nostr-mode'.")
 
@@ -607,6 +651,66 @@ Empty if root note."
   (interactive)
   (nostr--compose))
 
+(define-derived-mode nostr-thread-mode special-mode "Nostr-Thread"
+  "Major mode for viewing a Nostr thread with multi-line entries."
+  (setq buffer-read-only t)
+  (setq-local truncate-lines nil))
+
+(defun nostr--insert-threaded-note (note depth last-child)
+  "Insert a threaded NOTE at DEPTH.  LAST-CHILD controls drawing └ or ├."
+  (let* ((author (plist-get note :author))
+         (content (plist-get note :content))
+         (timestamp (nostr--format-timestamp (plist-get note :created_at)))
+         (prefix (concat
+                  (make-string (max 0 (1- depth)) ?\s)
+                  (when (> depth 0)
+                    (concat (if last-child "└─ " "├─ ")))))
+         (face (if (zerop depth) 'bold 'default)))
+    (insert (propertize (format "%s%s [%s]\n" prefix author timestamp) 'face face))
+    (insert (propertize (format "%s%s\n\n"
+                                (make-string (+ (length prefix)) ?\s)
+                                content)
+                        'face 'default))))
+
+(defun nostr--build-thread-tree (parent-id &optional depth)
+  "Recursively build a thread tree starting from PARENT-ID at DEPTH."
+  (let ((replies (nostr--fetch-replies-from-db parent-id))
+        (depth (or depth 1)))
+    (cl-loop
+     for i from 0 below (length replies)
+     for row = (nth i replies)
+     for last = (= i (1- (length replies)))
+     do (pcase row
+          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags)
+           (let ((note `(:id ,id :pubkey ,pubkey :author ,name
+                             :content ,content :created_at ,created-at
+                             :tags ,tags)))
+             (nostr--insert-threaded-note note depth last)
+             (nostr--build-thread-tree id (1+ depth))))))))
+
+(defun nostr--render-thread-buffer (note-id)
+  "Render a thread rooted at NOTE-ID using tree-style indentation."
+  (let* ((buf (get-buffer-create (format "*Nostr Thread: %s*" note-id)))
+         (root (nostr--get-selected-note)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (nostr-thread-mode)
+        (setq-local nostr--thread-root note-id)
+        (nostr--insert-threaded-note root 0 nil)
+        (nostr--build-thread-tree (plist-get root :id))))
+    (goto-char (point-min))
+    (display-buffer buf)))
+
+(defun nostr-open-thread ()
+  "Open multi-line thread view for the selected note."
+  (interactive)
+  (let* ((note (nostr--get-selected-note))
+         (id (plist-get note :id)))
+    (when id
+      (nostr--render-thread-buffer id))))
+
+;;;###autoload
 (defun nostr-open ()
   "Open the Nostr client buffer and display notes."
   (interactive)
