@@ -9,6 +9,7 @@ WIP
 - [x] Replies to a kind-1 note
 - [ ] Threaded replies view when root note is opened
 - [ ] NIP-05 support
+- [ ] Reactions
 - [ ] Account viewing
 - [ ] Basic search by pubkey/npub
 
