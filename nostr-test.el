@@ -102,8 +102,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select [name about picture]
-                                      :from users
-                                      :where (= pubkey "pubkey1")])
+                              :from users
+                              :where (= pubkey "pubkey1")])
                     '(("Alice" "Dev" "http://img")))))))
 
 (ert-deftest nostr--handle-event-contacts ()
@@ -139,8 +139,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                                      :from events
-                                      :where (= id "note123")])
+                              :from events
+                              :where (= id "note123")])
                     (list (mapcar #'cdr event)))))))
 
 (ert-deftest nostr--handle-event-unknown-kind ()
@@ -157,8 +157,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                                      :from events
-                                      :where (= id "xyz")])
+                              :from events
+                              :where (= id "xyz")])
                     nil)))))
 
 (ert-deftest nostr--fetch-text-notes ()
@@ -188,6 +188,17 @@
        (message "%s" roots)
        (should (= (length roots) 1))
        (should (= (nth 8 (car roots)) 1))))))
+
+(ert-deftest nostr--fetch-event-ids ()
+  (with-temp-nostr-db
+   (let ((events '(((id . "id1") (kind . 1) (created_at . 0))
+                   ((id . "id2") (kind . 1) (created_at . 1))
+                   ((id . "id3") (kind . 1) (created_at . 2)))))
+     (dolist (e events)
+       (nostr--handle-event "r" "" e))
+     (let ((ids (nostr--fetch-event-ids 2)))
+       (should (= (length ids) 2))
+       (should (equal ids '("id3" "id2")))))))
 
 (ert-deftest nostr--build-note-tags-top-level ()
   "Replying to a root level note (no tags)."

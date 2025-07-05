@@ -74,6 +74,7 @@ Which contains a hex or nsec private key."
 (defconst nostr--kind-text-note 1)
 (defconst nostr--kind-contacts 3)
 (defconst nostr--kind-dm 4)
+(defconst nostr--kind-reaction 7)
 
 (defvar nostr--db nil
   "Global database connection.")
@@ -119,32 +120,35 @@ Which contains a hex or nsec private key."
 
 ;;;; Database
 
+(defun nostr-delete-db ()
+  "Wipe the DB."
+  (interactive)
+  (delete-file nostr-db-path)
+  (setq nostr--db nil))
+
 (defun nostr--open-db (db-path)
   "Set global db connection to db at DB-PATH."
-  (unless nostr--db
-    (unless (or (null db-path)
-                (file-exists-p db-path))
-      (with-temp-buffer (write-file db-path))
+  (if (file-exists-p db-path)
       (setq nostr--db (emacsql-sqlite-open db-path))
-      (nostr--init-db))
-    (unless nostr--db
-      (setq nostr--db (emacsql-sqlite-open db-path)))))
+    (with-temp-buffer (write-file db-path))
+    (setq nostr--db (emacsql-sqlite-open db-path))
+    (nostr--init-db)))
 
 (defun nostr--init-db ()
   "Initialize the database scheme on the database DB."
   (emacsql nostr--db
            [:create-table events
-                          ([(id :primary-key)
-                            pubkey
-                            (created_at integer)
-                            (kind integer)
-                            tags
-                            content
-                            sig
-                            relay
-                            reply_id
-                            (reply_count integer :default 0)
-                            root_id])])
+            ([(id :primary-key)
+              pubkey
+              (created_at integer)
+              (kind integer)
+              tags
+              content
+              sig
+              relay
+              reply_id
+              (reply_count integer :default 0)
+              root_id])])
   (emacsql nostr--db
            [:create-trigger
             increment_reply_count_on_insert
@@ -166,16 +170,25 @@ Which contains a hex or nsec private key."
   (emacsql nostr--db [:create-index idx_events_root_id :on events ([root_id])])
   (emacsql nostr--db
            [:create-table users
-                          ([(pubkey :primary-key)
-                            name
-                            about
-                            picture])])
+            ([(pubkey :primary-key)
+              name
+              about
+              picture])])
   (emacsql nostr--db [:create-table follows ([pubkey contact] (:unique [pubkey contact]))])
   (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
   (emacsql nostr--db
            [:create-table relays
-                          ([(url :primary-key)
-                            (last_connected_at integer)])]))
+            ([(url :primary-key)
+              (last_connected_at integer)])])
+  (emacsql nostr--db
+           [:create-table reactions
+            ([(id :primary-key)
+              pubkey
+              (created_at integer)
+              event_id
+              content])])
+  (emacsql nostr--db
+           [:create-index idx_reactions_event_id :on reactions ([event_id])]))
 
 (defun nostr--parse-e-tags-by-marker (tags)
   "Return a plist mapping tag markers to a list of event IDs.
@@ -199,29 +212,40 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
            (reply-id (car-safe (plist-get parsed-tags :reply))))
       (emacsql nostr--db
                [:insert :into events
-                        :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11]
-                        :on-conflict ([id])
-                        :do :update
-                        :set [(= pubkey $i12)
-                              (= created_at $i13)
-                              (= kind $i14)
-                              (= tags $i15)
-                              (= content $i16)
-                              (= sig $i17)
-                              (= relay $i18)
-                              (= reply_id $i19)
-                              (= reply_count $i20)
-                              (= root_id $i21)]
-                        :where (> $i13 $i22)]
+                :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11]
+                :on-conflict ([id])
+                :do :update
+                :set [(= pubkey $i12)
+                      (= created_at $i13)
+                      (= kind $i14)
+                      (= tags $i15)
+                      (= content $i16)
+                      (= sig $i17)
+                      (= relay $i18)
+                      (= reply_id $i19)
+                      (= reply_count $i20)
+                      (= root_id $i21)]
+                :where (> $i13 $i22)]
                .id .pubkey .created_at .kind .tags .content .sig relay
                reply-id 0 root-id
                'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
                'excluded:content 'excluded:sig 'excluded:relay
                'events:reply_id 'events:reply_count 'events:root_id 'events:created_at))))
 
+(defun nostr--store-reaction (event)
+  "Store a Kind 7 reaction EVENT."
+  (let-alist event
+    (when-let* ((e-tag (seq-find (lambda (tag) (equal (car tag) "e")) .tags))
+                (event-id (cadr e-tag)))
+      (emacsql nostr--db
+               [:insert :into reactions
+                :values [$s1 $s2 $s3 $s4 $s5]
+                :on-conflict ([id]) :do :nothing]
+               .id .pubkey .created_at event-id .content))))
+
 (defun nostr--store-follows (pubkey tags)
   "Parse TAGS and store PUBKEYs follows in database."
-  ;; delete old contacts for this pubkey and re-insert
+  ;; delete old follows for this pubkey and re-insert
   (emacsql nostr--db
            [:delete-from follows :where (= pubkey $s1)]
            pubkey)
@@ -237,7 +261,7 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
   (let-alist (ignore-errors (json-parse-string content :object-type 'alist))
     (emacsql nostr--db
              [:insert-or-replace :into users
-                                 :values [$s1 $s2 $s3 $s4]]
+              :values [$s1 $s2 $s3 $s4]]
              pubkey .name .about .picture)))
 
 (defun nostr--fetch-text-notes (since limit root-only)
@@ -254,7 +278,10 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
               events:tags
               events:reply_id
               events:reply_count
-              events:root_id]
+              events:root_id
+              [:select [(funcall count *)]
+               :from reactions
+               :where (= event_id events:id)]]
              :from events
              :left-join users :on (= events:pubkey users:pubkey)
              :where (and (= events:kind 1)
@@ -266,27 +293,41 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
              :limit $s1]
            (or limit 50) (or since 0)))
 
+(defun nostr--fetch-event-ids (limit)
+  "Fetch latest LIMIT number of events."
+  (seq-map #'car
+           (emacsql nostr--db
+                    [:select [events:id]
+                     :from events
+                     :order-by [(desc events:created_at)]
+                     :limit $s1]
+                    limit)))
+
 (defun nostr--fetch-replies-from-db (note-id)
   "Fetching replies of a NOTE-ID."
   (emacsql nostr--db
-           [:select [events:id
-                     events:pubkey
-                     users:name
-                     users:picture
-                     events:created_at
-                     events:content
-                     events:tags
-                     events:reply_id
-                     events:reply_count
-                     events:root_id]
-                    :from events
-                    :inner-join users :on (= events:pubkey users:pubkey)
-                    :where (= events:reply_id $s1)
-                    :order-by [(asc events:created_at)]]
+           [:select
+            [events:id
+             events:pubkey
+             users:name
+             users:picture
+             events:created_at
+             events:content
+             events:tags
+             events:reply_id
+             events:reply_count
+             events:root_id
+             [:select [(funcall count *)]
+              :from reactions
+              :where (= event_id events:id)]]
+            :from events
+            :inner-join users :on (= events:pubkey users:pubkey)
+            :where (= events:reply_id $s1)
+            :order-by [(asc events:created_at)]]
            note-id))
 
-(defun nostr--fetch-contacts (pubkey)
-  "Fetch contacts for PUBKEY."
+(defun nostr--fetch-follows (pubkey)
+  "Fetch follows for PUBKEY."
   (flatten-list
    (emacsql nostr--db
             [:select contact :from follows :where (= pubkey $s1)]
@@ -318,21 +359,16 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
     (let-alist event
       (pcase .kind
         ;; Kind 0 — Metadata (replaceable)
-        (0
-         (nostr--store-metadata .pubkey .content))
-
+        (0 (nostr--store-metadata .pubkey .content))
         ;; Kind 3 — Contact list (replaceable)
-        (3
-         (nostr--store-follows .pubkey .tags))
-
+        (3 (nostr--store-follows .pubkey .tags))
         ;; Kind 1 — Text note
-        (1
-         (nostr--store-event relay event))
-
+        (1 (nostr--store-event relay event))
+        ;; Kind 7 - Reactions
+        (7 (nostr--store-reaction event))
         ;; Default: ignore it, but log
         (_
-         (debug-message "skipping event %s" event))))
-    (debug-message "Handled event kind %s from %s" (alist-get 'kind event) relay)))
+         (debug-message "skipping event %s" event))))))
 
 (defun nostr--validate-event (_event)
   "Validates the signature on an EVENT.  Returns true if valid."
@@ -343,21 +379,38 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
   "Convert event ROW to a alist or nil if it doesn't match."
   (pcase row
     (`(,id ,pubkey ,author ,pic ,created-at ,content ,tags
-           ,reply-id ,replies ,root-id)
+           ,reply-id ,replies ,root-id ,likes)
      `((id . ,id) (pubkey . ,pubkey) (author . ,author) (pic . ,pic)
        (created-at . ,created-at) (content . ,content) (tags . ,tags)
-       (reply-id . ,reply-id) (replies . ,replies) (root-id . ,root-id)))))
+       (reply-id . ,reply-id) (replies . ,replies) (root-id . ,root-id)
+       (likes . ,likes)))))
 
 (defun nostr--handle-eose (sub-id)
-  "Handles EOSE for SUB-ID.  Auto-unsubscribe for one-off subs."
+  "Handles EOSE for SUB-ID.
+Sort of a chain reaction where some subscriptions start only after
+others complete."
   (debug-message "EOSE for subscription %s" sub-id)
-  (when (string-match-p "\\`\\(replies\\|note\\)-" sub-id)
-    (maphash
-     (lambda (_url ws)
-       (when (websocket-openp ws)
-         (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
-     nostr--relay-connections)
-    (remhash sub-id nostr--subscriptions)))
+  (pcase sub-id
+    ((pred (string= nostr--req-contacts-notes-id))
+     ;; ready to fetch reactions and likes for recent notes
+     (maphash
+      (lambda (relay ws)
+        (when (websocket-openp ws)
+          (debug-message "Opening subscription: %s" sub-id)
+          (nostr--subscribe relay ws
+                            (list
+                             (nostr--req-replies-and-reactions
+                              (nostr--fetch-event-ids 100) 0)))))
+      nostr--relay-connections))
+    ((pred (string-prefix-p nostr--req-replies-id-prefix))
+     (maphash
+      (lambda (_url ws)
+        (when (websocket-openp ws)
+          (debug-message "Closing subscription: %s" sub-id)
+          (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
+      nostr--relay-connections)
+     (remhash sub-id nostr--subscriptions)
+     (nostr-refresh))))
 
 (defun nostr--handle-notice (msg)
   "Handles a notice MSG."
@@ -417,8 +470,7 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
   (debug-message "Disconnected from all relays."))
 
 (defun nostr--subscribe (relay ws reqs)
-  "Subscribe to each REQS over websocket WS connection to RELAY.
-limited by LIMIT."
+  "Subscribe to each REQS over websocket WS connection to RELAY."
   (dolist (req reqs)
     (let* ((sub-id (elt req 1))
            (json (json-encode req)))
@@ -477,39 +529,46 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
 
 ;;; Requests
 
+(defvar nostr--req-personal-id "personal")
 (defun nostr--req-personal (pubkey)
-  "Build a request for PUBKEY's metadata, contacts and personal feed."
-  `["REQ" "personal"
+  "Build a request for PUBKEY's metadata, follows and personal feed."
+  `["REQ" ,nostr--req-personal-id
     (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts ,nostr--kind-text-note))
-     ("authors" . (,pubkey)))])
+     ("authors" . (,pubkey))            ; pubkey's posts
+     ("#p" . (,pubkey)))]) ; mentions of pubkey
 
+(defvar nostr--req-contacts-notes-id "contacts-notes")
 (defun nostr--req-contacts-notes (pubkey)
   "Build a request for PUBKEY to get its contacts' notes."
-  `["REQ" "contacts-notes"
+  `["REQ" ,nostr--req-contacts-notes-id
     (("kinds" . (,nostr--kind-text-note))
      ("authors" . ,(nostr--fetch-contacts pubkey))
-     ("limit" . 50))])
+     ("limit" . 100))])
 
+(defvar nostr--req-contacts-metadata-id "contacts-metadata")
 (defun nostr--req-contacts-metadata (pubkey)
   "Build a request for PUBKEY to get its contacts' metadata."
-  `["REQ" "contacts-metadata"
+  `["REQ" ,nostr--req-contacts-metadata-id
     (("kinds" . (,nostr--kind-metadata))
      ("authors" . ,(nostr--fetch-contacts pubkey)))])
 
-(defun nostr--req-replies-to-note (event-id)
-  "A request that references the note with EVENT-ID."
-  `["REQ" ,(format "note-%s" event-id)
-    (("kinds" . (,nostr--kind-text-note))
-     ("#e" . (,event-id)))])
-
-;; probably too crazy
-(defun nostr--req-simple-global-feed (since &optional limit)
-  "Build a request to fetch recent global notes.
-Query after SINCE with an optional LIMIT."
-  `["REQ" "global-feed"
-    (("kinds" . (,nostr--kind-text-note))
+(defvar nostr--req-replies-id-prefix "replies")
+(defun nostr--req-replies-and-reactions (event-ids since)
+  "Build a subscription REQ to get replies and reactions to EVENT-IDS.
+Filters SINCE given unix timestamp."
+  `["REQ" ,(format "%s-%s" nostr--req-replies-id-prefix
+                   (md5 (prin1-to-string event-ids)))
+    (("kinds" . (,nostr--kind-text-note ,nostr--kind-reaction))
+     ("#e" . ,event-ids)
      ("since" . ,since)
-     ("limit" . ,(or limit 20)))])
+     ("limit" . 100))])
+
+(defvar nostr--req-metadata-id-prefix "metadata")
+(defun nostr--req-pubkey-metadata (pubkey)
+  "Build a request to get PUBKEY's metadata."
+  `["REQ" ,(format "%s-%s" nostr--req-metadata-id-prefix pubkey)
+    (("kinds" . (,nostr--kind-metadata))
+     ("authors" . (,pubkey)))])
 
 ;;;; UI
 
@@ -528,6 +587,7 @@ Query after SINCE with an optional LIMIT."
   (setq tabulated-list-format `[("Author" 20 t . (:right-align nil))
                                 ("Time" ,(length (nostr--format-timestamp 0)) t)
                                 ("Replies" 7 nil . (:right-align t))
+                                ("❤" 3 nil)
                                 ("Content" 0 nil)])
   (setq tabulated-list-padding 2)
   (hl-line-mode)
@@ -564,6 +624,7 @@ Query after SINCE with an optional LIMIT."
              (vector (or .author .pubkey)
                      (nostr--format-timestamp .created-at)
                      (number-to-string .replies)
+                     (number-to-string .likes)
                      (nostr--format-content .content))))))
       events))
     (tabulated-list-print t)))
@@ -594,7 +655,7 @@ Query after SINCE with an optional LIMIT."
 (defun nostr--compose (&optional reply-context)
   "Open a new buffer to compose a note.
 Optionally pass REPLY-CONTEXT (reply-to event) to
-reply to an event."
+  reply to an event."
   (let ((buf (generate-new-buffer "*Nostr Compose*")))
     (with-current-buffer buf
       (erase-buffer)
@@ -672,7 +733,7 @@ TODO: add t tag (hashtags)"
                     (when (> depth 0)
                       (concat (if last-child "└─ " "├─ ")))))
            (face (if (zerop depth) 'bold 'default)))
-      (insert (propertize (format "%s%s [%s]\n" prefix .author timestamp) 'face face))
+      (insert (propertize (format "%s%s [%s] [❤ %s]\n" prefix .author timestamp .likes) 'face face))
       (insert (propertize (format "%s%s\n\n"
                                   (make-string (+ (length prefix)) ?\s)
                                   .content)
@@ -703,7 +764,7 @@ TODO: refactor this so we can hit `g' on a thread and reload."
         (nostr--insert-threaded-note root 0 nil)
         (nostr--build-thread-tree (alist-get 'id root))))
     (goto-char (point-min))
-    (display-buffer buf)))
+    (select-window (display-buffer buf))))
 
 (defun nostr-open-thread ()
   "Open multi-line thread view for the selected note."
@@ -717,8 +778,7 @@ TODO: refactor this so we can hit `g' on a thread and reload."
 (defun nostr-open ()
   "Open the Nostr client buffer and display notes."
   (interactive)
-  (unless nostr--db
-    (nostr--open-db nostr-db-path))
+  (nostr--open-db nostr-db-path)
   (nostr--connect-to-all-relays)
   (let ((buf (get-buffer-create nostr-buffer-name)))
     (with-current-buffer buf
@@ -727,8 +787,9 @@ TODO: refactor this so we can hit `g' on a thread and reload."
       (nostr-refresh))
     (switch-to-buffer buf)))
 
-(defun nostr--cleanup ()
+(defun nostr-close ()
   "Cleanup when buffer is killed."
+  (interactive)
   (nostr--disconnect-all-relays)
   (emacsql-close nostr--db))
 
