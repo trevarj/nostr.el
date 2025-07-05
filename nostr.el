@@ -145,6 +145,20 @@ Which contains a hex or nsec private key."
                             reply_id
                             (reply_count integer :default 0)
                             root_id])])
+  (emacsql nostr--db
+           [:create-trigger
+            increment_reply_count_on_insert
+            :after :insert :on events
+            :when (and (= new:kind 1) (or (is-not new:reply_id nil)
+                                          (is-not new:root_id nil)))
+            :begin
+            :update
+            events
+            :set (= reply_count (+ reply_count 1))
+            :where (or (= id new:reply_id)
+                       (= id new:root_id))
+            :\;
+            :end])
   (emacsql nostr--db [:create-index idx_events_created_at :on events ([created_at])])
   (emacsql nostr--db [:create-index idx_events_kind :on events ([kind])])
   (emacsql nostr--db [:create-index idx_events_pubkey :on events ([pubkey])])
@@ -204,15 +218,7 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
                reply-id 0 root-id
                'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
                'excluded:content 'excluded:sig 'excluded:relay
-               'events:reply_id 'events:reply_count 'events:root_id 'events:created_at)
-      (when-let* ((id (or reply-id
-                          (and (not reply-id)  ; reply to a root
-                               root-id))))
-        (emacsql nostr--db
-                 [:update events
-                          :set [(= reply_count (+ reply_count 1))]
-                          :where (= id $s1)]
-                 id)))))
+               'events:reply_id 'events:reply_count 'events:root_id 'events:created_at))))
 
 (defun nostr--store-follows (pubkey tags)
   "Parse TAGS and store PUBKEYs follows in database."
