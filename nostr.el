@@ -207,9 +207,9 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
                'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
                'excluded:content 'excluded:sig 'excluded:relay
                'events:reply_id 'events:reply_count 'events:root_id 'events:created_at)
-      (when-let ((id (or reply-id
-                         (and (not reply-id)  ; reply to a root
-                              root-id))))
+      (when-let* ((id (or reply-id
+                          (and (not reply-id)  ; reply to a root
+                               root-id))))
         (emacsql nostr--db
                  [:update events
                           :set [(= reply_count (+ reply_count 1))]
@@ -541,12 +541,12 @@ Query after SINCE with an optional LIMIT."
      (seq-map
       (lambda (note)
         (pcase note
-          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags ,replies
-                 ,reply-id ,root-id)
+          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags
+                 ,reply-id ,replies ,root-id)
            (list
             ;; the key which is also the metadata
             `(:id ,id :pubkey ,pubkey :author ,name :content ,content :tags ,tags
-                  :replies ,replies :reply-id ,reply-id ,root-id)
+                  :reply-id ,reply-id :replies ,replies ,root-id)
             ;; displayed content
             (vector name
                     (nostr--format-timestamp created-at)
