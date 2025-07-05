@@ -183,12 +183,11 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
   (let (result)
     (dolist (tag tags)
       (when (and (string= (car tag) "e")
-                 (nth 1 tag))           ; id exists
-        (let* ((id (nth 1 tag))
-               (marker-str (or (nth 3 tag) "mention"))
-               (marker (intern (concat ":" (downcase marker-str))))
-               (existing (plist-get result marker)))
-          (setq result (plist-put result marker (cons id existing))))))
+                 (nth 1 tag))              ; id exists
+        (if-let* ((id (nth 1 tag))
+                  (marker-str (nth 3 tag)) ; may not exist
+                  (marker (intern (concat ":" (downcase marker-str)))))
+            (setq result (plist-put result marker (cons id (plist-get result marker)))))))
     result))
 
 (defun nostr--store-event (relay event)
@@ -610,8 +609,7 @@ reply to an event."
     (switch-to-buffer buf)))
 
 (defun nostr--build-note-tags (reply-to-note)
-  "Build tags for a note using REPLY-TO-NOTE tags.
-TODO: Add mentions?"
+  "Build tags for a note using REPLY-TO-NOTE tags."
   (when reply-to-note
     (let-alist reply-to-note
       `(("e" ,(or .root-id .id) "" "root")

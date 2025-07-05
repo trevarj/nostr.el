@@ -241,15 +241,11 @@
                  ("e" "id3" "relay.example.com")
                  ("e" "id4")
                  ("p" "pubkey"))) ;; Non-e tag, should be ignored
-         (expected '(:root ("id1")
-                           :reply ("id2")
-                           :mention ("id3" "id4")))
+         (expected '(:root ("id1") :reply ("id2")))
          (result (nostr--parse-e-tags-by-marker tags)))
-    ;; Compare sorted lists for determinism
     (should (equal (plist-get result :root) (plist-get expected :root)))
     (should (equal (plist-get result :reply) (plist-get expected :reply)))
-    (should (equal (sort (plist-get result :mention) #'string<)
-                   (sort (plist-get expected :mention) #'string<)))))
+    (should (equal (length result) 4))))
 
 (provide 'nostr-test)
 ;;; nostr-test.el ends here
