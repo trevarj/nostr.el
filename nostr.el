@@ -609,7 +609,8 @@ reply to an event."
     (switch-to-buffer buf)))
 
 (defun nostr--build-note-tags (reply-to-note)
-  "Build tags for a note using REPLY-TO-NOTE tags."
+  "Build tags for a note using REPLY-TO-NOTE tags.
+TODO: add t tag (hashtags)"
   (when reply-to-note
     (let-alist reply-to-note
       `(("e" ,(or .root-id .id) "" "root")
