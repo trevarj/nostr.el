@@ -594,7 +594,7 @@ Query after SINCE with an optional LIMIT."
 
 (defun nostr--compose (&optional reply-context)
   "Open a new buffer to compose a note.
-Optionally pass REPLY-CONTEXT to
+Optionally pass REPLY-CONTEXT (reply-to event) to
 reply to an event."
   (let ((buf (generate-new-buffer "*Nostr Compose*")))
     (with-current-buffer buf
@@ -603,28 +603,20 @@ reply to an event."
       (when reply-context
         (setq nostr--reply-context reply-context)
         (insert (format ";; Replying to %s:\n\n;; %s\n\n"
-                        (plist-get reply-context :author)
+                        (alist-get 'author reply-context)
                         (truncate-string-to-width
-                         (plist-get reply-context :content) 80 nil nil t))))
+                         (alist-get 'content reply-context) 80 nil nil t))))
       (goto-char (point-max)))
     (switch-to-buffer buf)))
 
 (defun nostr--build-note-tags (reply-to-note)
   "Build tags for a note using REPLY-TO-NOTE tags.
-Empty if root note.
-TODO: Fix and use respective columns on event"
+TODO: Add mentions?"
   (when reply-to-note
-    (let* ((r reply-to-note)
-           (parent-tags (plist-get r :tags))
-           (reply-to-id (plist-get r :id))
-           (reply-to-pubkey (plist-get r :pubkey))
-           (e-tags
-            (seq-filter (lambda (tag) (equal (car tag) "e")) parent-tags))
-           (root-id
-            (nth 1 (seq-find (lambda (tag) (equal (last tag) '("root"))) e-tags))))
-      `(("e" ,(or root-id reply-to-id) "" "root")
-        ("e" ,reply-to-id "" "reply")
-        ("p" ,reply-to-pubkey)))))
+    (let-alist reply-to-note
+      `(("e" ,(or .root-id .id) "" "root")
+        ("e" ,.id "" "reply")
+        ("p" ,.pubkey)))))
 
 (defun nostr--get-note-buffer-content ()
   "Return note content excluding comment lines."
@@ -659,9 +651,8 @@ TODO: Fix and use respective columns on event"
 (defun nostr-reply-to-note ()
   "Reply to the note at point."
   (interactive)
-  (let-alist (nostr--get-selected-note)
-    (when .context
-      (nostr--compose .context))))
+  (when-let* ((note (nostr--get-selected-note)))
+    (nostr--compose note)))
 
 (defun nostr-create-note ()
   "Start composing a new note."

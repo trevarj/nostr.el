@@ -190,8 +190,9 @@
        (should (= (nth 8 (car roots)) 1))))))
 
 (ert-deftest nostr--build-note-tags-top-level ()
-  "Replying to a top-level note (no tags)."
-  (let* ((note '(:id "abc123" :pubkey "bobpubkey" :tags nil))
+  "Replying to a root level note (no tags)."
+  (let* ((note '((id . "abc123") (pubkey . "bobpubkey") (tags . nil)
+                 (root-id . nil) (reply-id . nil)))
          (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "abc123" "" "root")
@@ -200,27 +201,34 @@
 
 (ert-deftest nostr--build-note-tags-threaded ()
   "Replying to a note that has a root e-tag."
-  (let* ((note '(:id "def456"
-                     :pubkey "carolpubkey"
-                     :tags (("e" "root999" "" "root")
-                            ("e" "def456" "" "reply")
-                            ("p" "alicepubkey"))))
+  (let* ((note '((id . "reply2")
+                 (pubkey . "carolpubkey")
+                 (tags . (("e" "root1" "" "root")
+                          ("e" "reply1" "" "reply")
+                          ("p" "alicepubkey")))
+                 (root-id . "root1")
+                 (reply-id . "reply1")))
          (tags (nostr--build-note-tags note)))
     (should (equal tags
-                   '(("e" "root999" "" "root")
-                     ("e" "def456" "" "reply")
+                   '(("e" "root1" "" "root")
+                     ("e" "reply2" "" "reply")
                      ("p" "carolpubkey"))))))
 
 (ert-deftest nostr--build-note-tags-no-root-but-e-tag ()
   "Replying to a note that has e-tags but no 'root' marker."
-  (let* ((note '(:id "ghi789"
-                     :pubkey "danpubkey"
-                     :tags (("e" "" "aaa111") ("p" "someone"))))
+  (let* ((note '((id . "ghi789")
+                 (pubkey . "pubkey")
+                 (created_at . 1020)
+                 (kind . 1)
+                 (tags . (("e" "" "aaa111") ("p" "someone")))
+                 (content . "Root content")
+                 (sig . "sig")
+                 (relay . "r")))
          (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "ghi789" "" "root")
                      ("e" "ghi789" "" "reply")
-                     ("p" "danpubkey"))))))
+                     ("p" "pubkey"))))))
 
 (ert-deftest nostr--build-note-tags-nil-input ()
   "Should return nil when input is nil (new root note)."
