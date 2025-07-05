@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025  Trevor Arjeski
 
 ;; Author: Trevor Arjeski <tmarjeski@gmail.com>
-;; Keywords: lisp
+;; Keywords: lisp, nostr
 ;; Version: 0.1
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -20,8 +20,6 @@
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
-
-;; Fart
 
 ;;; Code:
 
@@ -272,10 +270,13 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
                      users:picture
                      events:created_at
                      events:content
-                     events:tags]
+                     events:tags
+                     events:reply_id
+                     events:reply_count
+                     events:root_id]
                     :from events
                     :inner-join users :on (= events:pubkey users:pubkey)
-                    :where (= event:reply_id $s1)
+                    :where (= events:reply_id $s1)
                     :order-by [(asc events:created_at)]]
            note-id))
 
@@ -332,6 +333,15 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
   "Validates the signature on an EVENT.  Returns true if valid."
   ;; TODO: call out to a cli program to validate
   t)
+
+(defun nostr--event-row-to-alist (row)
+  "Convert event ROW to a alist or nil if it doesn't match."
+  (pcase row
+    (`(,id ,pubkey ,author ,pic ,created-at ,content ,tags
+           ,reply-id ,replies ,root-id)
+     `((id . ,id) (pubkey . ,pubkey) (author . ,author) (pic . ,pic)
+       (created-at . ,created-at) (content . ,content) (tags . ,tags)
+       (reply-id . ,reply-id) (replies . ,replies) (root-id . ,root-id)))))
 
 (defun nostr--handle-eose (sub-id)
   "Handles EOSE for SUB-ID.  Auto-unsubscribe for one-off subs."
@@ -535,24 +545,22 @@ Query after SINCE with an optional LIMIT."
   "Refresh the Nostr note list."
   (interactive)
   (let ((inhibit-read-only t)
-        (notes (nostr--fetch-text-notes nil 100 t)))
+        (events (nostr--fetch-text-notes nil 100 t)))
     (setq-local
      tabulated-list-entries
      (seq-map
-      (lambda (note)
-        (pcase note
-          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags
-                 ,reply-id ,replies ,root-id)
-           (list
-            ;; the key which is also the metadata
-            `(:id ,id :pubkey ,pubkey :author ,name :content ,content :tags ,tags
-                  :reply-id ,reply-id :replies ,replies ,root-id)
-            ;; displayed content
-            (vector name
-                    (nostr--format-timestamp created-at)
-                    (number-to-string replies)
-                    (nostr--format-content content))))))
-      notes))
+      (lambda (e)
+        (let ((event (nostr--event-row-to-alist e)))
+          (let-alist event
+            (list
+             ;; the key which is also the entire row
+             event
+             ;; displayed content
+             (vector (or .author .pubkey)
+                     (nostr--format-timestamp .created-at)
+                     (number-to-string .replies)
+                     (nostr--format-content .content))))))
+      events))
     (tabulated-list-print t)))
 
 (transient-define-prefix nostr-ui-popup-actions ()
@@ -563,7 +571,7 @@ Query after SINCE with an optional LIMIT."
     ]])
 
 (defun nostr--get-selected-note ()
-  "Return data for the currently selected note metadata as a plist."
+  "Return data for the currently selected note metadata as an alist."
   (tabulated-list-get-id))
 
 (defvar nostr-note-mode-map
@@ -645,9 +653,9 @@ TODO: Fix and use respective columns on event"
 (defun nostr-reply-to-note ()
   "Reply to the note at point."
   (interactive)
-  (let* ((context (nostr--get-selected-note)))
-    (when context
-      (nostr--compose context))))
+  (let-alist (nostr--get-selected-note)
+    (when .context
+      (nostr--compose .context))))
 
 (defun nostr-create-note ()
   "Start composing a new note."
@@ -661,19 +669,18 @@ TODO: Fix and use respective columns on event"
 
 (defun nostr--insert-threaded-note (note depth last-child)
   "Insert a threaded NOTE at DEPTH.  LAST-CHILD controls drawing └ or ├."
-  (let* ((author (plist-get note :author))
-         (content (plist-get note :content))
-         (timestamp (nostr--format-timestamp (plist-get note :created_at)))
-         (prefix (concat
-                  (make-string (max 0 (1- depth)) ?\s)
-                  (when (> depth 0)
-                    (concat (if last-child "└─ " "├─ ")))))
-         (face (if (zerop depth) 'bold 'default)))
-    (insert (propertize (format "%s%s [%s]\n" prefix author timestamp) 'face face))
-    (insert (propertize (format "%s%s\n\n"
-                                (make-string (+ (length prefix)) ?\s)
-                                content)
-                        'face 'default))))
+  (let-alist note
+    (let* ((timestamp (nostr--format-timestamp .created-at))
+           (prefix (concat
+                    (make-string (max 0 (1- depth)) ?\s)
+                    (when (> depth 0)
+                      (concat (if last-child "└─ " "├─ ")))))
+           (face (if (zerop depth) 'bold 'default)))
+      (insert (propertize (format "%s%s [%s]\n" prefix .author timestamp) 'face face))
+      (insert (propertize (format "%s%s\n\n"
+                                  (make-string (+ (length prefix)) ?\s)
+                                  .content)
+                          'face 'default)))))
 
 (defun nostr--build-thread-tree (parent-id &optional depth)
   "Recursively build a thread tree starting from PARENT-ID at DEPTH."
@@ -683,13 +690,9 @@ TODO: Fix and use respective columns on event"
      for i from 0 below (length replies)
      for row = (nth i replies)
      for last = (= i (1- (length replies)))
-     do (pcase row
-          (`(,id ,pubkey ,name ,_pic ,created-at ,content ,tags)
-           (let ((note `(:id ,id :pubkey ,pubkey :author ,name
-                             :content ,content :created_at ,created-at
-                             :tags ,tags)))
-             (nostr--insert-threaded-note note depth last)
-             (nostr--build-thread-tree id (1+ depth))))))))
+     do (let ((event (nostr--event-row-to-alist row)))
+          (nostr--insert-threaded-note event depth last)
+          (nostr--build-thread-tree (alist-get 'id event) (1+ depth))))))
 
 (defun nostr--render-thread-buffer (note-id)
   "Render a thread rooted at NOTE-ID using tree-style indentation.
@@ -702,18 +705,17 @@ TODO: refactor this so we can hit `g' on a thread and reload."
         (nostr-thread-mode)
         (setq-local nostr--thread-root note-id)
         (nostr--insert-threaded-note root 0 nil)
-        (nostr--build-thread-tree (plist-get root :id))))
+        (nostr--build-thread-tree (alist-get 'id root))))
     (goto-char (point-min))
     (display-buffer buf)))
 
 (defun nostr-open-thread ()
   "Open multi-line thread view for the selected note."
   (interactive)
-  (let* ((note (nostr--get-selected-note))
-         (id (plist-get note :id)))
-    (when id
-      (nostr--subscribe-to-replies id)
-      (nostr--render-thread-buffer id))))
+  (let-alist (nostr--get-selected-note)
+    (when .id
+      (nostr--subscribe-to-replies .id)
+      (nostr--render-thread-buffer .id))))
 
 ;;;###autoload
 (defun nostr-open ()
