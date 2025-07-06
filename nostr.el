@@ -37,8 +37,7 @@
   :group 'applications)
 
 (defcustom nostr-relay-urls '("wss://relay.primal.net"
-                              "wss://relay.damus.io"
-                              "wss://nos.lol")
+                              "wss://relay.damus.io")
   "The websocket URLs for select relays."
   :type '(repeat string)
   :group 'nostr)
@@ -321,8 +320,11 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
               :from reactions
               :where (= event_id events:id)]]
             :from events
-            :inner-join users :on (= events:pubkey users:pubkey)
-            :where (= events:reply_id $s1)
+            :left-join users :on (= events:pubkey users:pubkey)
+            :where (or (and (= events:reply_id $s1)
+                            (not (= events:root_id $s1)))
+                       (and (= events:root_id $s1)
+                            (is events:reply_id nil)))
             :order-by [(asc events:created_at)]]
            note-id))
 
@@ -403,14 +405,12 @@ others complete."
                               (nostr--fetch-event-ids 100) 0)))))
       nostr--relay-connections))
     ((pred (string-prefix-p nostr--req-replies-id-prefix))
-     (maphash
-      (lambda (_url ws)
-        (when (websocket-openp ws)
-          (debug-message "Closing subscription: %s" sub-id)
-          (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
-      nostr--relay-connections)
-     (remhash sub-id nostr--subscriptions)
-     (nostr-refresh))))
+     (nostr--unsubscribe sub-id)
+     (nostr-refresh))
+    ((pred (string-prefix-p nostr--req-metadata-id-prefix))
+     (nostr--unsubscribe sub-id)
+     ;; TODO: add refresh to thread view
+     )))
 
 (defun nostr--handle-notice (msg)
   "Handles a notice MSG."
@@ -478,10 +478,28 @@ others complete."
       (debug-message "Sending subscription %s to relay %s" json relay)
       (websocket-send-text ws json))))
 
+(defun nostr--unsubscribe (sub-id)
+  "Unsubscribe from SUB-ID over all websocket connections."
+  (maphash
+   (lambda (_url ws)
+     (when (websocket-openp ws)
+       (debug-message "Closing subscription: %s" sub-id)
+       (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
+   nostr--relay-connections)
+  (remhash sub-id nostr--subscriptions))
+
 (defun nostr--subscribe-to-replies (note-id)
   "Subscribe to events that reference NOTE-ID.
 Usually the root note that the user will click to open."
-  (let ((req (nostr--req-replies-to-note note-id)))
+  (let ((req (nostr--req-replies-and-reactions `(,note-id))))
+    (maphash
+     (lambda (url ws)
+       (nostr--subscribe url ws (list req)))
+     nostr--relay-connections)))
+
+(defun nostr--subscribe-to-metadata (pubkey)
+  "Subscribe to metadata for PUBKEY."
+  (let ((req (nostr--req-metadata `(,pubkey))))
     (maphash
      (lambda (url ws)
        (nostr--subscribe url ws (list req)))
@@ -551,6 +569,14 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
   `["REQ" ,nostr--req-contacts-metadata-id
     (("kinds" . (,nostr--kind-metadata))
      ("authors" . ,(nostr--fetch-contacts pubkey)))])
+
+(defvar nostr--req-metadata-id-prefix "metadata")
+(defun nostr--req-metadata (pubkeys)
+  "Build a request to fetch metadata for PUBKEYS."
+  `["REQ" ,(format "%s-%s" nostr--req-metadata-id-prefix
+                   (md5 (prin1-to-string pubkeys)))
+    (("kinds" . (,nostr--kind-metadata))
+     ("authors" . ,pubkeys))])
 
 (defvar nostr--req-replies-id-prefix "replies")
 (defun nostr--req-replies-and-reactions (event-ids since)
@@ -733,7 +759,9 @@ TODO: add t tag (hashtags)"
                     (when (> depth 0)
                       (concat (if last-child "└─ " "├─ ")))))
            (face (if (zerop depth) 'bold 'default)))
-      (insert (propertize (format "%s%s [%s] [❤ %s]\n" prefix .author timestamp .likes) 'face face))
+      (insert (propertize (format "%s%s [%s] [❤ %s]\n"
+                                  prefix (or .author .pubkey) timestamp .likes)
+                          'face face))
       (insert (propertize (format "%s%s\n\n"
                                   (make-string (+ (length prefix)) ?\s)
                                   .content)
@@ -748,6 +776,8 @@ TODO: add t tag (hashtags)"
      for row = (nth i replies)
      for last = (= i (1- (length replies)))
      do (let ((event (nostr--event-row-to-alist row)))
+          (unless (alist-get 'name event)
+            (nostr--subscribe-to-metadata (alist-get 'pubkey event)))
           (nostr--insert-threaded-note event depth last)
           (nostr--build-thread-tree (alist-get 'id event) (1+ depth))))))
 
@@ -770,9 +800,7 @@ TODO: refactor this so we can hit `g' on a thread and reload."
   "Open multi-line thread view for the selected note."
   (interactive)
   (let-alist (nostr--get-selected-note)
-    (when .id
-      (nostr--subscribe-to-replies .id)
-      (nostr--render-thread-buffer .id))))
+    (when .id (nostr--render-thread-buffer .id))))
 
 ;;;###autoload
 (defun nostr-open ()
