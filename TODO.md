@@ -1,0 +1,11 @@
+
+- Fix threaded view
+- Only subscribe to what we don't have - using 'since' filters
+- Allow actions on notes in a thread
+- React on a note
+- View a profile
+- Action on a profile (follow/unfollow)
+- Clean up thread UI - is tree view actually working?
+- Parse and fetch nevents, embedded events, embedded npubs, etc
+- NIP-05 verification
+- Event validation (validate sig with pubkey)
