@@ -79,6 +79,7 @@ Which contains a hex or nsec private key."
   :group 'nostr)
 
 (defconst nostr--buffer-name "*Nostr*")
+(defconst nostr--thread-buffer-prefix "*Nostr Thread:")
 (defconst nostr--kind-metadata 0)
 (defconst nostr--kind-text-note 1)
 (defconst nostr--kind-contacts 3)
@@ -457,8 +458,6 @@ others complete."
      (nostr-refresh))
     ((pred (string-prefix-p nostr--req-metadata-id-prefix))
      (nostr--unsubscribe relay sub-id)
-     (nostr-refresh)
-     ;; TODO: add refresh to thread view
      )))
 
 (defun nostr--handle-notice (msg)
@@ -603,7 +602,7 @@ time."
   `["REQ" ,nostr--req-contacts-notes-id
     (("kinds" . (,nostr--kind-text-note))
      ("authors" . ,(nostr--fetch-follows pubkey))
-     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-filter))
+     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-timeframe))
      ("limit" . 100))])
 
 (defun nostr--req-contacts-metadata (pubkey)
@@ -626,7 +625,7 @@ Filters SINCE given unix timestamp."
                    (md5 (prin1-to-string event-ids)))
     (("kinds" . (,nostr--kind-text-note ,nostr--kind-reaction))
      ("#e" . ,event-ids)
-     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-filter))
+     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-timeframe))
      ("limit" . 100))])
 
 (defvar nostr--req-metadata-id-prefix "metadata")
@@ -668,29 +667,38 @@ Filters SINCE given unix timestamp."
   "Replace newlines with spaces in CONTENT for compact display."
   (replace-regexp-in-string "\n" " " content))
 
+(defun nostr--refresh-list-view ()
+  "Refresh main list view."
+  (let ((inhibit-read-only t)
+        (events (nostr--fetch-follows-notes nostr--current-pubkey nil 100 t)))
+    (setq-local
+     tabulated-list-entries
+     (seq-map
+      (lambda (e)
+        (let ((event (nostr--event-row-to-alist e)))
+          (let-alist event
+            (list
+             ;; the key which is also the entire row
+             event
+             ;; displayed content
+             (vector (or .author .pubkey)
+                     (nostr--format-timestamp .created-at)
+                     (number-to-string .replies)
+                     (number-to-string .likes)
+                     (nostr--format-content .content))))))
+      events))
+    (tabulated-list-print t)))
+
 (defun nostr-refresh ()
-  "Refresh the Nostr note list."
+  "Refresh buffer depending on its type."
   (interactive)
-  (when (string= (buffer-name (current-buffer)) nostr--buffer-name)
-    (let ((inhibit-read-only t)
-          (events (nostr--fetch-follows-notes nostr--current-pubkey nil 100 t)))
-      (setq-local
-       tabulated-list-entries
-       (seq-map
-        (lambda (e)
-          (let ((event (nostr--event-row-to-alist e)))
-            (let-alist event
-              (list
-               ;; the key which is also the entire row
-               event
-               ;; displayed content
-               (vector (or .author .pubkey)
-                       (nostr--format-timestamp .created-at)
-                       (number-to-string .replies)
-                       (number-to-string .likes)
-                       (nostr--format-content .content))))))
-        events))
-      (tabulated-list-print t))))
+  (let* ((buf (current-buffer))
+         (buf-name (buffer-name buf)))
+    (pcase buf-name
+      ((pred (string= nostr--buffer-name))
+       (nostr--refresh-list-view))
+      ((pred (string-prefix-p nostr--thread-buffer-prefix))
+       (nostr--refresh-thread-view buf)))))
 
 (transient-define-prefix nostr-ui-popup-actions ()
   "Actions for a selected Nostr note."
@@ -791,9 +799,16 @@ TODO: add t tag (hashtags)"
   (interactive)
   (nostr--compose))
 
+(defvar nostr-thread-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'nostr-refresh)
+    (define-key map (kbd "?") #'nostr-ui-popup-actions)
+    (define-key map (kbd "r") #'nostr-reply-to-note)
+    map)
+  "Keymap for `nostr-thread-mode'.")
+
 (define-derived-mode nostr-thread-mode special-mode "Nostr-Thread"
   "Major mode for viewing a Nostr thread with multi-line entries."
-  (setq buffer-read-only t)
   (setq-local truncate-lines nil))
 
 (defun nostr--insert-threaded-note (note depth last-child)
@@ -821,33 +836,39 @@ TODO: add t tag (hashtags)"
      for i from 0 below (length replies)
      for row = (nth i replies)
      for last = (= i (1- (length replies)))
-     do (let ((event (nostr--event-row-to-alist row)))
+     do (let* ((event (nostr--event-row-to-alist row))
+               (event-id (alist-get 'id event)))
           (unless (alist-get 'name event)
+            (debug-message "fetching metadata for event [%s]" event-id)
             (nostr--subscribe-to-metadata (alist-get 'pubkey event)))
           (nostr--insert-threaded-note event depth last)
-          (nostr--build-thread-tree (alist-get 'id event) (1+ depth))))))
+          (nostr--build-thread-tree event-id (1+ depth))))))
 
-(defun nostr--render-thread-buffer (note-id)
-  "Render a thread rooted at NOTE-ID using tree-style indentation.
-TODO: refactor this so we can hit `g' on a thread and reload."
-  (let* ((buf (get-buffer-create (format "*Nostr Thread: %s*" note-id)))
-         (root (nostr--get-selected-note)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (nostr-thread-mode)
-        (setq-local nostr--thread-root note-id)
-        (nostr--insert-threaded-note root 0 nil)
-        (nostr--build-thread-tree (alist-get 'id root)))
-      (goto-char (point-min))
-      (select-window (display-buffer buf))
-      (nostr--subscribe-to-replies note-id))))
+(defun nostr--refresh-thread-view (buf)
+  "Refresh the current thread view in BUF.
+ROOT is the thread's root."
+  (with-current-buffer buf
+    (let* ((inhibit-read-only t)
+           (root nostr--thread-root)
+           (root-id (alist-get 'id root)))
+      (erase-buffer)
+      (nostr--insert-threaded-note root 0 nil)
+      (nostr--build-thread-tree root-id)
+      (goto-char (point-min)))))
 
 (defun nostr-open-thread ()
   "Open multi-line thread view for the selected note."
   (interactive)
-  (let-alist (nostr--get-selected-note)
-    (when .id (nostr--render-thread-buffer .id))))
+  (when-let* ((root (nostr--get-selected-note))
+              (root-id (alist-get 'id root))
+              (buf (get-buffer-create
+                    (format "%s-%s*" nostr--thread-buffer-prefix root-id))))
+    (with-current-buffer buf
+      (nostr-thread-mode)
+      (setq-local nostr--thread-root root)
+      (nostr--refresh-thread-view buf)
+      (select-window (display-buffer buf))
+      (nostr--subscribe-to-replies root-id))))
 
 ;;;###autoload
 (defun nostr-open ()

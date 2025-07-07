@@ -1,6 +1,6 @@
 
 - [x] Fix threaded view
-- [ ] Only subscribe to what we don't have - using 'since' filters. Not sure
+- [x] Only subscribe to what we don't have - using 'since' filters (made timeframe like elfeed kinda)
 - [ ] Allow actions on notes in a thread
 - [ ] React on a note
 - [ ] View a profile
