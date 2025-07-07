@@ -85,7 +85,7 @@ Which contains a hex or nsec private key."
   :group 'nostr)
 
 (defconst nostr--buffer-name "*Nostr*")
-(defconst nostr--thread-buffer-prefix "*Nostr Thread:")
+(defconst nostr--thread-buffer-prefix "*Nostr Thread")
 (defconst nostr--kind-metadata 0)
 (defconst nostr--kind-text-note 1)
 (defconst nostr--kind-contacts 3)
@@ -841,7 +841,7 @@ TODO: add t tag (hashtags)"
          (num-depths 5)
          (faces nil))
     (dotimes (i num-depths)
-      (let* ((intensity (* 0.15 i))    ; 0.0, 0.15, 0.3, 0.45, 0.6 lighten steps
+      (let* ((intensity (* 0.15 i))
              (color (if base-bg
                         (color-darken-hex base-bg intensity)
                       "#333333"))
@@ -855,32 +855,59 @@ TODO: add t tag (hashtags)"
   "List of entries in the current thread view.
 Each entry is a plist: (:start <pos> :end <pos> :event <event>).")
 
-(defun nostr--insert-threaded-note (note depth last-child)
-  "Insert a threaded NOTE at DEPTH.  LAST-CHILD controls drawing └ or ├."
+(defun nostr--build-prefix (depth open-branches last-child last-prefix)
+  "Return a threaded prefix string.
+DEPTH is current depth, OPEN-BRANCHES is a list of t/nil indicating
+whether each previous depth has more siblings.  LAST-CHILD determines if
+this entry is the last at its depth.  LAST-PREFIX is the
+pair of prefixes for the last item."
+  (let ((prefix ""))
+    (dotimes (i (1- depth))
+      (setq prefix (concat prefix (if (nth i open-branches) "│  " "   "))))
+    (when (> depth 0)
+      (setq prefix (concat prefix (if last-child (car last-prefix) (cdr last-prefix)))))
+    prefix))
+
+(defun nostr--insert-threaded-note (note depth last-child open-branches)
+  "Insert a threaded NOTE at DEPTH.
+LAST-CHILD determines branching, OPEN-BRANCHES tracks vertical guides."
   (let-alist note
     (let* ((start (point))
            (timestamp (nostr--format-timestamp .created-at))
-           (prefix (concat
-                    (make-string (max 0 (1- depth)) ?\s)
-                    (when (> depth 0)
-                      (concat (if last-child "└─ " "├─ ")))))
+           (prefix (nostr--build-prefix depth open-branches last-child '("└─ " . "├─ ")))
            (face (if (zerop depth) 'bold 'default)))
       (insert (propertize (format "%s%s [%s] [❤ %s]\n"
                                   prefix (or .author .pubkey) timestamp .likes)
                           'face face))
-      (insert (propertize (format "%s%s\n\n"
-                                  (make-string (+ (length prefix)) ?\s)
-                                  .content)
-                          'face 'default))
-      ;; apply overlay face for depth
+      (let* ((blank-prefix (nostr--build-prefix depth open-branches last-child '("   " . "│  ")))
+             (fill-width (- fill-column (length blank-prefix)))
+             (wrapped-content
+              (with-temp-buffer
+                (insert .content)
+                (let ((fill-column fill-width)
+                      (fill-prefix "")
+                      (truncate-lines nil))
+                  (goto-char (point-min))
+                  (while (not (eobp))
+                    (fill-paragraph)
+                    (forward-paragraph))
+                  (split-string (buffer-string) "\n"))))
+             (formatted-content
+              (mapconcat (lambda (line)
+                           (concat blank-prefix line))
+                         wrapped-content
+                         "\n")))
+        (insert (propertize (format "%s\n%s\n" formatted-content blank-prefix)
+                            'face 'default)))
+      ;; Add overlay for depth-based background
       (let* ((end (point))
              (face (when (bound-and-true-p nostr-thread-depth-faces)
                      (aref nostr-thread-depth-faces
-                           (mod depth (length nostr-thread-depth-faces))))))
+                           (mod depth (length nostr-thread-depth-faces)))))
+             (ov (make-overlay start end)))
         (when face
-          (let ((ov (make-overlay start end)))
-            (overlay-put ov 'face face)
-            (overlay-put ov 'nostr-thread-entry t))))
+          (overlay-put ov 'face face)
+          (overlay-put ov 'nostr-thread-entry t)))
       (push `(:start ,start :end ,(point) :event ,note) nostr--thread-entries))))
 
 (defvar-local nostr--thread-highlight-overlay nil
@@ -936,8 +963,9 @@ Each entry is a plist: (:start <pos> :end <pos> :event <event>).")
   (let ((entry (nostr--thread-entry-at-point)))
     (plist-get entry :event)))
 
-(defun nostr--build-thread-tree (parent-id &optional depth)
-  "Recursively build a thread tree starting from PARENT-ID at DEPTH."
+(defun nostr--build-thread-tree (parent-id &optional depth open-branches)
+  "Recursively build a thread from PARENT-ID at DEPTH.
+OPEN-BRANCHES is a list of booleans tracking which depths are still active."
   (let ((replies (nostr--fetch-replies-from-db parent-id))
         (depth (or depth 1)))
     (cl-loop
@@ -945,12 +973,10 @@ Each entry is a plist: (:start <pos> :end <pos> :event <event>).")
      for row = (nth i replies)
      for last = (= i (1- (length replies)))
      do (let* ((event (nostr--event-row-to-alist row))
-               (event-id (alist-get 'id event)))
-          (unless (alist-get 'name event)
-            (debug-message "fetching metadata for event [%s]" event-id)
-            (nostr--subscribe-to-metadata (alist-get 'pubkey event)))
-          (nostr--insert-threaded-note event depth last)
-          (nostr--build-thread-tree event-id (1+ depth))))))
+               (event-id (alist-get 'id event))
+               (child-open-branches (append open-branches (list (not last)))))
+          (nostr--insert-threaded-note event depth last child-open-branches)
+          (nostr--build-thread-tree event-id (1+ depth) child-open-branches)))))
 
 (defun nostr--refresh-thread-view (buf)
   "Refresh the current thread view in BUF.
@@ -961,8 +987,8 @@ ROOT is the thread's root."
            (root-id (alist-get 'id root)))
       (setq-local nostr--thread-entries nil)
       (erase-buffer)
-      (nostr--insert-threaded-note root 0 nil)
-      (nostr--build-thread-tree root-id)
+      (nostr--insert-threaded-note root 0 nil nil)
+      (nostr--build-thread-tree root-id 1 '())
       (goto-char (point-min))
       (when nostr--thread-entries
         (nostr--thread-highlight-entry
