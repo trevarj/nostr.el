@@ -4,6 +4,7 @@
 
 ;; Author: Trevor Arjeski <tmarjeski@gmail.com>
 ;; Keywords: lisp
+;; Version: 0.1
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -41,28 +42,6 @@
                          'string)
              0 64))
 
-;; def convertbits(data, frombits, tobits, pad=True):
-;;     """General power-of-2 base conversion."""
-;;     acc = 0
-;;     bits = 0
-;;     ret = []
-;;     maxv = (1 << tobits) - 1
-;;     max_acc = (1 << (frombits + tobits - 1)) - 1
-;;     for value in data:
-;;         if value < 0 or (value >> frombits):
-;;             return None
-;;         acc = ((acc << frombits) | value) & max_acc
-;;         bits += frombits
-;;         while bits >= tobits:
-;;             bits -= tobits
-;;             ret.append((acc >> bits) & maxv)
-;;     if pad:
-;;         if bits:
-;;             ret.append((acc << (tobits - bits)) & maxv)
-;;     elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
-;;         return None
-;;     return ret
-
 (defun bech32--convert-bits (data from-bits to-bits &optional pad)
   "Convert DATA list from FROM-BITS bit integers to TO-BITS integers.
 Optionally, PAD can be t or nil and will pad with zeros."
@@ -82,16 +61,6 @@ Optionally, PAD can be t or nil and will pad with zeros."
     (when (and pad (> bits 0))
       (push (logand (ash acc (- to-bits bits)) max-val) out))
     (nreverse out)))
-
-;; def bech32_polymod(values):
-;;   GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
-;;   chk = 1
-;;   for v in values:
-;;     b = (chk >> 25)
-;;     chk = (chk & 0x1ffffff) << 5 ^ v
-;;     for i in range(5):
-;;       chk ^= GEN[i] if ((b >> i) & 1) else 0
-;;   return chk
 
 (defun bech32--polymod (values)
   "Computes bech32 checksum for VALUES."
@@ -113,9 +82,6 @@ Optionally, PAD can be t or nil and will pad with zeros."
      values
      1)))
 
-;; def bech32_hrp_expand(s):
-;;   return [ord(x) >> 5 for x in s] + [0] + [ord(x) & 31 for x in s]
-
 (defun bech32--hrp-expand (s)
   "Expand human readable part string S."
   (let ((chars (string-to-list s)))
@@ -124,17 +90,9 @@ Optionally, PAD can be t or nil and will pad with zeros."
      [0]
      (seq-map (lambda (ch) (logand ch 31)) chars))))
 
-;; def bech32_verify_checksum(hrp, data):
-;;   return bech32_polymod(bech32_hrp_expand(hrp) + data) == 1
-
 (defun bech32--verify-checksum (hrp data)
   "Verify the checksum on the HRP and DATA parts of the address string."
   (eq 1 (bech32--polymod (append (bech32--hrp-expand hrp) data))))
-
-;; def bech32_create_checksum(hrp, data):
-;;   values = bech32_hrp_expand(hrp) + data
-;;   polymod = bech32_polymod(values + [0,0,0,0,0,0]) ^ 1
-;;   return [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
 
 (defun bech32--create-checksum (hrp data)
   "Creates a checksum from human-readable part HRP and non-checksum values of DATA.
@@ -149,11 +107,6 @@ Returns a string."
                31))
      '(0 1 2 3 4 5))))
 
-;; def bech32_encode(hrp, data, spec):
-;;     """Compute a Bech32 string given HRP and data values."""
-;;     combined = data + bech32_create_checksum(hrp, data, spec)
-;;     return hrp + '1' + ''.join([CHARSET[d] for d in combined])
-
 (defun bech32-encode (hrp data)
   "Compute a Bech32 string given HRP and DATA as hex string."
   (let* ((data (bech32--convert-bits (bech32--hex-string-decode data) 8 5))
@@ -162,24 +115,6 @@ Returns a string."
      (append (string-to-list hrp)
              '(?1)
              (seq-map (lambda (d) (nth d bech32--charset)) combined)))))
-
-;; def bech32_decode(bech):
-;;     """Validate a Bech32/Bech32m string, and determine HRP and data."""
-;;     if ((any(ord(x) < 33 or ord(x) > 126 for x in bech)) or
-;;             (bech.lower() != bech and bech.upper() != bech)):
-;;         return (None, None, None)
-;;     bech = bech.lower()
-;;     pos = bech.rfind('1')
-;;     if pos < 1 or pos + 7 > len(bech) or len(bech) > 90:
-;;         return (None, None, None)
-;;     if not all(x in CHARSET for x in bech[pos+1:]):
-;;         return (None, None, None)
-;;     hrp = bech[:pos]
-;;     data = [CHARSET.find(x) for x in bech[pos+1:]]
-;;     spec = bech32_verify_checksum(hrp, data)
-;;     if spec is None:
-;;         return (None, None, None)
-;;     return (hrp, data[:-6], spec)
 
 (defun bech32-decode (addr)
   "Validate Bech32 ADDR and determine HRP and data."
