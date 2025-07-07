@@ -655,10 +655,10 @@ Filters SINCE given unix timestamp."
 
 (define-derived-mode nostr-mode tabulated-list-mode "Nostr"
   "Major mode for viewing Nostr notes in a list."
-  (setq tabulated-list-format `[("Author" 20 t . (:right-align nil))
-                                ("Time" ,(length (nostr--format-timestamp 0)) t)
-                                ("Replies" 7 nil . (:right-align t))
-                                ("❤" 3 nil)
+  (setq tabulated-list-format `[("Author" 20 t . (:right-align t))
+                                ("⏲" ,(length (nostr--format-timestamp 0)) t . (:right-align t))
+                                ("↩" 3 nil . (:right-align t))
+                                ("❤" 3 nil . (:right-align t :pad-right 2))
                                 ("Content" 0 nil)])
   (setq tabulated-list-padding 2)
   (hl-line-mode)
@@ -797,8 +797,14 @@ TODO: add t tag (hashtags)"
 (defun nostr-reply-to-note ()
   "Reply to the note at point."
   (interactive)
-  (when-let* ((note (nostr--get-selected-note)))
-    (nostr--compose note)))
+  (let ((note
+         (cond
+          ((eq major-mode 'nostr-mode)
+           (nostr--get-selected-note))
+          ((eq major-mode 'nostr-thread-mode)
+           (nostr--get-selected-thread-note)))))
+    (when note
+      (nostr--compose note))))
 
 (defun nostr-create-note ()
   "Start composing a new note."
@@ -810,17 +816,50 @@ TODO: add t tag (hashtags)"
     (define-key map (kbd "g") #'nostr-refresh)
     (define-key map (kbd "?") #'nostr-ui-popup-actions)
     (define-key map (kbd "r") #'nostr-reply-to-note)
+    (define-key map (kbd "C-n") #'nostr-thread-next-entry)
+    (define-key map (kbd "C-p") #'nostr-thread-prev-entry)
     map)
   "Keymap for `nostr-thread-mode'.")
 
+(defvar-local nostr--thread-root nil
+  "The current thread's root note.")
+
 (define-derived-mode nostr-thread-mode special-mode "Nostr-Thread"
   "Major mode for viewing a Nostr thread with multi-line entries."
-  (setq-local truncate-lines nil))
+  (setq-local truncate-lines nil
+              nostr--thread-root nil
+              nostr-thread-entries nil
+              nostr-thread-highlight-overlay nil)
+  (add-hook 'nostr-thread-mode-hook #'nostr--make-depth-faces))
+
+(defvar nostr-thread-depth-faces nil
+  "List of hl-line based faces for different thread depths.")
+
+(defun nostr--make-depth-faces ()
+  "Generate hl-line derived faces with varying background intensities."
+  (let* ((base-bg (face-background 'default nil))
+         (num-depths 5)
+         (faces nil))
+    (dotimes (i num-depths)
+      (let* ((intensity (* 0.15 i))    ; 0.0, 0.15, 0.3, 0.45, 0.6 lighten steps
+             (color (if base-bg
+                        (color-darken-hex base-bg intensity)
+                      "#333333"))
+             (face-name (intern (format "nostr-thread-depth-%d" i))))
+        (make-face face-name)
+        (set-face-attribute face-name nil :background color :extend t)
+        (push face-name faces)))
+    (setq nostr-thread-depth-faces (vconcat (nreverse faces)))))
+
+(defvar-local nostr--thread-entries nil
+  "List of entries in the current thread view.
+Each entry is a plist: (:start <pos> :end <pos> :event <event>).")
 
 (defun nostr--insert-threaded-note (note depth last-child)
   "Insert a threaded NOTE at DEPTH.  LAST-CHILD controls drawing └ or ├."
   (let-alist note
-    (let* ((timestamp (nostr--format-timestamp .created-at))
+    (let* ((start (point))
+           (timestamp (nostr--format-timestamp .created-at))
            (prefix (concat
                     (make-string (max 0 (1- depth)) ?\s)
                     (when (> depth 0)
@@ -832,7 +871,70 @@ TODO: add t tag (hashtags)"
       (insert (propertize (format "%s%s\n\n"
                                   (make-string (+ (length prefix)) ?\s)
                                   .content)
-                          'face 'default)))))
+                          'face 'default))
+      ;; apply overlay face for depth
+      (let* ((end (point))
+             (face (when (bound-and-true-p nostr-thread-depth-faces)
+                     (aref nostr-thread-depth-faces
+                           (mod depth (length nostr-thread-depth-faces))))))
+        (when face
+          (let ((ov (make-overlay start end)))
+            (overlay-put ov 'face face)
+            (overlay-put ov 'nostr-thread-entry t))))
+      (push `(:start ,start :end ,(point) :event ,note) nostr--thread-entries))))
+
+(defvar-local nostr--thread-highlight-overlay nil
+  "Overlay to highlight the current entry.")
+
+(defun nostr--thread-highlight-entry (entry)
+  "Highlight ENTRY plist in the buffer."
+  (let ((start (plist-get entry :start))
+        (end (plist-get entry :end)))
+    (unless nostr--thread-highlight-overlay
+      (setq nostr--thread-highlight-overlay (make-overlay start end)))
+    (move-overlay nostr--thread-highlight-overlay start end)
+    (overlay-put nostr--thread-highlight-overlay 'face 'highlight)))
+
+(defun nostr--thread-entry-at-point ()
+  "Return the entry plist at point."
+  (cl-find-if (lambda (e)
+                (let ((start (plist-get e :start))
+                      (end (plist-get e :end)))
+                  (and (>= (point) start) (< (point) end))))
+              nostr--thread-entries))
+
+(defun nostr-thread-next-entry ()
+  "Move to next entry."
+  (interactive)
+  (let ((pos (point)))
+    (cl-loop for e in (sort
+                       nostr--thread-entries
+                       (lambda (a b) (< (plist-get a :start) (plist-get b :start))))
+             when (> (plist-get e :start) pos)
+             return (progn
+                      (goto-char (plist-get e :start))
+                      (nostr--thread-highlight-entry e)))))
+
+(defun nostr-thread-prev-entry ()
+  "Move to previous entry."
+  (interactive)
+  (let ((pos (point)))
+    (cl-loop for e in (sort
+                       nostr--thread-entries
+                       (lambda (a b) (< (plist-get a :start) (plist-get b :start))))
+             when (< (plist-get e :start) pos)
+             maximize (plist-get e :start) into best
+             finally (when best
+                       (goto-char best)
+                       (let ((entry (cl-find-if (lambda (e)
+                                                  (= (plist-get e :start) best))
+                                                nostr--thread-entries)))
+                         (nostr--thread-highlight-entry entry))))))
+
+(defun nostr--get-selected-thread-note ()
+  "Return the note/event for the currently highlighted entry."
+  (let ((entry (nostr--thread-entry-at-point)))
+    (plist-get entry :event)))
 
 (defun nostr--build-thread-tree (parent-id &optional depth)
   "Recursively build a thread tree starting from PARENT-ID at DEPTH."
@@ -857,10 +959,14 @@ ROOT is the thread's root."
     (let* ((inhibit-read-only t)
            (root nostr--thread-root)
            (root-id (alist-get 'id root)))
+      (setq-local nostr--thread-entries nil)
       (erase-buffer)
       (nostr--insert-threaded-note root 0 nil)
       (nostr--build-thread-tree root-id)
-      (goto-char (point-min)))))
+      (goto-char (point-min))
+      (when nostr--thread-entries
+        (nostr--thread-highlight-entry
+         (car (last nostr--thread-entries)))))))
 
 (defun nostr-open-thread ()
   "Open multi-line thread view for the selected note."
