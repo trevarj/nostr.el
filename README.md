@@ -15,4 +15,5 @@ WIP
 
 ## Nice-to-haves
 - [ ] Display images inline in thread view
+- [ ] Notifications for quotes/likes/mentions
 - [ ] Anything else :D

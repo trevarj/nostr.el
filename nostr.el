@@ -68,7 +68,17 @@ Which contains a hex or nsec private key."
   :type '(choice (const nostril))
   :group 'nostr)
 
-(defconst nostr-buffer-name "*Nostr*")
+(defcustom nostr-since-timeframe 'one-week-ago
+  "Timestamp or symbolic timeframe to use for the Nostr `since` filter."
+  :type '(choice
+          (number :tag "Exact UNIX timestamp")
+          (const :tag "One hour ago" one-hour-ago)
+          (const :tag "One day ago" one-day-ago)
+          (const :tag "One week ago" one-week-ago)
+          (const :tag "One month ago" one-month-ago))
+  :group 'nostr)
+
+(defconst nostr--buffer-name "*Nostr*")
 (defconst nostr--kind-metadata 0)
 (defconst nostr--kind-text-note 1)
 (defconst nostr--kind-contacts 3)
@@ -81,8 +91,47 @@ Which contains a hex or nsec private key."
 (defvar nostr--relay-connections (make-hash-table :test 'equal)
   "Global map of relay URLs to their websocket connections.")
 
+(defvar nostr--primary-relay (car nostr-relay-urls)
+  "The first (primary) relay that will be used in relay recommendations.")
+
 (defvar nostr--subscriptions (make-hash-table :test 'equal)
   "Global map of current subscriptions.")
+
+(defvar nostr--current-pubkey nil
+  "The currently loaded account pubkey.")
+
+(defvar nostr--req-contacts-notes-id "contacts-notes")
+(defvar nostr--req-contacts-metadata-id "contacts-metadata")
+(defvar nostr--req-replies-id-prefix "replies")
+(defvar nostr--req-metadata-id-prefix "metadata")
+(defvar nostr--req-replies-id-prefix "replies")
+(defvar nostr--req-personal-id "personal")
+
+(defun nostr--since-timestamp-from-timeframe (timeframe)
+  "Convert TIMEFRAME symbol to a UNIX timestamp."
+  (let ((now (float-time)))
+    (truncate
+     (pcase timeframe
+       ('one-hour-ago (- now (* 60 60)))
+       ('one-day-ago (- now (* 60 60 24)))
+       ('one-week-ago (- now (* 60 60 24 7)))
+       ('one-month-ago (- now (* 60 60 24 7 4)))
+       ((and (pred (numberp))
+             (pred (<= now)))
+        (- now timeframe))
+       (_ (- now (* 60 60 24)))))))
+
+(defun nostr-select-since-timeframe ()
+  "Prompt the user to select a since timeframe."
+  (interactive)
+  (let* ((choice (intern
+                  (completing-read
+                   "Select Nostr timeframe: "
+                   '("now" "one-hour-ago" "one-day-ago" "one-week-ago")))))
+    (if (or (symbolp choice) (numberp choice))
+        (setq nostr-since-timeframe choice)
+      (message "Timeframe should be a symbol or a timestamp."))
+    (message "Timeframe set to: %s" choice)))
 
 (defun debug-message (fmt &rest args)
   "Wraps call to `(message FMT ARGS)' so output can be toggled on/off."
@@ -102,8 +151,9 @@ Which contains a hex or nsec private key."
 
 (defun nostr--load-pubkey ()
   "Get public key from nostr backend."
-  (pcase nostr-backend
-    ('nostril (nostr--nostril-get-pubkey))))
+  (setq nostr--current-pubkey
+        (pcase nostr-backend
+          ('nostril (nostr--nostril-get-pubkey)))))
 
 (defun nostr--nostril-get-pubkey ()
   "Call to nostril and get pubkey from a random event."
@@ -137,17 +187,17 @@ Which contains a hex or nsec private key."
   "Initialize the database scheme on the database DB."
   (emacsql nostr--db
            [:create-table events
-            ([(id :primary-key)
-              pubkey
-              (created_at integer)
-              (kind integer)
-              tags
-              content
-              sig
-              relay
-              reply_id
-              (reply_count integer :default 0)
-              root_id])])
+                          ([(id :primary-key)
+                            pubkey
+                            (created_at integer)
+                            (kind integer)
+                            tags
+                            content
+                            sig
+                            relay
+                            reply_id
+                            (reply_count integer :default 0)
+                            root_id])])
   (emacsql nostr--db
            [:create-trigger
             increment_reply_count_on_insert
@@ -169,23 +219,20 @@ Which contains a hex or nsec private key."
   (emacsql nostr--db [:create-index idx_events_root_id :on events ([root_id])])
   (emacsql nostr--db
            [:create-table users
-            ([(pubkey :primary-key)
-              name
-              about
-              picture])])
+                          ([(pubkey :primary-key)
+                            name
+                            about
+                            picture])])
   (emacsql nostr--db [:create-table follows ([pubkey contact] (:unique [pubkey contact]))])
   (emacsql nostr--db [:create-index idx_follows_pubkey :on follows ([pubkey])])
-  (emacsql nostr--db
-           [:create-table relays
-            ([(url :primary-key)
-              (last_connected_at integer)])])
+
   (emacsql nostr--db
            [:create-table reactions
-            ([(id :primary-key)
-              pubkey
-              (created_at integer)
-              event_id
-              content])])
+                          ([(id :primary-key)
+                            pubkey
+                            (created_at integer)
+                            event_id
+                            content])])
   (emacsql nostr--db
            [:create-index idx_reactions_event_id :on reactions ([event_id])]))
 
@@ -211,20 +258,20 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
            (reply-id (car-safe (plist-get parsed-tags :reply))))
       (emacsql nostr--db
                [:insert :into events
-                :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11]
-                :on-conflict ([id])
-                :do :update
-                :set [(= pubkey $i12)
-                      (= created_at $i13)
-                      (= kind $i14)
-                      (= tags $i15)
-                      (= content $i16)
-                      (= sig $i17)
-                      (= relay $i18)
-                      (= reply_id $i19)
-                      (= reply_count $i20)
-                      (= root_id $i21)]
-                :where (> $i13 $i22)]
+                        :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9 $s10 $s11]
+                        :on-conflict ([id])
+                        :do :update
+                        :set [(= pubkey $i12)
+                              (= created_at $i13)
+                              (= kind $i14)
+                              (= tags $i15)
+                              (= content $i16)
+                              (= sig $i17)
+                              (= relay $i18)
+                              (= reply_id $i19)
+                              (= reply_count $i20)
+                              (= root_id $i21)]
+                        :where (> $i13 $i22)]
                .id .pubkey .created_at .kind .tags .content .sig relay
                reply-id 0 root-id
                'excluded:pubkey 'excluded:created_at 'excluded:kind 'excluded:tags
@@ -238,34 +285,35 @@ TAGS is a list of e-tags: (\"e\" <id> <relay?> <marker?>)."
                 (event-id (cadr e-tag)))
       (emacsql nostr--db
                [:insert :into reactions
-                :values [$s1 $s2 $s3 $s4 $s5]
-                :on-conflict ([id]) :do :nothing]
+                        :values [$s1 $s2 $s3 $s4 $s5]
+                        :on-conflict ([id]) :do :nothing]
                .id .pubkey .created_at event-id .content))))
 
 (defun nostr--store-follows (pubkey tags)
   "Parse TAGS and store PUBKEYs follows in database."
   ;; delete old follows for this pubkey and re-insert
-  (emacsql nostr--db
-           [:delete-from follows :where (= pubkey $s1)]
-           pubkey)
-  (dolist (tag tags)
-    (when (and (equal (car tag) "p")
-               (stringp (cadr tag)))
-      (emacsql nostr--db
-               [:insert-or-ignore :into follows :values [$s1 $s2]]
-               pubkey (cadr tag)))))
+  (emacsql-with-transaction nostr--db
+    (emacsql nostr--db
+             [:delete-from follows :where (= pubkey $s1)]
+             pubkey)
+    (dolist (tag tags)
+      (when (and (equal (car tag) "p")
+                 (stringp (cadr tag)))
+        (emacsql nostr--db
+                 [:insert-or-ignore :into follows :values [$s1 $s2]]
+                 pubkey (cadr tag))))))
 
 (defun nostr--store-metadata (pubkey content)
   "Parse CONTENT from metadata event for PUBKEY."
   (let-alist (ignore-errors (json-parse-string content :object-type 'alist))
     (emacsql nostr--db
              [:insert-or-replace :into users
-              :values [$s1 $s2 $s3 $s4]]
+                                 :values [$s1 $s2 $s3 $s4]]
              pubkey .name .about .picture)))
 
-(defun nostr--fetch-text-notes (since limit root-only)
-  "Gets all text notes and from the database SINCE given timestamp and LIMIT.
-Includes reply count.  If ROOT-ONLY is t only root notes are returned."
+(defun nostr--fetch-follows-notes (me since limit root-only)
+  "Gets all text notes from follows of ME pubkey SINCE given timestamp and LIMIT.
+If ROOT-ONLY is t only root notes are returned."
   (emacsql nostr--db
            `[:select
              [events:id
@@ -279,27 +327,29 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
               events:reply_count
               events:root_id
               [:select [(funcall count *)]
-               :from reactions
-               :where (= event_id events:id)]]
+                       :from reactions
+                       :where (= event_id events:id)]]
              :from events
+             :inner-join follows :on (= events:pubkey follows:contact)
              :left-join users :on (= events:pubkey users:pubkey)
              :where (and (= events:kind 1)
-                         (>= events:created_at $s1)
+                         (>= events:created_at 2)
+                         (= follows:pubkey $s3)
                          ,(if root-only
                               '(is events:root_id nil)
                             'true))
              :order-by [(desc events:created_at)]
              :limit $s1]
-           (or limit 50) (or since 0)))
+           (or limit 50) (or since 0) me))
 
 (defun nostr--fetch-event-ids (limit)
   "Fetch latest LIMIT number of events."
   (seq-map #'car
            (emacsql nostr--db
                     [:select [events:id]
-                     :from events
-                     :order-by [(desc events:created_at)]
-                     :limit $s1]
+                             :from events
+                             :order-by [(desc events:created_at)]
+                             :limit $s1]
                     limit)))
 
 (defun nostr--fetch-replies-from-db (note-id)
@@ -317,8 +367,8 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
              events:reply_count
              events:root_id
              [:select [(funcall count *)]
-              :from reactions
-              :where (= event_id events:id)]]
+                      :from reactions
+                      :where (= event_id events:id)]]
             :from events
             :left-join users :on (= events:pubkey users:pubkey)
             :where (or (and (= events:reply_id $s1)
@@ -344,7 +394,7 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
       (`("EVENT" ,sub-id ,event)        ; a regular nostr event
        (nostr--handle-event relay sub-id event))
       (`("EOSE" ,sub-id)                ; end of stored events
-       (nostr--handle-eose sub-id))
+       (nostr--handle-eose relay sub-id))
       (`("NOTICE" ,msg)                 ; human readable error message for client
        (nostr--handle-notice msg))
       (`("CLOSED" ,sub-id ,msg)         ; subscription closed server-side
@@ -387,28 +437,27 @@ Includes reply count.  If ROOT-ONLY is t only root notes are returned."
        (reply-id . ,reply-id) (replies . ,replies) (root-id . ,root-id)
        (likes . ,likes)))))
 
-(defun nostr--handle-eose (sub-id)
-  "Handles EOSE for SUB-ID.
+(defun nostr--handle-eose (relay sub-id)
+  "Handles EOSE for SUB-ID on RELAY.
 Sort of a chain reaction where some subscriptions start only after
 others complete."
   (debug-message "EOSE for subscription %s" sub-id)
   (pcase sub-id
     ((pred (string= nostr--req-contacts-notes-id))
      ;; ready to fetch reactions and likes for recent notes
-     (maphash
-      (lambda (relay ws)
-        (when (websocket-openp ws)
-          (debug-message "Opening subscription: %s" sub-id)
-          (nostr--subscribe relay ws
-                            (list
-                             (nostr--req-replies-and-reactions
-                              (nostr--fetch-event-ids 100) 0)))))
-      nostr--relay-connections))
+     (let ((ws (gethash relay nostr--relay-connections)))
+       (when (websocket-openp ws)
+         (debug-message "Opening subscription: %s" sub-id)
+         (nostr--subscribe relay ws
+                           (list
+                            (nostr--req-replies-and-reactions
+                             (nostr--fetch-event-ids 100)))))))
     ((pred (string-prefix-p nostr--req-replies-id-prefix))
-     (nostr--unsubscribe sub-id)
+     (nostr--unsubscribe relay sub-id)
      (nostr-refresh))
     ((pred (string-prefix-p nostr--req-metadata-id-prefix))
-     (nostr--unsubscribe sub-id)
+     (nostr--unsubscribe relay sub-id)
+     (nostr-refresh)
      ;; TODO: add refresh to thread view
      )))
 
@@ -444,7 +493,7 @@ others complete."
               (debug-message "WebSocket opened: %s" url)
               (nostr--subscribe
                url ws
-               (let ((pubkey (nostr--load-pubkey)))
+               (let ((pubkey nostr--current-pubkey))
                  (list (nostr--req-personal pubkey)
                        (nostr--req-contacts-notes pubkey)
                        (nostr--req-contacts-metadata pubkey)))))
@@ -478,23 +527,21 @@ others complete."
       (debug-message "Sending subscription %s to relay %s" json relay)
       (websocket-send-text ws json))))
 
-(defun nostr--unsubscribe (sub-id)
-  "Unsubscribe from SUB-ID over all websocket connections."
-  (maphash
-   (lambda (_url ws)
-     (when (websocket-openp ws)
-       (debug-message "Closing subscription: %s" sub-id)
-       (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))))
-   nostr--relay-connections)
-  (remhash sub-id nostr--subscriptions))
+(defun nostr--unsubscribe (relay sub-id)
+  "Unsubscribe from SUB-ID on RELAY."
+  (let ((ws (gethash relay nostr--relay-connections)))
+    (when (websocket-openp ws)
+      (debug-message "Closing subscription: %s" sub-id)
+      (websocket-send-text ws (json-encode `["CLOSE" ,sub-id]))
+      (remhash sub-id nostr--subscriptions))))
 
 (defun nostr--subscribe-to-replies (note-id)
   "Subscribe to events that reference NOTE-ID.
 Usually the root note that the user will click to open."
   (let ((req (nostr--req-replies-and-reactions `(,note-id))))
     (maphash
-     (lambda (url ws)
-       (nostr--subscribe url ws (list req)))
+     (lambda (relay ws)
+       (nostr--subscribe relay ws (list req)))
      nostr--relay-connections)))
 
 (defun nostr--subscribe-to-metadata (pubkey)
@@ -504,11 +551,6 @@ Usually the root note that the user will click to open."
      (lambda (url ws)
        (nostr--subscribe url ws (list req)))
      nostr--relay-connections)))
-
-(defun nostr--unsubscribe (ws sub-id)
-  "Sends CLOSE message to unsubscribe from subscription SUB-ID on WS."
-  (debug-message "Unsubscribing from subscription %s" sub-id)
-  (websocket-send-text ws (json-encode `["CLOSE" ,sub-id])))
 
 (defun nostr--build-event (kind privkey tags content)
   "Delegate event creation to `nostr-backend'.
@@ -547,7 +589,6 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
 
 ;;; Requests
 
-(defvar nostr--req-personal-id "personal")
 (defun nostr--req-personal (pubkey)
   "Build a request for PUBKEY's metadata, follows and personal feed."
   `["REQ" ,nostr--req-personal-id
@@ -555,22 +596,22 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
      ("authors" . (,pubkey))            ; pubkey's posts
      ("#p" . (,pubkey)))]) ; mentions of pubkey
 
-(defvar nostr--req-contacts-notes-id "contacts-notes")
 (defun nostr--req-contacts-notes (pubkey)
-  "Build a request for PUBKEY to get its contacts' notes."
+  "Build a request for PUBKEY to get its contacts' notes.
+Filter includes SINCE timestamp which should be the relay's last fetched
+time."
   `["REQ" ,nostr--req-contacts-notes-id
     (("kinds" . (,nostr--kind-text-note))
-     ("authors" . ,(nostr--fetch-contacts pubkey))
+     ("authors" . ,(nostr--fetch-follows pubkey))
+     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-filter))
      ("limit" . 100))])
 
-(defvar nostr--req-contacts-metadata-id "contacts-metadata")
 (defun nostr--req-contacts-metadata (pubkey)
   "Build a request for PUBKEY to get its contacts' metadata."
   `["REQ" ,nostr--req-contacts-metadata-id
     (("kinds" . (,nostr--kind-metadata))
-     ("authors" . ,(nostr--fetch-contacts pubkey)))])
+     ("authors" . ,(nostr--fetch-follows pubkey)))])
 
-(defvar nostr--req-metadata-id-prefix "metadata")
 (defun nostr--req-metadata (pubkeys)
   "Build a request to fetch metadata for PUBKEYS."
   `["REQ" ,(format "%s-%s" nostr--req-metadata-id-prefix
@@ -578,15 +619,14 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
     (("kinds" . (,nostr--kind-metadata))
      ("authors" . ,pubkeys))])
 
-(defvar nostr--req-replies-id-prefix "replies")
-(defun nostr--req-replies-and-reactions (event-ids since)
+(defun nostr--req-replies-and-reactions (event-ids)
   "Build a subscription REQ to get replies and reactions to EVENT-IDS.
 Filters SINCE given unix timestamp."
   `["REQ" ,(format "%s-%s" nostr--req-replies-id-prefix
                    (md5 (prin1-to-string event-ids)))
     (("kinds" . (,nostr--kind-text-note ,nostr--kind-reaction))
      ("#e" . ,event-ids)
-     ("since" . ,since)
+     ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-filter))
      ("limit" . 100))])
 
 (defvar nostr--req-metadata-id-prefix "metadata")
@@ -628,32 +668,29 @@ Filters SINCE given unix timestamp."
   "Replace newlines with spaces in CONTENT for compact display."
   (replace-regexp-in-string "\n" " " content))
 
-(defun nostr--one-week-ago ()
-  "Unix timestamp from one week ago."
-  (- (truncate (float-time)) (* 7 24 60 60)))
-
 (defun nostr-refresh ()
   "Refresh the Nostr note list."
   (interactive)
-  (let ((inhibit-read-only t)
-        (events (nostr--fetch-text-notes nil 100 t)))
-    (setq-local
-     tabulated-list-entries
-     (seq-map
-      (lambda (e)
-        (let ((event (nostr--event-row-to-alist e)))
-          (let-alist event
-            (list
-             ;; the key which is also the entire row
-             event
-             ;; displayed content
-             (vector (or .author .pubkey)
-                     (nostr--format-timestamp .created-at)
-                     (number-to-string .replies)
-                     (number-to-string .likes)
-                     (nostr--format-content .content))))))
-      events))
-    (tabulated-list-print t)))
+  (when (string= (buffer-name (current-buffer)) nostr--buffer-name)
+    (let ((inhibit-read-only t)
+          (events (nostr--fetch-follows-notes nostr--current-pubkey nil 100 t)))
+      (setq-local
+       tabulated-list-entries
+       (seq-map
+        (lambda (e)
+          (let ((event (nostr--event-row-to-alist e)))
+            (let-alist event
+              (list
+               ;; the key which is also the entire row
+               event
+               ;; displayed content
+               (vector (or .author .pubkey)
+                       (nostr--format-timestamp .created-at)
+                       (number-to-string .replies)
+                       (number-to-string .likes)
+                       (nostr--format-content .content))))))
+        events))
+      (tabulated-list-print t))))
 
 (transient-define-prefix nostr-ui-popup-actions ()
   "Actions for a selected Nostr note."
@@ -698,11 +735,20 @@ Optionally pass REPLY-CONTEXT (reply-to event) to
 (defun nostr--build-note-tags (reply-to-note)
   "Build tags for a note using REPLY-TO-NOTE tags.
 TODO: add t tag (hashtags)"
+  ;; NIP-10
   (when reply-to-note
     (let-alist reply-to-note
-      `(("e" ,(or .root-id .id) "" "root")
-        ("e" ,.id "" "reply")
-        ("p" ,.pubkey)))))
+      (let ((tags '()))
+        (cond
+         (.root-id
+          ;; reply to a reply
+          (push `("e" ,.root-id ,nostr--primary-relay "root") tags)
+          (push `("e" ,.id ,nostr--primary-relay "reply") tags))
+         (t
+          ;; reply to root
+          (push `("e" ,.id ,nostr--primary-relay "root") tags)))
+        (push `("p" ,.pubkey) tags)
+        (nreverse tags)))))
 
 (defun nostr--get-note-buffer-content ()
   "Return note content excluding comment lines."
@@ -792,9 +838,10 @@ TODO: refactor this so we can hit `g' on a thread and reload."
         (nostr-thread-mode)
         (setq-local nostr--thread-root note-id)
         (nostr--insert-threaded-note root 0 nil)
-        (nostr--build-thread-tree (alist-get 'id root))))
-    (goto-char (point-min))
-    (select-window (display-buffer buf))))
+        (nostr--build-thread-tree (alist-get 'id root)))
+      (goto-char (point-min))
+      (select-window (display-buffer buf))
+      (nostr--subscribe-to-replies note-id))))
 
 (defun nostr-open-thread ()
   "Open multi-line thread view for the selected note."
@@ -806,11 +853,12 @@ TODO: refactor this so we can hit `g' on a thread and reload."
 (defun nostr-open ()
   "Open the Nostr client buffer and display notes."
   (interactive)
+  (nostr--load-pubkey)
   (nostr--open-db nostr-db-path)
   (nostr--connect-to-all-relays)
-  (let ((buf (get-buffer-create nostr-buffer-name)))
+  (let ((buf (get-buffer-create nostr--buffer-name)))
     (with-current-buffer buf
-      (add-hook 'kill-buffer-hook #'nostr--cleanup nil t)
+      (add-hook 'kill-buffer-hook #'nostr-close nil t)
       (nostr-mode)
       (nostr-refresh))
     (switch-to-buffer buf)))

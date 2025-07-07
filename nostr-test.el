@@ -102,8 +102,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select [name about picture]
-                              :from users
-                              :where (= pubkey "pubkey1")])
+                                      :from users
+                                      :where (= pubkey "pubkey1")])
                     '(("Alice" "Dev" "http://img")))))))
 
 (ert-deftest nostr--handle-event-contacts ()
@@ -139,8 +139,8 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                              :from events
-                              :where (= id "note123")])
+                                      :from events
+                                      :where (= id "note123")])
                     (list (mapcar #'cdr event)))))))
 
 (ert-deftest nostr--handle-event-unknown-kind ()
@@ -157,11 +157,11 @@
      (nostr--handle-event "r" "sub" event)
      (should (equal (emacsql nostr--db
                              [:select *
-                              :from events
-                              :where (= id "xyz")])
+                                      :from events
+                                      :where (= id "xyz")])
                     nil)))))
 
-(ert-deftest nostr--fetch-text-notes ()
+(ert-deftest nostr--fetch-follows-notes ()
   "Test that text notes are returned with proper joins and filters."
   (with-temp-nostr-db
    (let ((root-event '((id . "root123")
@@ -179,11 +179,22 @@
                         (tags . (("e" "root123" "" "root")))
                         (content . "Reply content")
                         (sig . "sig")
-                        (relay . "r"))))
+                        (relay . "r")))
+         (metadata-event '((id . "e1")
+                           (pubkey . "root_pubkey")
+                           (created_at . 1000)
+                           (kind . 0)
+                           (tags . [])
+                           (content . "{\"name\":\"Alice\",\"about\":\"Dev\",\"picture\":\"http://img\"}")
+                           (sig . "sig")
+                           (relay . "r"))))
+     (nostr--store-follows "me" '(("p" "root_pubkey")
+                                  ("p" "reply_pubkey")))
      (nostr--handle-event "r" "" root-event)
      (nostr--handle-event "r" "" reply-event)
-     (let ((all (nostr--fetch-text-notes nil 10 nil))
-           (roots (nostr--fetch-text-notes nil 10 t)))
+     (nostr--handle-event "r" "" metadata-event)
+     (let ((all (nostr--fetch-follows-notes "me" nil 10 nil))
+           (roots (nostr--fetch-follows-notes "me" nil 10 t)))
        (should (= (length all) 2))
        (message "%s" roots)
        (should (= (length roots) 1))
@@ -202,16 +213,17 @@
 
 (ert-deftest nostr--build-note-tags-top-level ()
   "Replying to a root level note (no tags)."
+  (setq-local nostr--primary-relay "")
   (let* ((note '((id . "abc123") (pubkey . "bobpubkey") (tags . nil)
                  (root-id . nil) (reply-id . nil)))
          (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "abc123" "" "root")
-                     ("e" "abc123" "" "reply")
                      ("p" "bobpubkey"))))))
 
 (ert-deftest nostr--build-note-tags-threaded ()
   "Replying to a note that has a root e-tag."
+  (setq-local nostr--primary-relay "")
   (let* ((note '((id . "reply2")
                  (pubkey . "carolpubkey")
                  (tags . (("e" "root1" "" "root")
@@ -227,6 +239,7 @@
 
 (ert-deftest nostr--build-note-tags-no-root-but-e-tag ()
   "Replying to a note that has e-tags but no 'root' marker."
+  (setq-local nostr--primary-relay "")
   (let* ((note '((id . "ghi789")
                  (pubkey . "pubkey")
                  (created_at . 1020)
@@ -238,7 +251,6 @@
          (tags (nostr--build-note-tags note)))
     (should (equal tags
                    '(("e" "ghi789" "" "root")
-                     ("e" "ghi789" "" "reply")
                      ("p" "pubkey"))))))
 
 (ert-deftest nostr--build-note-tags-nil-input ()
