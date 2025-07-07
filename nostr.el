@@ -5,6 +5,12 @@
 ;; Author: Trevor Arjeski <tmarjeski@gmail.com>
 ;; Keywords: lisp, nostr
 ;; Version: 0.1
+;; Package-Requires: ((emacs "30.1")
+;;                    (bech32 "0.1")
+;;                    (transient "0.3")
+;;                    (emacsql "3.1.1")
+;;                    (emacsql-sqlite "1.0.0")
+;;                    (websocket "1.13"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
