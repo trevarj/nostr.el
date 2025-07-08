@@ -2,7 +2,9 @@
 - [x] Fix threaded view
 - [x] Only subscribe to what we don't have - using 'since' filters (made timeframe like elfeed kinda)
 - [x] Allow actions on notes in a thread
-- [ ] React on a note
+- [-] React on a note
+      - Need to adjust refreshing on reacting
+      - Need to add action to show who reacted to a note
 - [ ] View a profile
 - [ ] Action on a profile (follow/unfollow)
 - [x] Clean up thread UI - is tree view actually working?

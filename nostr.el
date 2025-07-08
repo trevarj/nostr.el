@@ -111,7 +111,6 @@ Which contains a hex or nsec private key."
 (defvar nostr--req-contacts-metadata-id "contacts-metadata")
 (defvar nostr--req-replies-id-prefix "replies")
 (defvar nostr--req-metadata-id-prefix "metadata")
-(defvar nostr--req-replies-id-prefix "replies")
 (defvar nostr--req-personal-id "personal")
 
 (defun nostr--since-timestamp-from-timeframe (timeframe)
@@ -325,11 +324,13 @@ If ROOT-ONLY is t only root notes are returned."
            `[:select
              [events:id
               events:pubkey
+              events:kind
               users:name
               users:picture
               events:created_at
               events:content
               events:tags
+              events:relay
               events:reply_id
               events:reply_count
               events:root_id
@@ -365,11 +366,13 @@ If ROOT-ONLY is t only root notes are returned."
            [:select
             [events:id
              events:pubkey
+             events:kind
              users:name
              users:picture
              events:created_at
              events:content
              events:tags
+             events:relay
              events:reply_id
              events:reply_count
              events:root_id
@@ -437,10 +440,10 @@ If ROOT-ONLY is t only root notes are returned."
 (defun nostr--event-row-to-alist (row)
   "Convert event ROW to a alist or nil if it doesn't match."
   (pcase row
-    (`(,id ,pubkey ,author ,pic ,created-at ,content ,tags
-           ,reply-id ,replies ,root-id ,likes)
-     `((id . ,id) (pubkey . ,pubkey) (author . ,author) (pic . ,pic)
-       (created-at . ,created-at) (content . ,content) (tags . ,tags)
+    (`(,id ,pubkey ,kind ,author ,pic ,created-at ,content ,tags
+           ,relay ,reply-id ,replies ,root-id ,likes)
+     `((id . ,id) (pubkey . ,pubkey) (kind . ,kind) (author . ,author) (pic . ,pic)
+       (created-at . ,created-at) (content . ,content) (tags . ,tags) (relay . ,relay)
        (reply-id . ,reply-id) (replies . ,replies) (root-id . ,root-id)
        (likes . ,likes)))))
 
@@ -563,6 +566,16 @@ Using KIND, PRIVKEY, TAGS and CONTENT."
   (pcase nostr-backend
     ('nostril (nostr--nostril-build-event kind privkey tags content))))
 
+(defun nostr--send-event (event)
+  "Send an EVENT over all relay connections."
+  (maphash
+   (lambda (url ws)
+     (when (websocket-openp ws)
+       (websocket-send-text ws event)
+       (debug-message "event sent to relay %s" url)))
+   nostr--relay-connections)
+  (message "Event sent!"))
+
 (defun nostr--nostril-flatten-tags (tags)
   "Convert nested TAGS list into a flat list of --tagn args for nostril."
   (apply #'append
@@ -587,17 +600,12 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
             output
           (debug-message "couldn't create event using nostril"))))))
 
-(defun nostr--send-event (ws event)
-  "Sends EVENT object as json to WS."
-  (debug-message "Sending event %s to relay %s" event ws)
-  (websocket-send-text ws (json-encode `["EVENT" ,event])))
-
 ;;; Requests
 
 (defun nostr--req-personal (pubkey)
   "Build a request for PUBKEY's metadata, follows and personal feed."
   `["REQ" ,nostr--req-personal-id
-    (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts ,nostr--kind-text-note))
+    (("kinds" . (,nostr--kind-metadata ,nostr--kind-contacts ,nostr--kind-text-note ,nostr--kind-reaction))
      ("authors" . (,pubkey))            ; pubkey's posts
      ("#p" . (,pubkey)))]) ; mentions of pubkey
 
@@ -606,7 +614,7 @@ Using KIND, PRIVKEY, TAGS and CONTENT.  Returns nil if not succesful."
 Filter includes SINCE timestamp which should be the relay's last fetched
 time."
   `["REQ" ,nostr--req-contacts-notes-id
-    (("kinds" . (,nostr--kind-text-note))
+    (("kinds" . (,nostr--kind-text-note ,nostr--kind-reaction))
      ("authors" . ,(nostr--fetch-follows pubkey))
      ("since" . ,(nostr--since-timestamp-from-timeframe nostr-since-timeframe))
      ("limit" . 100))])
@@ -648,6 +656,7 @@ Filters SINCE given unix timestamp."
     (define-key map (kbd "g") #'nostr-refresh)
     (define-key map (kbd "?") #'nostr-ui-popup-actions)
     (define-key map (kbd "r") #'nostr-reply-to-note)
+    (define-key map (kbd "f") #'nostr-like-selected-note)
     (define-key map (kbd "c") #'nostr-create-note)
     (define-key map (kbd "RET") #'nostr-open-thread)
     map)
@@ -713,7 +722,12 @@ Filters SINCE given unix timestamp."
 
 (defun nostr--get-selected-note ()
   "Return data for the currently selected note metadata as an alist."
-  (tabulated-list-get-id))
+  (cond
+   ((eq major-mode 'nostr-mode)
+    (tabulated-list-get-id))
+   ((eq major-mode 'nostr-thread-mode)
+    (let ((entry (nostr--thread-entry-at-point)))
+      (plist-get entry :event)))))
 
 (defvar nostr-note-mode-map
   (let ((map (make-sparse-keymap)))
@@ -762,6 +776,15 @@ TODO: add t tag (hashtags)"
         (push `("p" ,.pubkey) tags)
         (nreverse tags)))))
 
+(defun nostr--build-reaction-tags (react-to-note)
+  "Build tags for a note using REACT-TO-NOTE tags."
+  ;; NIP-25
+  (let-alist react-to-note
+    (let ((relay (or .relay nostr--primary-relay)))
+      `(("e" ,.id ,relay)
+        ("p" ,.pubkey ,relay)
+        ("k" ,(number-to-string .kind))))))
+
 (defun nostr--get-note-buffer-content ()
   "Return note content excluding comment lines."
   (let ((lines
@@ -779,28 +802,23 @@ TODO: add t tag (hashtags)"
     (unless (string-empty-p content)
       (let* ((privkey (nostr--load-private-key))
              (tags (nostr--build-note-tags reply-to))
-             (event (nostr--build-event 1 privkey tags content)))
-        ;; try to send
-        (when event
-          (progn
-            (maphash
-             (lambda (url ws)
-               (when (websocket-openp ws)
-                 (websocket-send-text ws event)
-                 (debug-message "note sent to relay %s" url)))
-             nostr--relay-connections)
-            (message "Note sent!")))
+             (event (nostr--build-event nostr--kind-text-note privkey tags content)))
+        (when event (nostr--send-event event))
         (kill-buffer)))))
+
+(defun nostr-like-selected-note ()
+  "Send a reaction to the currently selected note."
+  (interactive)
+  (let* ((selected-note (nostr--get-selected-note))
+         (privkey (nostr--load-private-key))
+         (tags (nostr--build-reaction-tags selected-note))
+         (event (nostr--build-event nostr--kind-reaction privkey tags "+")))
+    (when event (nostr--send-event event))))
 
 (defun nostr-reply-to-note ()
   "Reply to the note at point."
   (interactive)
-  (let ((note
-         (cond
-          ((eq major-mode 'nostr-mode)
-           (nostr--get-selected-note))
-          ((eq major-mode 'nostr-thread-mode)
-           (nostr--get-selected-thread-note)))))
+  (let ((note (nostr--get-selected-note)))
     (when note
       (nostr--compose note))))
 
@@ -814,6 +832,7 @@ TODO: add t tag (hashtags)"
     (define-key map (kbd "g") #'nostr-refresh)
     (define-key map (kbd "?") #'nostr-ui-popup-actions)
     (define-key map (kbd "r") #'nostr-reply-to-note)
+    (define-key map (kbd "f") #'nostr-like-selected-note)
     (define-key map (kbd "C-n") #'nostr-thread-next-entry)
     (define-key map (kbd "C-p") #'nostr-thread-prev-entry)
     map)
@@ -955,11 +974,6 @@ LAST-CHILD determines branching, OPEN-BRANCHES tracks vertical guides."
                                                   (= (plist-get e :start) best))
                                                 nostr--thread-entries)))
                          (nostr--thread-highlight-entry entry))))))
-
-(defun nostr--get-selected-thread-note ()
-  "Return the note/event for the currently highlighted entry."
-  (let ((entry (nostr--thread-entry-at-point)))
-    (plist-get entry :event)))
 
 (defun nostr--build-thread-tree (parent-id &optional depth open-branches)
   "Recursively build a thread from PARENT-ID at DEPTH.
