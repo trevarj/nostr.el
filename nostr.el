@@ -430,7 +430,8 @@ If ROOT-ONLY is t only root notes are returned."
         (7 (nostr--store-reaction event))
         ;; Default: ignore it, but log
         (_
-         (debug-message "skipping event %s" event))))))
+         (debug-message "skipping event %s" event))))
+    (nostr-refresh)))
 
 (defun nostr--validate-event (_event)
   "Validates the signature on an EVENT.  Returns true if valid."
@@ -463,11 +464,9 @@ others complete."
                             (nostr--req-replies-and-reactions
                              (nostr--fetch-event-ids 100)))))))
     ((pred (string-prefix-p nostr--req-replies-id-prefix))
-     (nostr--unsubscribe relay sub-id)
-     (nostr-refresh))
+     (nostr--unsubscribe relay sub-id))
     ((pred (string-prefix-p nostr--req-metadata-id-prefix))
-     (nostr--unsubscribe relay sub-id)
-     )))
+     (nostr--unsubscribe relay sub-id))))
 
 (defun nostr--handle-notice (msg)
   "Handles a notice MSG."
@@ -893,6 +892,8 @@ LAST-CHILD determines branching, OPEN-BRANCHES tracks vertical guides."
            (timestamp (nostr--format-timestamp .created-at))
            (prefix (nostr--build-prefix depth open-branches last-child '("└─ " . "├─ ")))
            (face (if (zerop depth) 'bold 'default)))
+      (unless .author
+        (nostr--subscribe-to-metadata .pubkey))
       (insert (propertize (format "%s%s [%s] [❤ %s]\n"
                                   prefix (or .author .pubkey) timestamp .likes)
                           'face face))
