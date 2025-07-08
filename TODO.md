@@ -1,12 +1,13 @@
 
 - [x] Fix threaded view
 - [x] Only subscribe to what we don't have - using 'since' filters (made timeframe like elfeed kinda)
-- [ ] Allow actions on notes in a thread
+- [x] Allow actions on notes in a thread
 - [ ] React on a note
 - [ ] View a profile
 - [ ] Action on a profile (follow/unfollow)
-- [ ] Clean up thread UI - is tree view actually working?
-- [ ] Parse and fetch nevents, embedded events, embedded npubs, etc
+- [x] Clean up thread UI - is tree view actually working?
+- [ ] Thread entry header face (dim timestamp and stuff)
+- [ ] Parse and fetch nevents (NIP-19), embedded events, embedded npubs, etc
 - [ ] NIP-05 verification
 - [ ] Event validation (validate sig with pubkey), maybe only on viewing its thread
 - [ ] notifications?

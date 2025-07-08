@@ -698,13 +698,11 @@ Filters SINCE given unix timestamp."
 (defun nostr-refresh ()
   "Refresh buffer depending on its type."
   (interactive)
-  (let* ((buf (current-buffer))
-         (buf-name (buffer-name buf)))
-    (pcase buf-name
-      ((pred (string= nostr--buffer-name))
-       (nostr--refresh-list-view))
-      ((pred (string-prefix-p nostr--thread-buffer-prefix))
-       (nostr--refresh-thread-view buf)))))
+  (cond
+   ((eq major-mode 'nostr-mode)
+    (nostr--refresh-list-view))
+   ((eq major-mode 'nostr-thread-mode)
+    (nostr--refresh-thread-view (current-buffer)))))
 
 (transient-define-prefix nostr-ui-popup-actions ()
   "Actions for a selected Nostr note."
