@@ -229,6 +229,34 @@
                        (unfollow "alice-pubkey"))))
       (should (= refreshed 2)))))
 
+(ert-deftest nostr-profile-open-requests-recent-author-events ()
+  "Opening a profile requests recent author activity from relays."
+  (nostr-ui-buffers-test-with-db
+    (let ((nostr-relay-search-author-urls '("wss://relay.primal.net"))
+          fetched
+          fetched-extra
+          opened)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'nostr-relay-fetch-author)
+                       (lambda (pubkey &optional limit)
+                         (push (list pubkey limit) fetched)
+                         "author-sub"))
+                      ((symbol-function 'nostr-relay-fetch-author-from-urls)
+                       (lambda (pubkey &optional limit urls track-progress)
+                         (push (list pubkey limit urls track-progress) fetched-extra)
+                         "author-extra-sub"))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _args)
+                         (setq opened buffer)
+                         buffer)))
+              (nostr-profile-open "alice-pubkey"))
+            (should (equal fetched '(("alice-pubkey" 50))))
+            (should (equal fetched-extra
+                           '(("alice-pubkey" 50 ("wss://relay.primal.net") nil)))))
+        (when (buffer-live-p opened)
+          (kill-buffer opened))))))
+
 (ert-deftest nostr-profile-verify-nip05-uses-cached-profile ()
   "Profile verification command uses cached NIP-05 metadata."
   (nostr-ui-buffers-test-with-db

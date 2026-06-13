@@ -322,6 +322,9 @@
       (nostr-profile-mode)
       (setq-local nostr-profile-pubkey pubkey)
       (nostr-profile-refresh))
+    (nostr-relay-fetch-author pubkey nostr-profile-note-limit)
+    (nostr-relay-fetch-author-from-urls
+     pubkey nostr-profile-note-limit nostr-relay-search-author-urls)
     (pop-to-buffer buffer)))
 
 (defun nostr-profile-list--title ()
