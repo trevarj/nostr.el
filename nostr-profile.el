@@ -39,6 +39,8 @@
     (define-key map (kbd "RET") #'nostr-profile-open-at-point)
     (define-key map (kbd "f") #'nostr-profile-follow)
     (define-key map (kbd "u") #'nostr-profile-unfollow)
+    (define-key map (kbd "M") #'nostr-profile-mute)
+    (define-key map (kbd "U") #'nostr-profile-unmute)
     (define-key map (kbd "v") #'nostr-profile-verify-nip05)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
     (define-key map (kbd "w") #'nostr-share-copy)
@@ -57,6 +59,8 @@
   [["Profile"
     ("f" "Follow" nostr-profile-follow)
     ("u" "Unfollow" nostr-profile-unfollow)
+    ("M" "Mute" nostr-profile-mute)
+    ("U" "Unmute" nostr-profile-unmute)
     ("v" "Verify NIP-05" nostr-profile-verify-nip05)]
    ["Notes"
     ("RET" "Open selected" nostr-profile-open-at-point)
@@ -112,8 +116,10 @@
          (current (and (boundp 'nostr-current-pubkey) nostr-current-pubkey))
          (following (nostr-db-following-count pubkey))
          (followers (nostr-db-follower-count pubkey))
-         (you-follow (and current (nostr-db-follows-p current pubkey))))
+         (you-follow (and current (nostr-db-follows-p current pubkey)))
+         (you-muted (and current (nostr-db-muted-p current pubkey))))
     `(("You follow" . ,(if you-follow "yes" "no"))
+      ("Muted" . ,(if you-muted "yes" "no"))
       ("Followers" . ,(number-to-string followers))
       ("Following" . ,(number-to-string following))
       ("Relays" . ,(nostr-profile--relay-summary pubkey)))))
@@ -192,9 +198,9 @@
           (nostr-ui-insert-note event))
       (nostr-ui-insert-empty-state
        "No cached notes for this profile."
-       "Use f to follow, u to unfollow, or w to copy the profile id."))
+       "Use f to follow, M to mute, or w to copy the profile id."))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open" "f follow" "u unfollow" "v verify" "w copy" "b browse" "? actions"))
+     '("g refresh" "RET open" "f follow" "u unfollow" "M mute" "U unmute" "v verify" "w copy" "b browse" "? actions"))
     (nostr-ui-finish-refresh position-state)))
 
 (defun nostr-profile-open-at-point ()
@@ -218,6 +224,20 @@
   (unless nostr-profile-pubkey
     (user-error "No profile pubkey is associated with this buffer"))
   (nostr-actions-unfollow nostr-profile-pubkey))
+
+(defun nostr-profile-mute ()
+  "Mute the profile shown by this buffer."
+  (interactive)
+  (unless nostr-profile-pubkey
+    (user-error "No profile pubkey is associated with this buffer"))
+  (nostr-actions-mute nostr-profile-pubkey))
+
+(defun nostr-profile-unmute ()
+  "Unmute the profile shown by this buffer."
+  (interactive)
+  (unless nostr-profile-pubkey
+    (user-error "No profile pubkey is associated with this buffer"))
+  (nostr-actions-unmute nostr-profile-pubkey))
 
 (defun nostr-profile-verify-nip05 ()
   "Verify this profile's cached NIP-05 identifier."

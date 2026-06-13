@@ -23,6 +23,7 @@
 (defconst nostr-kind-repost 6)
 (defconst nostr-kind-reaction 7)
 (defconst nostr-kind-zap-receipt 9735)
+(defconst nostr-kind-mute-list 10000)
 (defconst nostr-kind-relay-list 10002)
 
 (defun nostr-event-tag-name (tag)

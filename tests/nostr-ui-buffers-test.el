@@ -77,6 +77,12 @@
                (kind . 3)
                (tags . (("p" "alice-pubkey")))))
             (nostr-db-store-event
+             '((id . "me-mutes")
+               (pubkey . "me")
+               (created_at . 101)
+               (kind . 10000)
+               (tags . (("p" "alice-pubkey")))))
+            (nostr-db-store-event
              '((id . "alice-follows")
                (pubkey . "alice-pubkey")
                (created_at . 102)
@@ -104,10 +110,28 @@
               (nostr-profile-refresh)
               (let ((text (buffer-string)))
                 (should (string-match-p "You follow yes" text))
+                (should (string-match-p "Muted      yes" text))
                 (should (string-match-p "Followers  2" text))
                 (should (string-match-p "Following  2" text))
                 (should (string-match-p "Relays     1 read  1 write  1 both" text)))))
         (setq nostr-current-pubkey old-pubkey)))))
+
+(ert-deftest nostr-profile-mute-and-unmute-use-profile-pubkey ()
+  "Profile mute commands publish updates for the displayed account."
+  (nostr-ui-buffers-test-with-db
+    (let (actions)
+      (cl-letf (((symbol-function 'nostr-actions-mute)
+                 (lambda (pubkey) (push (list 'mute pubkey) actions)))
+                ((symbol-function 'nostr-actions-unmute)
+                 (lambda (pubkey) (push (list 'unmute pubkey) actions))))
+        (with-temp-buffer
+          (nostr-profile-mode)
+          (setq-local nostr-profile-pubkey "alice-pubkey")
+          (nostr-profile-mute)
+          (nostr-profile-unmute)))
+      (should (equal (nreverse actions)
+                     '((mute "alice-pubkey")
+                       (unmute "alice-pubkey")))))))
 
 (ert-deftest nostr-profile-verify-nip05-uses-cached-profile ()
   "Profile verification command uses cached NIP-05 metadata."

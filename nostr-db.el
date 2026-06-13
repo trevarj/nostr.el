@@ -63,6 +63,7 @@ so new columns must be added explicitly."
   (nostr-db--ensure-column "follows" "petname")
   (nostr-db--ensure-column "notifications" "seen" "integer default 0")
   (nostr-db--ensure-discover-tables)
+  (nostr-db--ensure-mutes-table)
   (nostr-db--ensure-event-relays-table))
 
 (defun nostr-db--ensure-discover-tables ()
@@ -110,6 +111,16 @@ so new columns must be added explicitly."
                               :from events
                               :where (is-not relay nil)]))
 
+(defun nostr-db--ensure-mutes-table ()
+  "Ensure cached NIP-51 mute list table exists."
+  (emacsql nostr-db--connection
+           [:create-table :if-not-exists mutes
+                          ([pubkey muted_pubkey]
+                           (:unique [pubkey muted_pubkey]))])
+  (emacsql nostr-db--connection
+           [:create-index :if-not-exists idx_mutes_pubkey
+                          :on mutes ([pubkey])]))
+
 (defun nostr-db-init ()
   "Initialize a fresh v1 database schema."
   (emacsql nostr-db--connection
@@ -153,6 +164,7 @@ so new columns must be added explicitly."
            [:create-table :if-not-exists follows
                           ([pubkey contact relay petname]
                            (:unique [pubkey contact]))])
+  (nostr-db--ensure-mutes-table)
   (emacsql nostr-db--connection
            [:create-table :if-not-exists reactions
                           ([(id :primary-key)
@@ -360,6 +372,20 @@ so new columns must be added explicitly."
                                          :values [$s1 $s2 $s3 $s4 $s5]]
                      pubkey url marker (car policy) (cdr policy))))))))
 
+(defun nostr-db-store-mute-list-event (event)
+  "Store NIP-51 kind 10000 mute list EVENT."
+  (let ((pubkey (alist-get 'pubkey event)))
+    (emacsql-with-transaction nostr-db--connection
+      (emacsql nostr-db--connection
+               [:delete-from mutes :where (= pubkey $s1)]
+               pubkey)
+      (dolist (tag (nostr-event-tags-by-name (alist-get 'tags event) "p"))
+        (when-let* ((muted-pubkey (nth 1 tag))
+                    ((not (string-empty-p muted-pubkey))))
+          (emacsql nostr-db--connection
+                   [:insert-or-ignore :into mutes :values [$s1 $s2]]
+                   pubkey muted-pubkey))))))
+
 (defun nostr-db-store-event (event)
   "Store normalized EVENT."
   (nostr-db-store-event-relay event)
@@ -370,6 +396,7 @@ so new columns must be added explicitly."
 	    (6 (nostr-db-store-repost-event event))
 	    (7 (nostr-db-store-reaction-event event))
 	    (9735 (nostr-db-store-zap-event event))
+	    (10000 (nostr-db-store-mute-list-event event))
 	    (10002 (nostr-db-store-relay-list-event event))))
 
 (defun nostr-db-clear-discover-results (provider scope timeframe)
@@ -537,6 +564,23 @@ so new columns must be added explicitly."
                                            (= contact $s2))
                                :limit 1]
                       pubkey contact))))
+
+(defun nostr-db-select-mutes (pubkey)
+  "Return PUBKEY's muted profile pubkeys."
+  (mapcar #'car
+          (emacsql nostr-db--connection
+                   [:select [muted_pubkey] :from mutes :where (= pubkey $s1)]
+                   pubkey)))
+
+(defun nostr-db-muted-p (pubkey muted-pubkey)
+  "Return non-nil when PUBKEY mutes MUTED-PUBKEY."
+  (not (null (emacsql nostr-db--connection
+                      [:select [muted_pubkey]
+                               :from mutes
+                               :where (and (= pubkey $s1)
+                                           (= muted_pubkey $s2))
+                               :limit 1]
+                      pubkey muted-pubkey))))
 
 (defun nostr-db-following-count (pubkey)
   "Return cached number of accounts PUBKEY follows."

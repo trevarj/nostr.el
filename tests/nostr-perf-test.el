@@ -68,12 +68,24 @@
         (should (= (length filters) 2))
         (should (equal (alist-get "since" (car filters) nil nil #'equal) 123))
         (should (equal (alist-get "limit" (car filters) nil nil #'equal) 11))
+        (should (member nostr-kind-mute-list
+                        (alist-get "kinds" (car filters) nil nil #'equal)))
         (should-not (member nostr-kind-zap-receipt
                             (alist-get "kinds" (car filters) nil nil #'equal)))
         (should (equal (alist-get "since" (cadr filters) nil nil #'equal) 123))
         (should (equal (alist-get "limit" (cadr filters) nil nil #'equal) 7))
         (should (member nostr-kind-reaction
                         (alist-get "kinds" (cadr filters) nil nil #'equal)))))))
+
+(ert-deftest nostr-contact-filter-includes-mute-list ()
+  "Contact refresh also keeps the current account's mute list fresh."
+  (let ((filter (nostr-relay--contacts-filter "alice")))
+    (should (member nostr-kind-contacts
+                    (alist-get "kinds" filter nil nil #'equal)))
+    (should (member nostr-kind-mute-list
+                    (alist-get "kinds" filter nil nil #'equal)))
+    (should (member nostr-kind-relay-list
+                    (alist-get "kinds" filter nil nil #'equal)))))
 
 (ert-deftest nostr-follows-filters-split-content-from-metadata ()
   "The follows feed avoids mixing metadata/zaps into the main content stream."

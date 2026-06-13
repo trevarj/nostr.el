@@ -1087,6 +1087,40 @@
       (should (equal (nostr-actions-current-follow-tags nil "alice")
                      nil)))))
 
+(ert-deftest nostr-db-stores-nip51-mute-list ()
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "mutes")
+       (pubkey . "me")
+       (created_at . 10)
+       (kind . 10000)
+       (tags . (("p" "alice") ("p" "bob") ("e" "note1")))))
+    (should (equal (nostr-db-select-mutes "me") '("alice" "bob")))
+    (should (nostr-db-muted-p "me" "alice"))
+    (nostr-db-store-event
+     '((id . "mutes-new")
+       (pubkey . "me")
+       (created_at . 11)
+       (kind . 10000)
+       (tags . (("p" "carol")))))
+    (should (equal (nostr-db-select-mutes "me") '("carol")))
+    (should-not (nostr-db-muted-p "me" "alice"))))
+
+(ert-deftest nostr-actions-mute-tags-preserve-existing-mutes ()
+  (nostr-test-with-db
+    (let ((nostr-current-pubkey "me"))
+      (nostr-db-store-event
+       '((id . "mutes")
+         (pubkey . "me")
+         (created_at . 10)
+         (kind . 10000)
+         (tags . (("p" "alice")))))
+      (should (equal (nostr-actions-current-mute-tags "bob" nil)
+                     '(("p" "alice")
+                       ("p" "bob"))))
+      (should (equal (nostr-actions-current-mute-tags nil "alice")
+                     nil)))))
+
 (ert-deftest nostr-relay-stores-mention-reaction-and-follow-notifications ()
   (nostr-test-with-db
     (let ((nostr-current-pubkey "me")

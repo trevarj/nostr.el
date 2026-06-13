@@ -526,6 +526,7 @@ Nostr filter fields are ANDed, so authored events and mentions must be separate
 filters or kind-0 metadata will never match."
   `((("kinds" . (,nostr-kind-metadata
                  ,nostr-kind-contacts
+                 ,nostr-kind-mute-list
                  ,nostr-kind-text-note
                  ,nostr-kind-repost
                  ,nostr-kind-relay-list))
@@ -542,7 +543,7 @@ filters or kind-0 metadata will never match."
 
 (defun nostr-relay--contacts-filter (pubkey)
   "Return contact-list filter for PUBKEY."
-  `(("kinds" . (,nostr-kind-contacts ,nostr-kind-relay-list))
+  `(("kinds" . (,nostr-kind-contacts ,nostr-kind-mute-list ,nostr-kind-relay-list))
     ("authors" . (,pubkey))
     ("limit" . 10)))
 

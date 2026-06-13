@@ -176,6 +176,22 @@ non-nil."
       (push `("p" ,pubkey-to-add) tags))
     (nreverse tags)))
 
+(defun nostr-actions-current-mute-tags (&optional pubkey-to-add pubkey-to-remove)
+  "Return current mute list tags with requested pubkey changes.
+PUBKEY-TO-ADD is added when non-nil.  PUBKEY-TO-REMOVE is removed when
+non-nil."
+  (let ((muted (and (boundp 'nostr-current-pubkey)
+                    nostr-current-pubkey
+                    (nostr-db-select-mutes nostr-current-pubkey)))
+        tags)
+    (dolist (pubkey muted)
+      (unless (equal pubkey pubkey-to-remove)
+        (push `("p" ,pubkey) tags)))
+    (when (and pubkey-to-add
+               (not (cl-find pubkey-to-add tags :key #'cadr :test #'equal)))
+      (push `("p" ,pubkey-to-add) tags))
+    (nreverse tags)))
+
 (defun nostr-actions-follow (pubkey)
   "Follow PUBKEY by publishing an updated kind 3 contact list."
   (interactive "sFollow pubkey: ")
@@ -197,6 +213,28 @@ non-nil."
    (nostr-actions-current-follow-tags nil pubkey)
    ""
    "Nostr follow list published"))
+
+(defun nostr-actions-mute (pubkey)
+  "Mute PUBKEY by publishing an updated NIP-51 kind 10000 mute list."
+  (interactive "sMute pubkey: ")
+  (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
+    (user-error "No current Nostr pubkey is available"))
+  (nostr-actions--send
+   nostr-kind-mute-list
+   (nostr-actions-current-mute-tags pubkey nil)
+   ""
+   "Nostr mute list published"))
+
+(defun nostr-actions-unmute (pubkey)
+  "Unmute PUBKEY by publishing an updated NIP-51 kind 10000 mute list."
+  (interactive "sUnmute pubkey: ")
+  (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
+    (user-error "No current Nostr pubkey is available"))
+  (nostr-actions--send
+   nostr-kind-mute-list
+   (nostr-actions-current-mute-tags nil pubkey)
+   ""
+   "Nostr mute list published"))
 
 (provide 'nostr-actions)
 ;;; nostr-actions.el ends here
