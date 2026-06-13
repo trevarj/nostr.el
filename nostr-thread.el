@@ -67,7 +67,7 @@
     ("p" "Previous note" nostr-ui-prev-section)
     ("TAB" "Toggle note" nostr-ui-toggle-section)]
    ["Social"
-    ("l" "Like" nostr-thread-like)
+    ("l" "React" nostr-thread-like)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
     ("R" "Repost" nostr-thread-repost)
     ("Q" "Quote" nostr-thread-quote)]
@@ -152,7 +152,7 @@
        "No cached events for this thread."
        "Use g after relay sync or open the event from search."))
     (nostr-ui-insert-footer
-     '("g refresh" "r reply" "l like" "R repost" "Q quote" "w copy" "? actions"))
+     '("g refresh" "r reply" "l react" "R repost" "Q quote" "w copy" "? actions"))
     (nostr-ui-finish-refresh position-state)
     (when (or (not point-state)
               (not (nostr-ui-section-at-point)))
@@ -165,10 +165,10 @@
     (nostr-compose-open event)))
 
 (defun nostr-thread-like ()
-  "Like selected thread note."
+  "React to selected thread note."
   (interactive)
   (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-like event)))
+    (nostr-actions-react-menu event)))
 
 (defun nostr-thread-repost ()
   "Repost selected thread note."

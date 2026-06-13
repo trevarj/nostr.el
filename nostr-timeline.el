@@ -101,7 +101,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     ("/" "Search" nostr-search-open)
     ("o" "Open id" nostr-open-identifier)]
    ["Social"
-    ("l" "Like" nostr-timeline-like)
+    ("l" "React" nostr-timeline-like)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
     ("R" "Repost" nostr-timeline-repost)
     ("Q" "Quote" nostr-timeline-quote)]
@@ -265,10 +265,10 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (nostr-compose-open event)))
 
 (defun nostr-timeline-like ()
-  "Like the selected timeline note."
+  "React to the selected timeline note."
   (interactive)
   (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-like event)))
+    (nostr-actions-react-menu event)))
 
 (defun nostr-timeline-repost ()
   "Repost the selected timeline note."

@@ -14,17 +14,27 @@
 (require 'cl-lib)
 (require 'emacsql)
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'nostr-backend)
 (require 'nostr-db)
 (require 'nostr-event)
 (require 'nostr-relay)
+(require 'transient)
 
 (defvar nostr-current-pubkey)
 (declare-function nostr-compose-open "nostr-compose" (&optional reply-to extra-tags))
 
 (defvar nostr-actions-after-send-hook nil
   "Hook run with the signed event after a public action is sent.")
+
+(defcustom nostr-reaction-choices '("+" "❤️" "😂" "🤙" "👀")
+  "Emoji/content choices shown by the Nostr reaction transient."
+  :type '(repeat string)
+  :group 'nostr)
+
+(defvar nostr-actions--reaction-event nil
+  "Event currently targeted by the reaction transient.")
 
 (defun nostr-actions--error-message (response stderr)
   "Return a useful error string from backend RESPONSE and STDERR."
@@ -54,14 +64,80 @@
      (user-error "Nostr action failed: %s"
                  (nostr-actions--error-message response stderr)))))
 
-(defun nostr-actions-like (event)
-  "Send a positive reaction to EVENT."
-  (interactive)
+(defun nostr-actions-react (event content)
+  "Send reaction CONTENT to EVENT."
   (nostr-actions--send
    nostr-kind-reaction
    (nostr-event-build-reaction-tags event (car nostr-relay-urls))
-   "+"
+   content
    "Nostr reaction sent"))
+
+(defun nostr-actions-like (event)
+  "Send a positive reaction to EVENT."
+  (interactive)
+  (nostr-actions-react event "+"))
+
+(defun nostr-actions--reaction-choice (index)
+  "Return configured reaction at INDEX."
+  (or (nth index nostr-reaction-choices) "+"))
+
+(defun nostr-actions--react-choice (index)
+  "React to `nostr-actions--reaction-event' with configured INDEX."
+  (unless nostr-actions--reaction-event
+    (user-error "No note selected"))
+  (nostr-actions-react nostr-actions--reaction-event
+                       (nostr-actions--reaction-choice index)))
+
+(defun nostr-actions-react-choice-1 ()
+  "React with the first configured reaction."
+  (interactive)
+  (nostr-actions--react-choice 0))
+
+(defun nostr-actions-react-choice-2 ()
+  "React with the second configured reaction."
+  (interactive)
+  (nostr-actions--react-choice 1))
+
+(defun nostr-actions-react-choice-3 ()
+  "React with the third configured reaction."
+  (interactive)
+  (nostr-actions--react-choice 2))
+
+(defun nostr-actions-react-choice-4 ()
+  "React with the fourth configured reaction."
+  (interactive)
+  (nostr-actions--react-choice 3))
+
+(defun nostr-actions-react-choice-5 ()
+  "React with the fifth configured reaction."
+  (interactive)
+  (nostr-actions--react-choice 4))
+
+(defun nostr-actions-react-read ()
+  "React with an emoji/content value read from the minibuffer."
+  (interactive)
+  (unless nostr-actions--reaction-event
+    (user-error "No note selected"))
+  (nostr-actions-react
+   nostr-actions--reaction-event
+   (completing-read "Reaction: " nostr-reaction-choices nil nil)))
+
+(transient-define-prefix nostr-actions-reaction-transient ()
+  "Choose a reaction for the selected Nostr note."
+  [["React"
+    ("1" "1st configured" nostr-actions-react-choice-1)
+    ("2" "2nd configured" nostr-actions-react-choice-2)
+    ("3" "3rd configured" nostr-actions-react-choice-3)
+    ("4" "4th configured" nostr-actions-react-choice-4)
+    ("5" "5th configured" nostr-actions-react-choice-5)
+    ("e" "Choose emoji" nostr-actions-react-read)]])
+
+(defun nostr-actions-react-menu (event)
+  "Open a transient reaction menu for EVENT."
+  (interactive)
+  (setq nostr-actions--reaction-event event)
+  (message "Reactions: %s" (string-join (seq-take nostr-reaction-choices 5) " "))
+  (nostr-actions-reaction-transient))
 
 (defun nostr-actions-repost (event)
   "Repost EVENT using NIP-18."
