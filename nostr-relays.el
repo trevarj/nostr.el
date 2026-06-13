@@ -194,7 +194,7 @@
         (let ((relays (nostr-relays--select)))
           (nostr-ui-insert-status-header
            "Relays"
-           "Nostr"
+           nil
            (nostr-relays--summary relays))
           (if relays
               (dolist (relay relays)

@@ -131,7 +131,7 @@
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      "Thread"
-     "Nostr"
+     nil
      (if root-id
          (format "Focused conversation for %s." root-id)
        "Focused conversation."))

@@ -192,7 +192,7 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
     (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
     (let ((inhibit-read-only t))
       (nostr-ui-clear)
-      (nostr-ui-insert-status-header "Feed" "Nostr" detail)
+      (nostr-ui-insert-status-header "Feed" nil detail)
       (nostr-ui-insert-primary-nav nostr-ui-primary-nav-items 'feed)
       (nostr-ui-insert-empty-state
        "Preparing account."

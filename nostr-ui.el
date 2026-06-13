@@ -170,6 +170,19 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   :type 'file
   :group 'nostr)
 
+(defcustom nostr-ui-logo-file
+  (expand-file-name "assets/logo.png"
+                    (file-name-directory
+                     (or load-file-name buffer-file-name default-directory)))
+  "Logo image shown at the start of page status headers."
+  :type 'file
+  :group 'nostr)
+
+(defcustom nostr-ui-logo-size 42
+  "Maximum pixel size for the header logo image."
+  :type 'integer
+  :group 'nostr)
+
 (defconst nostr-ui-primary-nav-items
   '((feed "f" "Feed" nostr-timeline-feed)
     (conversations "C" "Conversations" nostr-timeline-conversations)
@@ -404,7 +417,11 @@ COMMANDS is a list of strings such as \"g refresh\"."
 
 (defun nostr-ui-insert-status-header (title &optional subtitle details)
   "Insert a compact page status header.
-TITLE is the page title.  SUBTITLE and DETAILS are optional strings."
+TITLE is the page title.  SUBTITLE and DETAILS are optional strings.
+A Nostr logo image is shown before TITLE."
+  (insert (nostr-ui--display-image-string
+           nostr-ui-logo-file "[Nostr]" nostr-ui-logo-size)
+          "  ")
   (insert (propertize title 'face 'nostr-ui-status-title))
   (when subtitle
     (insert (propertize (format "  %s" subtitle) 'face 'nostr-ui-status-detail)))

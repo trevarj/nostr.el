@@ -369,7 +369,7 @@
         (let ((notifications (nostr-notifications--select)))
           (nostr-ui-insert-status-header
            "Notifications"
-           "Nostr"
+           nil
            (format "%d unread  %d total"
                    (nostr-notifications--unread-count notifications)
                    (length notifications)))

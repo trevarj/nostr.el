@@ -185,7 +185,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      (nostr-timeline--feed-title)
-     "Nostr"
+     nil
      (nostr-timeline--feed-detail))
     (nostr-ui-insert-primary-nav nostr-ui-primary-nav-items
                                  (pcase nostr-timeline-feed-kind
