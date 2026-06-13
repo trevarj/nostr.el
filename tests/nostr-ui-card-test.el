@@ -549,8 +549,37 @@
              (reactions . 0)
              (reposts . 0))))
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-          (should (string-match-p "look nostr:nevent1qqqqqqqqqqqqqq" text))
+          (should (string-match-p "look" text))
+          (should-not (string-match-p "nostr:nevent1qqqqqqqqqqqqqq" text))
           (should (string-match-p "quoted body" text)))))))
+
+(ert-deftest nostr-ui-note-card-keeps-uncached-nevent-text ()
+  "A top-level nevent remains visible until its target can render."
+  (let ((nostr-ui-show-avatars nil)
+        (nostr-ui--nevent-cache (make-hash-table :test #'equal))
+        fetched)
+    (cl-letf (((symbol-function 'nostr-nip19-decode-sync)
+               (lambda (_value)
+                 '((ok . t) (entity . "nevent") (event_id . "quoted-note"))))
+              ((symbol-function 'nostr-ui--event-by-id)
+               (lambda (_event-id) nil))
+              ((symbol-function 'nostr-ui--maybe-fetch-embedded-event)
+               (lambda (event-id) (setq fetched event-id))))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           '((id . "parent-note")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . "look nostr:nevent1qqqqqqqqqqqqqq")
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "look nostr:nevent1qqqqqqqqqqqqqq" text))
+          (should (string-match-p "Quoted note quoted-note is not cached yet" text))
+          (should (equal fetched "quoted-note")))))))
 
 (ert-deftest nostr-ui-note-card-summarizes-nested-nevent ()
   "Embedded cards summarize their own nevents instead of nesting indefinitely."
@@ -594,7 +623,8 @@
              (reactions . 0)
              (reposts . 0))))
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-          (should (string-match-p "quoted body nevent1qqqqqqq3" text))
+          (should (string-match-p "quoted body" text))
+          (should-not (string-match-p "quoted body nevent1qqqqqqq3" text))
           (should (string-match-p "Quoted carol" text))
           (should (= (how-many "────────────────────────────────────────"
                                (point-min) (point-max))

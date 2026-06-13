@@ -1112,6 +1112,28 @@ looked up from the memoized full counts alist for the event id."
       (unless embedded
         (nostr-ui--maybe-fetch-embedded-event event-id)))))
 
+(defun nostr-ui--represented-nevents (event)
+  "Return nevents from EVENT that already have cached note representation."
+  (let (represented)
+    (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
+      ;; Only hide raw identifiers once the card can render the target.
+      (when-let* ((event-id (nostr-ui--decode-nevent-event-id nevent)))
+        (when (nostr-ui--event-by-id event-id)
+          (push nevent represented))))
+    (nreverse represented)))
+
+(defun nostr-ui--content-without-nevents (content nevents)
+  "Return CONTENT with represented NEVENTS removed."
+  (let ((text (or content "")))
+    (dolist (nevent nevents)
+      (setq text (replace-regexp-in-string
+                  (regexp-quote nevent) "" text t t)))
+    (string-join
+     (mapcar (lambda (line)
+               (string-trim (replace-regexp-in-string "[ \t]+" " " line)))
+             (split-string text "\n"))
+     "\n")))
+
 (defun nostr-ui--insert-nevent-embeds (event depth style embed-depth)
   "Insert embedded nevent cards for EVENT."
   (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
@@ -1300,6 +1322,9 @@ thread/detail style uses exact dates."
          (indent (make-string (* depth 2) ?\s))
          (author (nostr-ui-format-author event))
          (content (or (alist-get 'content event) ""))
+         (represented-nevents (nostr-ui--represented-nevents event))
+         (display-content (nostr-ui--content-without-nevents
+                           content represented-nevents))
          (picture (nostr-ui--event-picture event)))
     (insert indent)
     (insert (propertize "────────────────────────────────────────\n"
@@ -1313,7 +1338,7 @@ thread/detail style uses exact dates."
 			     (insert indent)
 			     (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
 						 'face 'nostr-ui-meta)))
-			   (nostr-ui--insert-filled-content content indent)
+			   (nostr-ui--insert-filled-content display-content indent)
 			   (nostr-ui--insert-publish-receipts event indent)
 			   (dolist (item (nostr-event-media-items (alist-get 'content event)))
                              (nostr-ui--insert-media-placeholder item indent))
