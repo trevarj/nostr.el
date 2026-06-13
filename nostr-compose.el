@@ -285,12 +285,24 @@ smaller frames."
        token))
    content t t))
 
+(defun nostr-compose--http-unibyte (string)
+  "Return STRING encoded as unibyte HTTP header/body text."
+  (if (multibyte-string-p string)
+      (encode-coding-string string 'us-ascii)
+    string))
+
+(defun nostr-compose--sanitize-upload-error (message)
+  "Return upload error MESSAGE without embedded binary request data."
+  (if (string-match "\\`Multibyte text in HTTP request:" message)
+      "Could not build binary upload request"
+    (truncate-string-to-width message 240 nil nil "...")))
+
 (defun nostr-compose--read-file-bytes (file)
   "Return unibyte contents of FILE."
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (insert-file-contents-literally file)
-    (buffer-string)))
+    (encode-coding-string (buffer-string) 'no-conversion)))
 
 (defun nostr-compose--upload-file (file success error)
   "Upload FILE to the configured Blossom server."
@@ -307,29 +319,47 @@ smaller frames."
        (let ((url-request-method "PUT")
              (url-request-data (nostr-compose--read-file-bytes file))
              (url-request-extra-headers
-              `(("Authorization" . ,(alist-get 'authorization auth))
-                ("Content-Type" . "application/octet-stream"))))
-         (url-retrieve
-          upload-url
-          (lambda (status)
-            (unwind-protect
-                (if-let* ((err (plist-get status :error)))
-                    (funcall error file (format "Could not upload %s: %S" file err))
-                  (if (not (and url-http-response-status
-                                (>= url-http-response-status 200)
-                                (< url-http-response-status 300)))
-                      (funcall error file
-                               (format "Could not upload %s: HTTP %s"
-                                       file url-http-response-status))
-                    (condition-case err
-                        (funcall success file
-                                 (nostr-compose--parse-blossom-url
-                                  (buffer-substring-no-properties
-                                   (1+ url-http-end-of-headers)
-                                   (point-max))))
-                      (error (funcall error file (error-message-string err))))))
-              (kill-buffer (current-buffer))))
-          nil t)))
+              `((,(nostr-compose--http-unibyte "Authorization")
+                 . ,(nostr-compose--http-unibyte
+                     (alist-get 'authorization auth)))
+                (,(nostr-compose--http-unibyte "Content-Type")
+                 . ,(nostr-compose--http-unibyte
+                     "application/octet-stream")))))
+         (condition-case err
+             (url-retrieve
+              upload-url
+              (lambda (status)
+                (unwind-protect
+                    (if-let* ((err (plist-get status :error)))
+                        (funcall error file
+                                 (format "Could not upload %s: %s"
+                                         file
+                                         (nostr-compose--sanitize-upload-error
+                                          (format "%S" err))))
+                      (if (not (and url-http-response-status
+                                    (>= url-http-response-status 200)
+                                    (< url-http-response-status 300)))
+                          (funcall error file
+                                   (format "Could not upload %s: HTTP %s"
+                                           file
+                                           (or url-http-response-status "unknown")))
+                        (condition-case err
+                            (funcall success file
+                                     (nostr-compose--parse-blossom-url
+                                      (buffer-substring-no-properties
+                                       (1+ url-http-end-of-headers)
+                                       (point-max))))
+                          (error (funcall error file
+                                          (nostr-compose--sanitize-upload-error
+                                           (error-message-string err)))))))
+                  (kill-buffer (current-buffer))))
+              nil t)
+           (error
+            (funcall error file
+                     (format "Could not upload %s: %s"
+                             file
+                             (nostr-compose--sanitize-upload-error
+                              (error-message-string err))))))))
      (lambda (response stderr _status)
        (funcall error file
                 (format "Could not authorize %s: %s%s"

@@ -927,6 +927,37 @@
         (nostr-compose-send)))
     (should (equal captured-content "photo\nhttps://cdn.example/pic.jpg"))))
 
+(ert-deftest nostr-compose-upload-uses-unibyte-binary-request ()
+  (let ((file (make-temp-file "nostr-upload" nil ".bin"))
+        captured-data
+        captured-headers)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert (unibyte-string #x89 #x50 #xff #x00))
+            (write-region (point-min) (point-max) file nil 'silent))
+          (cl-letf (((symbol-function 'nostr-backend-blossom-auth)
+                     (lambda (_server _sha _expiration success _error)
+                       (funcall success
+                                `((authorization . ,(copy-sequence "Nostr test"))))))
+                    ((symbol-function 'url-retrieve)
+                     (lambda (_url _callback &rest _args)
+                       (setq captured-data url-request-data)
+                       (setq captured-headers url-request-extra-headers))))
+            (let ((nostr-blossom-upload-server "https://blossom.example"))
+              (nostr-compose--upload-file file #'ignore #'ignore)))
+          (should-not (multibyte-string-p captured-data))
+          (dolist (header captured-headers)
+            (should-not (multibyte-string-p (car header)))
+            (should-not (multibyte-string-p (cdr header)))))
+      (delete-file file))))
+
+(ert-deftest nostr-compose-upload-sanitizes-binary-request-errors ()
+  (should (equal (nostr-compose--sanitize-upload-error
+                  "Multibyte text in HTTP request: PUT /upload ...binary...")
+                 "Could not build binary upload request")))
+
 (ert-deftest nostr-actions-like-and-repost-build-public-events ()
   (let (sent)
     (cl-letf (((symbol-function 'nostr-backend-sign-event)
