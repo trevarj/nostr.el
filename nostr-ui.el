@@ -108,6 +108,9 @@ Reset each render and primed once per feed so the per-note author lookups
 (defvar-local nostr-ui--selection-overlay nil
   "Overlay highlighting the current section heading.")
 
+(defvar-local nostr-ui--open-media-notes nil
+  "Hash table of note ids whose media previews are open in this buffer.")
+
 (defvar nostr-ui--npub-cache (make-hash-table :test #'equal)
   "Cache of hex pubkeys to encoded npub strings.")
 
@@ -952,6 +955,27 @@ looked up from the memoized full counts alist for the event id."
       (setq pos (next-single-property-change pos 'nostr-media-url nil end)))
     found))
 
+(defun nostr-ui--open-media-notes ()
+  "Return the buffer-local note media state table."
+  (unless (hash-table-p nostr-ui--open-media-notes)
+    (setq nostr-ui--open-media-notes (make-hash-table :test #'equal)))
+  nostr-ui--open-media-notes)
+
+(defun nostr-ui--restore-note-media (section)
+  "Restore open media previews for SECTION after a buffer refresh."
+  (when (gethash (nostr-ui-section-id section) (nostr-ui--open-media-notes))
+    (let* ((event (nostr-ui-section-data section))
+           (urls (nostr-event-media-urls (alist-get 'content event)))
+           (bounds (nostr-ui--section-media-region section))
+           (start (car bounds))
+           (end (cdr bounds)))
+      (unless (nostr-media-rendered-in-region-p start end)
+        (dolist (url urls)
+          (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
+            (save-excursion
+              (goto-char position)
+              (nostr-media-load-at-point))))))))
+
 (defun nostr-ui-toggle-note-media ()
   "Toggle rendered media previews for the selected note."
   (interactive)
@@ -967,9 +991,12 @@ looked up from the memoized full counts alist for the event id."
       (unless urls
         (user-error "Selected note has no supported media"))
       (if (nostr-media-rendered-in-region-p start end)
-          (message "Removed %d media preview%s"
-                   (nostr-media-remove-rendered-in-region start end)
-                   (if (= (length urls) 1) "" "s"))
+          (progn
+            (remhash (nostr-ui-section-id section) (nostr-ui--open-media-notes))
+            (message "Removed %d media preview%s"
+                     (nostr-media-remove-rendered-in-region start end)
+                     (if (= (length urls) 1) "" "s")))
+        (puthash (nostr-ui-section-id section) t (nostr-ui--open-media-notes))
         (dolist (url urls)
           (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
             (save-excursion
@@ -1014,6 +1041,7 @@ exact dates."
          'help-echo "Load this image inline"
          'action (lambda (_button) (nostr-media-load-at-point)))
         (insert "\n"))
+      (nostr-ui--restore-note-media section)
       (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
                                   (concat indent "  "))
       (insert "\n")
