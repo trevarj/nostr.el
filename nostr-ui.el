@@ -980,18 +980,26 @@ looked up from the memoized full counts alist for the event id."
 
 (defun nostr-ui--restore-note-media (section)
   "Restore open media previews for SECTION after a buffer refresh."
-  (when (gethash (nostr-ui-section-id section) (nostr-ui--open-media-notes))
-    (let* ((event (nostr-ui-section-data section))
-           (urls (nostr-event-media-urls (alist-get 'content event)))
-           (bounds (nostr-ui--section-media-region section))
-           (start (car bounds))
-           (end (cdr bounds)))
-      (unless (nostr-media-rendered-in-region-p start end)
-        (dolist (url urls)
-          (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
-            (save-excursion
-              (goto-char position)
-              (nostr-media-load-at-point))))))))
+  (let ((explicit (gethash (nostr-ui-section-id section)
+                           (nostr-ui--open-media-notes))))
+    (when (or explicit nostr-media-auto-preview)
+      (let* ((event (nostr-ui-section-data section))
+             (urls (nostr-event-media-urls (alist-get 'content event)))
+             (urls (if explicit
+                       urls
+                     (seq-take urls (max 0 nostr-media-auto-preview-max-per-note))))
+             (bounds (nostr-ui--section-media-region section))
+             (start (car bounds))
+             (end (cdr bounds)))
+        (unless (nostr-media-rendered-in-region-p start end)
+          (dolist (url urls)
+            (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
+              (save-excursion
+                (goto-char position)
+                ;; Refresh restores explicit media only from cache.  Network
+                ;; downloads happen on direct user action, or through the
+                ;; non-default `nostr-media-auto-preview' setting.
+                (nostr-media-load-at-point (not nostr-media-auto-preview))))))))))
 
 (defun nostr-ui-toggle-note-media ()
   "Toggle rendered media previews for the selected note."

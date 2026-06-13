@@ -341,6 +341,37 @@
       (when (file-directory-p dir)
         (delete-directory dir t)))))
 
+(ert-deftest nostr-ui-note-card-refresh-does-not-fetch-open-media ()
+  "Refreshing an explicitly opened media note restores only cached previews."
+  (let* ((dir (make-temp-file "nostr-note-media-refresh-test" t))
+         (url "https://example.test/photo.png")
+         (nostr-media-cache-directory dir)
+         (nostr-media-auto-preview nil)
+         (nostr-media-fetch-function
+          (lambda (&rest _)
+            (ert-fail "refresh restore should not fetch uncached media"))))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((inhibit-read-only t))
+            (nostr-ui-clear)
+            (puthash "note-media" t (nostr-ui--open-media-notes))
+            (nostr-ui-insert-note
+             `((id . "note-media")
+               (pubkey . "alice")
+               (created-at . 1736776800)
+               (content . ,(format "look %s" url))
+               (replies . 0)
+               (reactions . 0)
+               (reposts . 0))))
+          (should-not (file-exists-p (nostr-media-cache-file url)))
+          (should-not (text-property-any (point-min) (point-max)
+                                         'nostr-media-rendered t))
+          (should (= (how-many "\\[image: https://example.test/photo.png\\]"
+                               (point-min) (point-max))
+                     1)))
+      (when (file-directory-p dir)
+        (delete-directory dir t)))))
+
 (ert-deftest nostr-ui-note-card-wraps-long-body-text ()
   "Card body text is filled like `fill-paragraph' instead of one long line."
   (let ((nostr-ui-card-fill-column 34))

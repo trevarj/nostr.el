@@ -19,6 +19,7 @@
 (require 'url-parse)
 
 (defvar url-http-end-of-headers)
+(defvar url-request-method)
 
 (defcustom nostr-media-cache-directory
   (expand-file-name "nostr-media/" user-emacs-directory)
@@ -40,6 +41,13 @@
 (defcustom nostr-media-auto-preview nil
   "Whether Nostr buffers may load inline media without an explicit command."
   :type 'boolean
+  :group 'nostr)
+
+(defcustom nostr-media-auto-preview-max-per-note 1
+  "Maximum media URLs to automatically preview per note.
+This is only used when `nostr-media-auto-preview' is non-nil.  Manual media
+commands still operate on every supported media URL in the selected note."
+  :type 'integer
   :group 'nostr)
 
 (defvar nostr-media-fetch-function nil
@@ -79,6 +87,19 @@ binary DATA.  ERROR receives a human-readable message.")
     (when (> actual-size nostr-media-max-bytes)
       (error "Media exceeds size limit for %s: %s bytes" url actual-size))))
 
+(defun nostr-media--validate-headers (url headers)
+  "Validate response HEADERS for URL before downloading the body."
+  (let* ((content-type (car (split-string (or (nostr-media--header headers "content-type") "")
+                                          ";" t "[ \t\n\r]+")))
+         (content-length (nostr-media--header headers "content-length"))
+         (declared-size (and content-length (string-to-number content-length))))
+    (unless (member content-type nostr-media-allowed-content-types)
+      (error "Unsupported media content type for %s: %s" url content-type))
+    (unless declared-size
+      (error "Refusing %s: missing content-length" url))
+    (when (> declared-size nostr-media-max-bytes)
+      (error "Media exceeds size limit for %s: %s bytes" url declared-size))))
+
 (defun nostr-media--write-cache (url headers data)
   "Validate and cache downloaded DATA for URL with HEADERS."
   (nostr-media--validate-response url headers data)
@@ -102,10 +123,31 @@ binary DATA.  ERROR receives a human-readable message.")
               headers)))
     headers))
 
-(defun nostr-media-fetch (url success error)
-  "Fetch URL and call SUCCESS with headers/data or ERROR with a message."
-  (if nostr-media-fetch-function
-      (funcall nostr-media-fetch-function url success error)
+(defun nostr-media--fetch-body (url success error &optional fallback-headers)
+  "Fetch URL body and call SUCCESS or ERROR."
+  (url-retrieve
+   url
+   (lambda (status)
+     (unwind-protect
+         (if-let* ((err (plist-get status :error)))
+             (funcall error (format "Could not fetch %s: %S" url err))
+           (let ((headers (nostr-media--url-buffer-headers)))
+             (if (not (equal (nostr-media--header headers "status") "200"))
+                 (funcall error (format "Could not fetch %s: HTTP %s"
+                                        url
+                                        (or (nostr-media--header headers "status") "unknown")))
+               (condition-case err
+                   (let ((data (buffer-substring-no-properties
+                                (1+ url-http-end-of-headers)
+                                (point-max))))
+                     (funcall success (append headers fallback-headers) data))
+                 (error (funcall error (error-message-string err)))))))
+       (kill-buffer (current-buffer))))
+   nil t))
+
+(defun nostr-media--fetch-head-then-body (url success error)
+  "Validate URL with HEAD before downloading its body."
+  (let ((url-request-method "HEAD"))
     (url-retrieve
      url
      (lambda (status)
@@ -117,27 +159,19 @@ binary DATA.  ERROR receives a human-readable message.")
                    (funcall error (format "Could not fetch %s: HTTP %s"
                                           url
                                           (or (nostr-media--header headers "status") "unknown")))
-                 (let* ((content-length (nostr-media--header headers "content-length"))
-                        (declared-size (and content-length
-                                            (string-to-number content-length))))
-                   ;; Enforce the size cap before reading the body into memory:
-                   ;; an absent or oversized content-length is a hard early
-                   ;; reject so an oversized URL cannot OOM Emacs.
-                   (cond
-                    ((null declared-size)
-                     (funcall error
-                              (format "Refusing %s: missing content-length" url)))
-                    ((> declared-size nostr-media-max-bytes)
-                     (funcall error
-                              (format "Media exceeds size limit for %s: %s bytes"
-                                      url declared-size)))
-                    (t
-                     (let ((data (buffer-substring-no-properties
-                                  (1+ url-http-end-of-headers)
-                                  (point-max))))
-                       (funcall success headers data))))))))
+                 (condition-case err
+                     (progn
+                       (nostr-media--validate-headers url headers)
+                       (nostr-media--fetch-body url success error headers))
+                   (error (funcall error (error-message-string err)))))))
          (kill-buffer (current-buffer))))
      nil t)))
+
+(defun nostr-media-fetch (url success error)
+  "Fetch URL and call SUCCESS with headers/data or ERROR with a message."
+  (if nostr-media-fetch-function
+      (funcall nostr-media-fetch-function url success error)
+    (nostr-media--fetch-head-then-body url success error)))
 
 (defun nostr-media-url-at-point ()
   "Return the media URL represented at point, when any."
@@ -235,8 +269,10 @@ Return the number of removed preview blocks."
     file))
 
 ;;;###autoload
-(defun nostr-media-load-at-point ()
-  "Load and render the media placeholder at point."
+(defun nostr-media-load-at-point (&optional cached-only)
+  "Load and render the media placeholder at point.
+When CACHED-ONLY is non-nil, render only an existing cached file and do not
+start a network request."
   (interactive)
   (let* ((url (or (nostr-media-url-at-point)
                   (user-error "No Nostr media placeholder at point")))
@@ -244,18 +280,20 @@ Return the number of removed preview blocks."
          (marker (copy-marker (point) t)))
     (if (file-exists-p file)
         (nostr-media-render-file-at-point url file marker)
-      (nostr-media-fetch
-       url
-       (lambda (headers data)
-         (condition-case err
-             (nostr-media-render-file-at-point
-              url
-              (nostr-media--write-cache url headers data)
-              marker)
-           (error (message "[nostr] %s" (error-message-string err)))))
-       (lambda (message)
-         (message "[nostr] %s" message))))
-    url))
+      (unless cached-only
+        (nostr-media-fetch
+         url
+         (lambda (headers data)
+           (condition-case err
+               (nostr-media-render-file-at-point
+                url
+                (nostr-media--write-cache url headers data)
+                marker)
+             (error (message "[nostr] %s" (error-message-string err)))))
+         (lambda (message)
+           (message "[nostr] %s" message)))))
+    (unless (and cached-only (not (file-exists-p file)))
+      url)))
 
 (provide 'nostr-media)
 ;;; nostr-media.el ends here

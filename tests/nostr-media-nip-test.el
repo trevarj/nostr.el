@@ -58,6 +58,25 @@
           (should-not (string-match-p "\\[image loaded:" (buffer-string))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-media-cached-only-does-not-fetch ()
+  "Cached-only media rendering never starts a network fetch."
+  (let* ((dir (make-temp-file "nostr-media-cached-only-test" t))
+         (url "https://example.com/missing.png")
+         (nostr-media-cache-directory dir)
+         (nostr-media-fetch-function
+          (lambda (&rest _)
+            (ert-fail "cached-only media render should not fetch"))))
+    (unwind-protect
+        (with-temp-buffer
+          (insert-text-button "[image]"
+                              'nostr-media-url url
+                              'follow-link t)
+          (goto-char (point-min))
+          (should-not (nostr-media-load-at-point t))
+          (should-not (file-exists-p (nostr-media-cache-file url)))
+          (should-not (string-match-p "\\[image loaded:" (buffer-string))))
+      (delete-directory dir t))))
+
 (ert-deftest nostr-nip05-verifies-matching-pubkey ()
   "NIP-05 verification succeeds when the names map contains the pubkey."
   (let ((nostr-nip05-fetch-function
