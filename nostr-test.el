@@ -1272,10 +1272,41 @@
           (should (string-prefix-p "search-" sub-id))
           (should (= (length sent) 2))
           (pcase-let ((`(,_url _sub-id ,filters) (car sent)))
-            (should (equal (alist-get "search" (car filters) nil nil #'equal)
+            (should (= (length filters) 2))
+            (should (equal (alist-get "search" (nth 0 filters) nil nil #'equal)
                            "emacs nostr"))
-            (should (equal (alist-get "limit" (car filters) nil nil #'equal)
-                           25))))))))
+            (should (equal (alist-get "limit" (nth 0 filters) nil nil #'equal)
+                           25))
+            (should (equal (alist-get "kinds" (nth 0 filters) nil nil #'equal)
+                           (list nostr-kind-text-note)))
+            (should (equal (alist-get "search" (nth 1 filters) nil nil #'equal)
+                           "emacs nostr"))
+            (should (equal (alist-get "limit" (nth 1 filters) nil nil #'equal)
+                           25))
+            (should (equal (alist-get "kinds" (nth 1 filters) nil nil #'equal)
+                           (list nostr-kind-metadata)))))))))
+
+(ert-deftest nostr-search-relay-fetches-authors-from-profile-hits ()
+  "Matching profile search events trigger bounded author activity fetches."
+  (let ((nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+        (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+        fetched)
+    (puthash "search-test" "@alice" nostr-relay--search-profile-queries)
+    (cl-letf (((symbol-function 'nostr-relay-fetch-author)
+               (lambda (pubkey &optional limit)
+                 (push (list pubkey limit) fetched)
+                 "author-sub")))
+      (nostr-relay--maybe-fetch-profile-search-author
+       "search-test"
+       '((kind . 0)
+         (pubkey . "alice-pubkey")
+         (content . "{\"name\":\"alice\",\"display_name\":\"Alice Example\"}")))
+      (nostr-relay--maybe-fetch-profile-search-author
+       "search-test"
+       '((kind . 0)
+         (pubkey . "alice-pubkey")
+         (content . "{\"name\":\"alice\",\"display_name\":\"Alice Example\"}")))
+      (should (equal fetched (list (list "alice-pubkey" nostr-default-feed-limit)))))))
 
 (ert-deftest nostr-search-relay-detects-author-identifiers ()
   "Author identifiers use author subscriptions instead of NIP-50 text search."
@@ -1312,6 +1343,21 @@
       (let ((results (nostr-search--select-local "npub1alice" 10)))
         (should (= (length results) 1))
         (should (equal (alist-get 'id (car results)) "alice-note"))))))
+
+(ert-deftest nostr-search-local-matches-cached-profile-fields ()
+  "Local search matches cached author name, display name, and NIP-05 fields."
+  (nostr-test-with-db
+    (nostr-db-store-profile-event
+     '((id . "profile-bob")
+       (pubkey . "bob-pubkey")
+       (created_at . 100)
+       (kind . 0)
+       (content . "{\"name\":\"bob\",\"display_name\":\"Bobby Tables\",\"nip05\":\"bob@example.test\"}")))
+    (nostr-test-store-text-note "bob-note" "bob-pubkey" 120 "unrelated content")
+    (dolist (query '("@bob" "Bobby" "example.test"))
+      (let ((results (nostr-search--select-local query 10)))
+        (should (= (length results) 1))
+        (should (equal (alist-get 'id (car results)) "bob-note"))))))
 
 (ert-deftest nostr-search-open-starts-relay-lookup ()
   "Opening a search buffer queries relays by default."

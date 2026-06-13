@@ -170,6 +170,12 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--event-id-requests (make-hash-table :test #'equal)
   "Event ids recently requested directly by id.")
 
+(defvar nostr-relay--search-profile-queries (make-hash-table :test #'equal)
+  "Search subscription ids to profile query strings.")
+
+(defvar nostr-relay--search-profile-author-requests (make-hash-table :test #'equal)
+  "Profile-search author fetches already requested by query and pubkey.")
+
 (defvar nostr-relay--global-last-request-time nil
   "Last `float-time' when Global requested relay events.")
 
@@ -430,11 +436,52 @@ queued event) when the verification resolves."
      (nostr-relay--verify-finished)))
   'pending-verification)
 
-(defun nostr-relay--handle-event (url _sub-id event)
+(defun nostr-relay--search-profile-query-key (query)
+  "Return normalized key for profile search QUERY."
+  (downcase (string-remove-prefix "@" (string-trim (or query "")))))
+
+(defun nostr-relay--search-profile-content-match-p (query content)
+  "Return non-nil when profile CONTENT matches profile search QUERY."
+  (let ((needle (nostr-relay--search-profile-query-key query)))
+    (and (not (string-empty-p needle))
+         (stringp content)
+         (ignore-errors
+           (let* ((profile (json-parse-string content
+                                              :object-type 'alist
+                                              :array-type 'list
+                                              :false-object nil))
+                  (fields (list (alist-get 'name profile)
+                                (alist-get 'display_name profile)
+                                (alist-get 'displayName profile)
+                                (alist-get 'username profile)
+                                (alist-get 'nip05 profile))))
+             (seq-some
+              (lambda (value)
+                (and (stringp value)
+                     (string-match-p (regexp-quote needle) (downcase value))))
+              fields))))))
+
+(defun nostr-relay--maybe-fetch-profile-search-author (sub-id event)
+  "Fetch author activity when profile-search EVENT matches SUB-ID's query."
+  (when-let* ((query (gethash sub-id nostr-relay--search-profile-queries)))
+    (when (and (equal (alist-get 'kind event) nostr-kind-metadata)
+               (nostr-relay--search-profile-content-match-p
+                query
+                (alist-get 'content event)))
+      (when-let* ((pubkey (alist-get 'pubkey event)))
+        (let ((request-key (concat (nostr-relay--search-profile-query-key query)
+                                   "\0"
+                                   pubkey)))
+          (unless (gethash request-key nostr-relay--search-profile-author-requests)
+            (puthash request-key t nostr-relay--search-profile-author-requests)
+            (nostr-relay-fetch-author pubkey nostr-default-feed-limit)))))))
+
+(defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
 When `nostr-relay-verify-events' is non-nil, verification subprocesses are
 bounded by `nostr-relay-max-concurrent-verifications'; events arriving while
 at the cap are queued (never dropped) and dispatched as verifications finish."
+  (nostr-relay--maybe-fetch-profile-search-author sub-id event)
   (if (not nostr-relay-verify-events)
       (nostr-relay--store-verified-event url event)
     (if (>= nostr-relay--verify-inflight
@@ -496,6 +543,7 @@ at the cap are queued (never dropped) and dispatched as verifications finish."
     (`("CLOSED" ,sub-id . ,rest)
      (remhash sub-id nostr-relay--subscriptions)
      (nostr-relay--note-profile-eose sub-id)
+     (remhash sub-id nostr-relay--search-profile-queries)
      (nostr-db-store-relay-status url "closed" (car rest)))
     (`("OK" ,event-id ,accepted . ,rest)
      (let ((message (car rest)))
@@ -969,13 +1017,18 @@ open relays.  Otherwise publish to every open relay."
      urls)))
 
 (defun nostr-relay-search (query &optional limit)
-  "Request NIP-50 text search QUERY from connected relays."
-  (let ((sub-id (format "search-%s" (md5 query)))
-        (filter `(("kinds" . (,nostr-kind-text-note))
-                  ("search" . ,query)
-                  ("limit" . ,(or limit 50)))))
+  "Request NIP-50 note and profile search QUERY from connected relays."
+  (let* ((sub-id (format "search-%s" (md5 query)))
+         (limit (or limit 50))
+         (note-filter `(("kinds" . (,nostr-kind-text-note))
+                        ("search" . ,query)
+                        ("limit" . ,limit)))
+         (profile-filter `(("kinds" . (,nostr-kind-metadata))
+                           ("search" . ,query)
+                           ("limit" . ,limit))))
+    (puthash sub-id query nostr-relay--search-profile-queries)
     (maphash (lambda (url _ws)
-               (nostr-relay-subscribe url sub-id (list filter)))
+               (nostr-relay-subscribe url sub-id (list note-filter profile-filter)))
              nostr-relay--connections)
     sub-id))
 

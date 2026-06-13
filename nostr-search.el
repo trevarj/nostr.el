@@ -72,6 +72,10 @@
   "Return a SQL LIKE pattern for QUERY."
   (concat "%" query "%"))
 
+(defun nostr-search--profile-query (query)
+  "Return QUERY normalized for cached profile field matching."
+  (string-remove-prefix "@" (string-trim query)))
+
 (defun nostr-search--hex-pubkey-p (query)
   "Return non-nil when QUERY is a raw hex pubkey."
   (string-match-p "\\`[0-9a-fA-F]\\{64\\}\\'" query))
@@ -90,7 +94,8 @@
 
 (defun nostr-search--select-local (query &optional limit)
   "Return local note results matching QUERY."
-  (let ((pubkey (nostr-search--query-pubkey query)))
+  (let* ((pubkey (nostr-search--query-pubkey query))
+         (profile-query (nostr-search--profile-query query)))
     (mapcar #'nostr-db--event-row-to-alist
             (emacsql nostr-db--connection
                      [:select
@@ -103,12 +108,16 @@
                                   (or (like events:content $s1)
                                       (= events:id $s2)
                                       (= events:pubkey $s2)
-                                      (= events:pubkey $s3)))
+                                      (= events:pubkey $s3)
+                                      (like profiles:name $s4)
+                                      (like profiles:display_name $s4)
+                                      (like profiles:nip05 $s4)))
                       :order-by [(desc events:created_at)]
-                      :limit $s4]
+                      :limit $s5]
                      (nostr-search--like-pattern query)
                      query
                      pubkey
+                     (nostr-search--like-pattern profile-query)
                      (or limit nostr-search-limit)))))
 
 (defun nostr-search-refresh ()
