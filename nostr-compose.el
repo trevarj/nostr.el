@@ -49,6 +49,18 @@
 (defvar-local nostr-compose-draft-file nil
   "Autosave file for this compose buffer.")
 
+(defvar-local nostr-compose--draft-cycle-entries nil
+  "Draft history entries currently being cycled in this compose buffer.")
+
+(defvar-local nostr-compose--draft-cycle-index nil
+  "Current index into `nostr-compose--draft-cycle-entries'.")
+
+(defvar-local nostr-compose--restoring-draft nil
+  "Whether this compose buffer is currently restoring draft content.")
+
+(defvar-local nostr-compose--draft-save-timer nil
+  "Pending autosave timer for the current compose buffer.")
+
 (defvar-local nostr-compose--uploading nil
   "Whether this compose buffer is uploading attachments.")
 
@@ -59,6 +71,17 @@
   (expand-file-name "nostr-drafts/" user-emacs-directory)
   "Directory where unsent compose drafts are autosaved."
   :type 'directory
+  :group 'nostr)
+
+(defcustom nostr-compose-draft-history-file nil
+  "File storing reusable compose draft history.
+When nil, use history.el inside `nostr-compose-draft-directory'."
+  :type '(choice (const :tag "Use draft directory history.el" nil) file)
+  :group 'nostr)
+
+(defcustom nostr-compose-draft-history-length 50
+  "Maximum number of compose drafts kept in reusable history."
+  :type 'integer
   :group 'nostr)
 
 (defcustom nostr-compose-mention-completion-limit 200
@@ -88,6 +111,8 @@ smaller frames."
     (define-key map (kbd "C-c C-c") #'nostr-compose-send)
     (define-key map (kbd "C-c C-k") #'nostr-compose-cancel)
     (define-key map (kbd "C-c C-a") #'nostr-compose-attach-file)
+    (define-key map (kbd "M-p") #'nostr-compose-previous-draft)
+    (define-key map (kbd "M-n") #'nostr-compose-next-draft)
     (define-key map (kbd "?") #'nostr-compose-actions)
     map)
   "Keymap for `nostr-compose-mode'.")
@@ -105,14 +130,19 @@ smaller frames."
     ("C-c C-c" "Send" nostr-compose-send)
     ("C-c C-a" "Attach file" nostr-compose-attach-file)
     ("C-c C-k" "Cancel" nostr-compose-cancel)
-    ("R" "Restore draft" nostr-compose-restore-draft)]])
+    ("M-p" "Previous draft" nostr-compose-previous-draft)
+    ("M-n" "Next draft" nostr-compose-next-draft)
+    ("R" "Restore latest" nostr-compose-restore-draft)]])
 
 (defun nostr-compose--after-change (&rest _ignored)
   "Mark current compose buffer as dirty after content changes."
-  (when (or (not (markerp nostr-compose-content-start))
-            (>= (point-max) nostr-compose-content-start))
+  (when (and (not nostr-compose--restoring-draft)
+             (or (not (markerp nostr-compose-content-start))
+                 (>= (point-max) nostr-compose-content-start)))
+    (setq nostr-compose--draft-cycle-entries nil)
+    (setq nostr-compose--draft-cycle-index nil)
     (setq nostr-compose-dirty t)
-    (nostr-compose--save-draft)))
+    (nostr-compose--schedule-save-draft)))
 
 (defun nostr-compose--content ()
   "Return editable compose buffer content."
@@ -193,10 +223,14 @@ smaller frames."
 
 (defun nostr-compose--confirm-kill ()
   "Ask before killing a compose buffer with unsent content."
-  (or nostr-compose--sent
-      (not nostr-compose-dirty)
-      (string-empty-p (nostr-compose--content))
-      (yes-or-no-p "Discard unsent Nostr draft? ")))
+  (cond
+   (nostr-compose--sent t)
+   ((not nostr-compose-dirty) t)
+   ((string-empty-p (nostr-compose--content)) t)
+   ((yes-or-no-p "Discard unsent Nostr draft? ")
+    (nostr-compose--record-draft)
+    t)
+   (t nil)))
 
 (defconst nostr-compose--attachment-regexp
   "\\[attachment:\\([^]\n]+\\)\\]"
@@ -330,13 +364,81 @@ smaller frames."
     (content . ,(nostr-compose--draft-content))
     (updated-at . ,(truncate (float-time)))))
 
+(defun nostr-compose--draft-history-path ()
+  "Return the compose draft history file path."
+  (or nostr-compose-draft-history-file
+      (expand-file-name "history.el" nostr-compose-draft-directory)))
+
+(defun nostr-compose--read-draft-data (file)
+  "Read draft data from FILE, returning nil if it cannot be read."
+  (when (and file (file-readable-p file))
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file)
+          (read (current-buffer)))
+      (error nil))))
+
+(defun nostr-compose--same-draft-p (a b)
+  "Return non-nil when draft A and B represent the same reusable content."
+  (and (equal (alist-get 'content a) (alist-get 'content b))
+       (equal (alist-get 'reply-to a) (alist-get 'reply-to b))
+       (equal (alist-get 'extra-tags a) (alist-get 'extra-tags b))))
+
+(defun nostr-compose--usable-draft-p (draft)
+  "Return non-nil when DRAFT has reusable content."
+  (and (listp draft)
+       (not (string-empty-p
+             (string-trim (or (alist-get 'content draft) ""))))))
+
+(defun nostr-compose--read-draft-history ()
+  "Return saved compose draft history entries."
+  (let ((history (nostr-compose--read-draft-data
+                  (nostr-compose--draft-history-path))))
+    (if (listp history) history nil)))
+
+(defun nostr-compose--write-draft-history (history)
+  "Persist compose draft HISTORY."
+  (make-directory (file-name-directory (nostr-compose--draft-history-path)) t)
+  (with-temp-file (nostr-compose--draft-history-path)
+    (let ((print-length nil)
+          (print-level nil))
+      (prin1 history (current-buffer)))))
+
+(defun nostr-compose--record-draft (&optional draft)
+  "Record DRAFT or the current buffer content in reusable history."
+  (let ((entry (or draft (nostr-compose--draft-data))))
+    (when (nostr-compose--usable-draft-p entry)
+      (let* ((history (cl-remove-if
+                       (lambda (candidate)
+                         (nostr-compose--same-draft-p entry candidate))
+                       (nostr-compose--read-draft-history)))
+             (limit (max 1 nostr-compose-draft-history-length)))
+        (nostr-compose--write-draft-history
+         (seq-take (cons entry history) limit))))))
+
+(defun nostr-compose--save-draft-buffer (buffer)
+  "Autosave compose draft for BUFFER when it is still live."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq nostr-compose--draft-save-timer nil)
+      (nostr-compose--save-draft))))
+
+(defun nostr-compose--schedule-save-draft ()
+  "Schedule autosave after the current edit finishes."
+  (when (timerp nostr-compose--draft-save-timer)
+    (cancel-timer nostr-compose--draft-save-timer))
+  (setq nostr-compose--draft-save-timer
+        (run-at-time 0 nil #'nostr-compose--save-draft-buffer
+                     (current-buffer))))
+
 (defun nostr-compose--save-draft ()
   "Autosave the current compose buffer."
-  (when (and (derived-mode-p 'nostr-compose-mode)
-             (not nostr-compose--sent)
-             (not nostr-compose--uploading)
-             (markerp nostr-compose-content-start)
-             (not (string-empty-p (string-trim (nostr-compose--draft-content)))))
+  (let ((content (and (markerp nostr-compose-content-start)
+                      (nostr-compose--draft-content))))
+    (when (and (derived-mode-p 'nostr-compose-mode)
+               (not nostr-compose--sent)
+               (not nostr-compose--uploading)
+               (not (string-empty-p (string-trim (or content "")))))
     (make-directory nostr-compose-draft-directory t)
     (unless nostr-compose-draft-file
       (setq nostr-compose-draft-file
@@ -346,7 +448,7 @@ smaller frames."
     (with-temp-file nostr-compose-draft-file
       (let ((print-length nil)
             (print-level nil))
-        (prin1 (nostr-compose--draft-data) (current-buffer))))))
+        (prin1 (nostr-compose--draft-data) (current-buffer)))))))
 
 (defun nostr-compose--delete-draft ()
   "Delete the current draft autosave file."
@@ -354,26 +456,104 @@ smaller frames."
              (file-exists-p nostr-compose-draft-file))
     (delete-file nostr-compose-draft-file)))
 
-(defun nostr-compose--latest-draft-file ()
-  "Return most recently modified compose draft file."
+(defun nostr-compose--draft-files ()
+  "Return autosaved draft files, newest first."
   (when (file-directory-p nostr-compose-draft-directory)
-    (car (sort (directory-files nostr-compose-draft-directory t "\\.el\\'")
-               (lambda (a b)
-                 (time-less-p (file-attribute-modification-time (file-attributes b))
-                              (file-attribute-modification-time (file-attributes a))))))))
+    (let ((history-path (expand-file-name (nostr-compose--draft-history-path))))
+      (sort (cl-remove-if
+             (lambda (file)
+               (equal (expand-file-name file) history-path))
+             (directory-files nostr-compose-draft-directory t "\\.el\\'"))
+            (lambda (a b)
+              (time-less-p (file-attribute-modification-time (file-attributes b))
+                           (file-attribute-modification-time (file-attributes a))))))))
+
+(defun nostr-compose--latest-draft ()
+  "Return the newest autosaved or historical compose draft."
+  (or (seq-some (lambda (file)
+                  (let ((draft (nostr-compose--read-draft-data file)))
+                    (and (nostr-compose--usable-draft-p draft) draft)))
+                (nostr-compose--draft-files))
+      (seq-find #'nostr-compose--usable-draft-p
+                (nostr-compose--read-draft-history))))
+
+(defun nostr-compose--draft-candidates (&optional skip-current)
+  "Return draft candidates for cycling.
+When SKIP-CURRENT is non-nil, omit entries matching current buffer content."
+  (let* ((autosaves (seq-filter #'nostr-compose--usable-draft-p
+                                (delq nil (mapcar #'nostr-compose--read-draft-data
+                                                  (nostr-compose--draft-files)))))
+         (entries (seq-filter #'nostr-compose--usable-draft-p
+                              (append autosaves (nostr-compose--read-draft-history))))
+         result)
+    (dolist (entry entries (nreverse result))
+      (unless (or (and skip-current
+                       (nostr-compose--same-draft-p
+                        (nostr-compose--draft-data)
+                        entry))
+                  (seq-some (lambda (seen)
+                              (nostr-compose--same-draft-p entry seen))
+                            result))
+        (push entry result)))))
+
+(defun nostr-compose--apply-draft (draft)
+  "Replace the current compose buffer with DRAFT."
+  (let ((inhibit-read-only t)
+        (nostr-compose--restoring-draft t))
+    (erase-buffer)
+    (setq nostr-compose-reply-to (alist-get 'reply-to draft))
+    (setq nostr-compose-extra-tags (alist-get 'extra-tags draft))
+    (nostr-compose--insert-context)
+    (setq nostr-compose-content-start (copy-marker (point)))
+    (insert (or (alist-get 'content draft) ""))
+    (setq nostr-compose-dirty t)
+    (force-mode-line-update)))
 
 (defun nostr-compose-restore-draft ()
   "Restore the most recent unsent compose draft."
   (interactive)
-  (let* ((file (or (nostr-compose--latest-draft-file)
-                   (user-error "No Nostr compose drafts found")))
-         (draft (with-temp-buffer
-                  (insert-file-contents file)
-                  (read (current-buffer)))))
-    (nostr-compose-open (alist-get 'reply-to draft)
-                        (alist-get 'extra-tags draft)
-                        (alist-get 'content draft)
-                        file)))
+  (let ((draft (or (nostr-compose--latest-draft)
+                   (user-error "No Nostr compose drafts found"))))
+    (if (derived-mode-p 'nostr-compose-mode)
+        (progn
+          (nostr-compose--apply-draft draft)
+          (nostr-compose--save-draft)
+          (message "Nostr draft restored"))
+      (nostr-compose-open (alist-get 'reply-to draft)
+                          (alist-get 'extra-tags draft)
+                          (alist-get 'content draft)))))
+
+(defun nostr-compose--cycle-draft (step)
+  "Cycle compose draft history by STEP."
+  (unless (derived-mode-p 'nostr-compose-mode)
+    (user-error "Not in a Nostr compose buffer"))
+  (unless nostr-compose--draft-cycle-entries
+    (setq nostr-compose--draft-cycle-entries
+          (nostr-compose--draft-candidates t))
+    (setq nostr-compose--draft-cycle-index nil))
+  (unless nostr-compose--draft-cycle-entries
+    (user-error "No previous Nostr drafts found"))
+  (setq nostr-compose--draft-cycle-index
+        (mod (+ (or nostr-compose--draft-cycle-index
+                    (if (> step 0) -1 0))
+                step)
+             (length nostr-compose--draft-cycle-entries)))
+  (nostr-compose--apply-draft
+   (nth nostr-compose--draft-cycle-index nostr-compose--draft-cycle-entries))
+  (nostr-compose--save-draft)
+  (message "Nostr draft %d/%d"
+           (1+ nostr-compose--draft-cycle-index)
+           (length nostr-compose--draft-cycle-entries)))
+
+(defun nostr-compose-previous-draft ()
+  "Restore the previous saved compose draft, like commit message history."
+  (interactive)
+  (nostr-compose--cycle-draft 1))
+
+(defun nostr-compose-next-draft ()
+  "Restore the next saved compose draft, like commit message history."
+  (interactive)
+  (nostr-compose--cycle-draft -1))
 
 (defun nostr-compose--completion-candidates ()
   "Return cached profile completion candidates as LABEL/PUBKEY pairs."
@@ -448,6 +628,8 @@ With FORCE, close without prompting."
   (interactive "P")
   (when (or force (nostr-compose--confirm-kill))
     (let ((nostr-compose--sent t))
+      (unless (string-empty-p (nostr-compose--content))
+        (nostr-compose--record-draft))
       (nostr-compose--delete-draft)
       (kill-buffer (current-buffer)))
     (message "Nostr compose cancelled")))
@@ -473,6 +655,7 @@ With FORCE, close without prompting."
                   (if (= sent-count 1) "" "s")))
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
+           (nostr-compose--record-draft)
            (setq nostr-compose--sent t)
            (nostr-compose--delete-draft))
          (kill-buffer buffer)))

@@ -826,6 +826,50 @@
         (nostr-compose-cancel)))
     (should-not (buffer-live-p buffer))))
 
+(ert-deftest nostr-compose-cancel-records-draft-history ()
+  (let* ((dir (make-temp-file "nostr-compose-drafts" t))
+         (nostr-compose-draft-directory dir)
+         (nostr-compose-draft-history-file nil)
+         (buffer (generate-new-buffer "*nostr-compose-history-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (nostr-compose-mode)
+            (insert "abandoned draft"))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+            (with-current-buffer buffer
+              (nostr-compose-cancel)))
+          (let ((history (nostr-compose--read-draft-history)))
+            (should (equal (alist-get 'content (car history))
+                           "abandoned draft"))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq nostr-compose--sent t))
+        (kill-buffer buffer))
+      (delete-directory dir t))))
+
+(ert-deftest nostr-compose-draft-history-cycles-in-current-buffer ()
+  (let* ((dir (make-temp-file "nostr-compose-drafts" t))
+         (nostr-compose-draft-directory dir)
+         (nostr-compose-draft-history-file nil))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (nostr-compose--write-draft-history
+           '(((content . "newer draft") (updated-at . 2))
+             ((content . "older draft") (updated-at . 1))))
+          (with-temp-buffer
+            (nostr-compose-mode)
+            (setq-local nostr-compose-content-start (copy-marker (point)))
+            (insert "current draft")
+            (nostr-compose-previous-draft)
+            (should (equal (nostr-compose--content) "newer draft"))
+            (nostr-compose-previous-draft)
+            (should (equal (nostr-compose--content) "older draft"))
+            (nostr-compose-next-draft)
+            (should (equal (nostr-compose--content) "newer draft"))))
+      (delete-directory dir t))))
+
 (ert-deftest nostr-compose-send-empty-signals-user-error ()
   (with-temp-buffer
     (nostr-compose-mode)
