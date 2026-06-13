@@ -15,6 +15,7 @@
 (require 'nostr-backend)
 (require 'nostr-db)
 (require 'nostr-relay)
+(require 'nostr-search)
 
 (defmacro nostr-live-relay-smoke-test-with-db (&rest body)
   "Run BODY with an isolated in-memory Nostr database."
@@ -159,6 +160,40 @@
       (should-not rejected-message)
       (should accepted-message)
       (should event-id))))
+
+(ert-deftest nostr-live-relay-smoke-searches-profile-name ()
+  "Search a real indexed relay for ODELL and populate local note results."
+  (skip-unless (getenv "NOSTR_LIVE_RELAY_SEARCH_TEST"))
+  (nostr-live-relay-smoke-test-with-db
+    (let* ((url (or (getenv "NOSTR_LIVE_SEARCH_RELAY_URL")
+                    "wss://relay.primal.net"))
+           (nostr-relay-urls nil)
+           (nostr-relay-search-urls '("wss://cache2.primal.net/v1"))
+           (nostr-relay-search-author-urls (list url))
+           (nostr-relay--connections (make-hash-table :test #'equal))
+           (nostr-relay--connecting (make-hash-table :test #'equal))
+           (nostr-relay--subscriptions (make-hash-table :test #'equal))
+           (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+           (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+           (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+           ;; This smoke focuses on search subscription behavior.  Signature
+           ;; verification coverage lives in the generic live receive test.
+           (nostr-relay-verify-events nil)
+           (nostr-relay-open-timeout-seconds 5)
+           (nostr-default-feed-limit 25))
+      (unwind-protect
+          (progn
+            (nostr-relay-search "ODELL" 25)
+            (should
+             (nostr-live-relay-smoke-test-wait-until
+              (lambda ()
+                (nostr-search--select-local "ODELL" 5))
+              20))
+            (should (nostr-search--select-local "@ODELL" 5)))
+        (maphash (lambda (_url ws)
+                   (when (and (websocket-p ws) (websocket-openp ws))
+                     (websocket-close ws)))
+                 nostr-relay--connections)))))
 
 (provide 'nostr-live-relay-smoke-test)
 ;;; nostr-live-relay-smoke-test.el ends here

@@ -113,6 +113,18 @@ syncing state is force-cleared after this many seconds."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-search-urls '("wss://cache2.primal.net/v1")
+  "Additional search-capable relays used for profile searches.
+These relays are connected lazily when search is requested and are not used for
+startup feed subscriptions unless also present in `nostr-relay-urls'."
+  :type '(repeat string)
+  :group 'nostr)
+
+(defcustom nostr-relay-search-author-urls '("wss://relay.primal.net")
+  "Additional relays used to fetch notes for profile-search matches."
+  :type '(repeat string)
+  :group 'nostr)
+
 (defcustom nostr-relay-activity-idle-delay 1.5
   "Seconds to keep the mode-line ingestion indicator visible after events arrive."
   :type 'number
@@ -175,6 +187,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 
 (defvar nostr-relay--search-profile-author-requests (make-hash-table :test #'equal)
   "Profile-search author fetches already requested by query and pubkey.")
+
+(defvar nostr-relay--pending-subscriptions (make-hash-table :test #'equal)
+  "Relay URL to pending subscriptions as (SUB-ID FILTERS) lists.")
 
 (defvar nostr-relay--global-last-request-time nil
   "Last `float-time' when Global requested relay events.")
@@ -320,6 +335,27 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
   "Subscribe to URL with SUB-ID and FILTERS."
   (puthash sub-id t nostr-relay--subscriptions)
   (nostr-relay--send url (vconcat `["REQ" ,sub-id] filters)))
+
+(defun nostr-relay--connection-open-p (url)
+  "Return non-nil when URL has an open websocket connection.
+Unit tests use t as a lightweight connection sentinel."
+  (let ((ws (gethash url nostr-relay--connections)))
+    (or (eq ws t)
+        (and (websocket-p ws) (websocket-openp ws)))))
+
+(defun nostr-relay--queue-subscription (url sub-id filters)
+  "Queue SUB-ID with FILTERS until URL opens."
+  (let ((pending (gethash url nostr-relay--pending-subscriptions)))
+    (puthash url (cons (list sub-id filters) pending)
+             nostr-relay--pending-subscriptions)))
+
+(defun nostr-relay--drain-pending-subscriptions (url)
+  "Send pending subscriptions for URL."
+  (when-let* ((pending (gethash url nostr-relay--pending-subscriptions)))
+    (remhash url nostr-relay--pending-subscriptions)
+    (dolist (request (nreverse pending))
+      (pcase-let ((`(,sub-id ,filters) request))
+        (nostr-relay-subscribe url sub-id filters)))))
 
 (defun nostr-relay-close-subscription (url sub-id)
   "Close SUB-ID on relay URL."
@@ -474,7 +510,9 @@ queued event) when the verification resolves."
                                    pubkey)))
           (unless (gethash request-key nostr-relay--search-profile-author-requests)
             (puthash request-key t nostr-relay--search-profile-author-requests)
-            (nostr-relay-fetch-author pubkey nostr-default-feed-limit)))))))
+            (nostr-relay-fetch-author pubkey nostr-default-feed-limit)
+            (nostr-relay-fetch-author-from-urls
+             pubkey nostr-default-feed-limit nostr-relay-search-author-urls)))))))
 
 (defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
@@ -747,8 +785,10 @@ nil on failure."
                              (when (timerp timeout-timer)
                                (cancel-timer timeout-timer))
                              (nostr-db-store-relay-status url "open")
-                             (nostr-relay-subscribe-personal url pubkey)
-                             (nostr-relay-subscribe-follows-feed url pubkey))
+                             (nostr-relay--drain-pending-subscriptions url)
+                             (when pubkey
+                               (nostr-relay-subscribe-personal url pubkey)
+                               (nostr-relay-subscribe-follows-feed url pubkey)))
                   :on-close (lambda (_ws)
                               (when (timerp timeout-timer)
                                 (cancel-timer timeout-timer))
@@ -1016,37 +1056,89 @@ open relays.  Otherwise publish to every open relay."
      (nostr-relay--event-envelope event)
      urls)))
 
-(defun nostr-relay-search (query &optional limit)
-  "Request NIP-50 note and profile search QUERY from connected relays."
-  (let* ((sub-id (format "search-%s" (md5 query)))
-         (limit (or limit 50))
-         (note-filter `(("kinds" . (,nostr-kind-text-note))
-                        ("search" . ,query)
-                        ("limit" . ,limit)))
-         (profile-filter `(("kinds" . (,nostr-kind-metadata))
-                           ("search" . ,query)
-                           ("limit" . ,limit))))
-    (puthash sub-id query nostr-relay--search-profile-queries)
+(defun nostr-relay--search-target-urls ()
+  "Return connected and configured search relay URLs."
+  (let (urls)
     (maphash (lambda (url _ws)
-               (nostr-relay-subscribe url sub-id (list note-filter profile-filter)))
+               (cl-pushnew url urls :test #'equal))
              nostr-relay--connections)
+    (dolist (url nostr-relay-search-urls)
+      (when (and (stringp url) (not (string-empty-p url)))
+        (cl-pushnew url urls :test #'equal)))
+    (nreverse urls)))
+
+(defun nostr-relay--primal-cache-url-p (url)
+  "Return non-nil when URL is a Primal cache websocket endpoint."
+  (string-match-p "\\`wss://cache[0-9]*[.]primal[.]net/" url))
+
+(defun nostr-relay--nip50-search-url-p (url)
+  "Return non-nil when URL should receive standard NIP-50 filters."
+  (not (string-match-p "\\`wss://relay[.]primal[.]net\\'" url)))
+
+(defun nostr-relay--search-filters-for-url (url query profile-query limit)
+  "Return search filters for URL using QUERY and PROFILE-QUERY."
+  (cond
+   ((nostr-relay--primal-cache-url-p url)
+    `((("cache" . ("user_search" (("query" . ,profile-query)
+                                  ("limit" . ,limit)))))))
+   ((nostr-relay--nip50-search-url-p url)
+    `((("kinds" . (,nostr-kind-text-note))
+       ("search" . ,query)
+       ("limit" . ,limit))
+      (("kinds" . (,nostr-kind-metadata))
+       ("search" . ,profile-query)
+       ("limit" . ,limit))))
+   (t nil)))
+
+(defun nostr-relay-search (query &optional limit)
+  "Request relay-backed note and profile search QUERY."
+  (let* ((profile-query (nostr-relay--search-profile-query-key query))
+         (sub-id (format "search-%s" (md5 query)))
+         (limit (or limit 50)))
+    (puthash sub-id query nostr-relay--search-profile-queries)
+    (dolist (url (nostr-relay--search-target-urls))
+      (when-let* ((filters (nostr-relay--search-filters-for-url
+                            url query profile-query limit)))
+        (if (nostr-relay--connection-open-p url)
+            (nostr-relay-subscribe url sub-id filters)
+          (progn
+            (nostr-relay--queue-subscription url sub-id filters)
+            (nostr-relay-open url nil)))))
     sub-id))
+
+(defun nostr-relay--author-filters (pubkey limit)
+  "Return filters for public activity by PUBKEY."
+  `((("kinds" . (,nostr-kind-metadata
+                 ,nostr-kind-contacts
+                 ,nostr-kind-text-note
+                 ,nostr-kind-repost
+                 ,nostr-kind-reaction
+                 ,nostr-kind-zap-receipt
+                 ,nostr-kind-relay-list))
+     ("authors" . (,pubkey))
+     ("limit" . ,limit))))
 
 (defun nostr-relay-fetch-author (pubkey &optional limit)
   "Request cached profile and public activity for author PUBKEY."
   (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
-        (filter `(("kinds" . (,nostr-kind-metadata
-                              ,nostr-kind-contacts
-                              ,nostr-kind-text-note
-                              ,nostr-kind-repost
-                              ,nostr-kind-reaction
-                              ,nostr-kind-zap-receipt
-                              ,nostr-kind-relay-list))
-                  ("authors" . (,pubkey))
-                  ("limit" . ,(or limit 50)))))
+        (filters (nostr-relay--author-filters pubkey (or limit 50))))
     (maphash (lambda (url _ws)
-               (nostr-relay-subscribe url sub-id (list filter)))
+               (nostr-relay-subscribe url sub-id filters))
              nostr-relay--connections)
+    sub-id))
+
+(defun nostr-relay-fetch-author-from-urls (pubkey &optional limit urls)
+  "Request public activity for author PUBKEY from URLS.
+Missing URLs are opened lazily and the author subscription is queued."
+  (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
+        (filters (nostr-relay--author-filters pubkey (or limit 50))))
+    (dolist (url urls)
+      (when (and (stringp url) (not (string-empty-p url)))
+        (if (nostr-relay--connection-open-p url)
+            (nostr-relay-subscribe url sub-id filters)
+          (progn
+            (nostr-relay--queue-subscription url sub-id filters)
+            (nostr-relay-open url nil)))))
     sub-id))
 
 (defun nostr-relay-fetch-profile (pubkey &optional url)
