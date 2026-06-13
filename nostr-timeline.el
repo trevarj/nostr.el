@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'transient)
+(require 'seq)
 (require 'nostr-actions)
 (require 'nostr-compose)
 (require 'nostr-db)
@@ -37,6 +38,13 @@
 
 (defcustom nostr-timeline-limit 100
   "Maximum number of notes shown in timeline buffers."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-timeline-metadata-backfill-limit 25
+  "Maximum rendered notes whose profiles and interactions are backfilled.
+This keeps startup refreshes from multiplying into hundreds of profile,
+reaction, repost, reply, and zap subscriptions across every connected relay."
   :type 'integer
   :group 'nostr)
 
@@ -122,7 +130,7 @@
   (pcase nostr-timeline-feed-kind
     ((or 'feed 'home) "Notes from accounts you follow.")
     ((or 'conversations 'replies) "Replies by accounts you follow.")
-    ('global "All cached notes from current relays.")
+    ('global "Recent notes from current relays.")
     ('my-posts "Notes authored by the current account.")
     ('media "Followed-account notes that include media links.")
     (_ "Notes from accounts you follow.")))
@@ -146,6 +154,7 @@
 
 (defun nostr-timeline--backfill-visible-metadata (events)
   "Request relay metadata for visible timeline EVENTS."
+  (setq events (seq-take events nostr-timeline-metadata-backfill-limit))
   (nostr-timeline--backfill-profiles events)
   (nostr-relay-fetch-event-metadata
    (mapcar (lambda (event) (alist-get 'id event)) events)))
@@ -158,6 +167,12 @@
       nostr-timeline-current-pubkey
       nostr-timeline-limit))))
 
+(defun nostr-timeline--sync-active-feed ()
+  "Start or stop relay work for the active timeline feed."
+  (if (eq nostr-timeline-feed-kind 'global)
+      (nostr-relay-subscribe-global)
+    (nostr-relay-close-global)))
+
 (defun nostr-timeline-refresh ()
   "Refresh the current timeline buffer."
   (interactive)
@@ -165,6 +180,7 @@
         (position-state (nostr-ui-capture-position))
         (start (and nostr-debug-logging (float-time)))
         (rendered 0))
+    (nostr-timeline--sync-active-feed)
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      (nostr-timeline--feed-title)
@@ -225,7 +241,7 @@
   (nostr-timeline-conversations))
 
 (defun nostr-timeline-global ()
-  "Show recent root notes from the local cache."
+  "Show recent notes from connected relays."
   (interactive)
   (nostr-timeline-set-feed 'global))
 

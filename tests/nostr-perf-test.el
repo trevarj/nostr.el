@@ -49,6 +49,48 @@
     (should-not (nostr-relay-syncing-p))
     (should-not (timerp nostr-relay--sync-timeout-timer))))
 
+(ert-deftest nostr-startup-since-falls-back-to-recent-window ()
+  "Cold-cache startup filters still use a bounded recent since value."
+  (let ((nostr-relay-startup-window-seconds 100)
+        (now 1000.0))
+    (cl-letf (((symbol-function 'float-time) (lambda () now))
+              ((symbol-function 'nostr-db-oldest-latest-event-time)
+               (lambda (&rest _) nil)))
+      (should (= (nostr-relay--since-for-pubkeys '("alice" "bob")) 900)))))
+
+(ert-deftest nostr-personal-filters-are-bounded ()
+  "Startup personal subscriptions use bounded, kind-limited filters."
+  (let ((nostr-relay-personal-limit 11)
+        (nostr-relay-mentions-limit 7))
+    (cl-letf (((symbol-function 'nostr-relay--since-for-pubkey)
+               (lambda (&rest _) 123)))
+      (let ((filters (nostr-relay--personal-filters "alice")))
+        (should (= (length filters) 2))
+        (should (equal (alist-get "since" (car filters) nil nil #'equal) 123))
+        (should (equal (alist-get "limit" (car filters) nil nil #'equal) 11))
+        (should-not (member nostr-kind-zap-receipt
+                            (alist-get "kinds" (car filters) nil nil #'equal)))
+        (should (equal (alist-get "since" (cadr filters) nil nil #'equal) 123))
+        (should (equal (alist-get "limit" (cadr filters) nil nil #'equal) 7))
+        (should (member nostr-kind-reaction
+                        (alist-get "kinds" (cadr filters) nil nil #'equal)))))))
+
+(ert-deftest nostr-follows-filters-split-content-from-metadata ()
+  "The follows feed avoids mixing metadata/zaps into the main content stream."
+  (cl-letf (((symbol-function 'nostr-relay--since-for-pubkeys)
+             (lambda (&rest _) 456)))
+    (let ((content (nostr-relay--feed-filter '("alice" "bob")))
+          (metadata (nostr-relay--follow-metadata-filter '("alice" "bob"))))
+      (should (equal (alist-get "since" content nil nil #'equal) 456))
+      (should-not (member nostr-kind-metadata
+                          (alist-get "kinds" content nil nil #'equal)))
+      (should-not (member nostr-kind-zap-receipt
+                          (alist-get "kinds" content nil nil #'equal)))
+      (should (equal (alist-get "kinds" metadata nil nil #'equal)
+                     (list nostr-kind-metadata)))
+      (should (equal (alist-get "limit" metadata nil nil #'equal)
+                     nostr-relay-follow-metadata-limit)))))
+
 (ert-deftest nostr-sync-finished-hook-runs-once-when-all-eose ()
   "The finished hook runs exactly once, only after every feed sub EOSEs."
   (nostr-perf-test--with-clean-sync
@@ -130,6 +172,117 @@
       (nostr--schedule-refresh)
       (should (timerp nostr--refresh-timer))
       (should-not (eq nostr--refresh-timer first)))))
+
+;;; Stage 1 --- conservative global relay subscriptions
+
+(ert-deftest nostr-global-filter-is-small-and-recent ()
+  "The Global relay filter uses a narrow time window and small limit."
+  (let ((nostr-relay-global-limit 7)
+        (nostr-relay-global-window-seconds 60)
+        (now 1000.0))
+    (cl-letf (((symbol-function 'float-time) (lambda () now)))
+      (should (equal (nostr-relay--global-filter)
+                     `(("kinds" . (,nostr-kind-text-note))
+                       ("since" . 940)
+                       ("limit" . 7)))))))
+
+(ert-deftest nostr-feed-refresh-does-not-query-global ()
+  "Refreshing Feed closes any Global stream but does not issue a Global REQ."
+  (let ((global-requests 0)
+        (global-closes 0))
+    (cl-letf (((symbol-function 'nostr-relay-subscribe-global)
+               (lambda (&optional _force) (cl-incf global-requests)))
+              ((symbol-function 'nostr-relay-close-global)
+               (lambda () (cl-incf global-closes)))
+              ((symbol-function 'nostr-db-select-account-feed)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nostr-db-select-missing-repost-targets)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nostr-relay-fetch-event-metadata)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nostr-relay-fetch-events-by-id)
+               (lambda (&rest _) nil)))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (setq-local nostr-timeline-current-pubkey "alice"
+                    nostr-timeline-feed-kind 'feed)
+        (nostr-timeline-refresh)
+        (should (= global-requests 0))
+        (should (= global-closes 1))))))
+
+(ert-deftest nostr-global-refresh-queries-global-once ()
+  "Refreshing Global issues one rate-limited Global relay request."
+  (let ((global-requests 0))
+    (cl-letf (((symbol-function 'nostr-relay-subscribe-global)
+               (lambda (&optional _force) (cl-incf global-requests)))
+              ((symbol-function 'nostr-db-select-global-feed)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nostr-relay-fetch-event-metadata)
+               (lambda (&rest _) nil)))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (setq-local nostr-timeline-current-pubkey "alice"
+                    nostr-timeline-feed-kind 'global)
+        (nostr-timeline-refresh)
+        (should (= global-requests 1))))))
+
+(ert-deftest nostr-global-subscribe-is-rate-limited ()
+  "Repeated Global refreshes do not repeatedly query relays."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--global-last-request-time nil)
+        (nostr-relay-global-refresh-interval 60)
+        (sent 0)
+        (now 1000.0))
+    (puthash "wss://relay" 'fake nostr-relay--connections)
+    (cl-letf (((symbol-function 'float-time) (lambda () now))
+              ((symbol-function 'nostr-relay--send)
+               (lambda (&rest _) (cl-incf sent))))
+      (should (= (nostr-relay-subscribe-global) 1))
+      (should (= sent 1))
+      (setq now 1010.0)
+      (should-not (nostr-relay-subscribe-global))
+      (should (= sent 1))
+      (setq now 1061.0)
+      (should (= (nostr-relay-subscribe-global) 1))
+      (should (= sent 2)))))
+
+(ert-deftest nostr-visible-metadata-backfill-is-capped ()
+  "Timeline refreshes backfill metadata for only the first visible slice."
+  (let ((nostr-timeline-metadata-backfill-limit 2)
+        profile-pubkeys
+        metadata-ids)
+    (cl-letf (((symbol-function 'nostr-relay-fetch-profile)
+               (lambda (pubkey &rest _) (push pubkey profile-pubkeys)))
+              ((symbol-function 'nostr-relay-fetch-event-metadata)
+               (lambda (ids &rest _) (setq metadata-ids ids))))
+      (nostr-timeline--backfill-visible-metadata
+       '(((id . "1") (pubkey . "a"))
+         ((id . "2") (pubkey . "b"))
+         ((id . "3") (pubkey . "c"))))
+      (should (equal (nreverse profile-pubkeys) '("a" "b")))
+      (should (equal metadata-ids '("1" "2"))))))
+
+(ert-deftest nostr-verify-finished-defers-queue-drain ()
+  "Verification sentinels do not recursively start the next backend process."
+  (let ((nostr-relay--verify-inflight 1)
+        (nostr-relay--verify-queue (list (cons "wss://relay" '((id . "event")))))
+        (nostr-relay--verify-drain-timer nil)
+        (started 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'nostr-relay--start-verification)
+                   (lambda (&rest _) (cl-incf started))))
+          (nostr-relay--verify-finished)
+          (should (= nostr-relay--verify-inflight 0))
+          (should (= started 0))
+          (should (timerp nostr-relay--verify-drain-timer))
+          (cancel-timer nostr-relay--verify-drain-timer)
+          (setq nostr-relay--verify-drain-timer nil)
+          (nostr-relay--drain-verify-queue)
+          (should (= started 1))
+          (should-not nostr-relay--verify-queue))
+      (when (timerp nostr-relay--verify-drain-timer)
+        (cancel-timer nostr-relay--verify-drain-timer)))))
 
 ;;; Stage 1 --- visibility gating
 

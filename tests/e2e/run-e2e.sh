@@ -33,13 +33,16 @@ run_mode() {
   mode=$1            # fixed | buggy
   result="$tmp/result-$mode.txt"
   buggy=0
+  synthetic=0
   [ "$mode" = buggy ] && buggy=1
+  [ "$mode" = buggy ] && synthetic=1
   rm -f "$result"
   # util-linux script: -c CMD logfile ; -q quiet. Run with a hard timeout.
   NOSTR_E2E_ROOT="$root" \
   NOSTR_E2E_TMP="$tmp" \
   NOSTR_E2E_RESULT="$result" \
   NOSTR_E2E_FORCE_BUGGY="$buggy" \
+  NOSTR_E2E_SYNTHETIC="$synthetic" \
   timeout 90 script -qec \
     "$emacs -nw -Q --eval '(setq inhibit-startup-screen t)' -l $driver" \
     /dev/null >/dev/null 2>&1 || true

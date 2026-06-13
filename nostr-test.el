@@ -1048,7 +1048,9 @@
 (ert-deftest nostr-relay-personal-subscription-separates-metadata-and-mentions ()
   "Personal subscriptions must not AND authors with #p."
   (let (sent)
-    (cl-letf (((symbol-function 'nostr-relay-subscribe)
+    (cl-letf (((symbol-function 'nostr-relay--since-for-pubkey)
+               (lambda (&rest _) 123))
+              ((symbol-function 'nostr-relay-subscribe)
                (lambda (url sub-id filters)
                  (setq sent (list url sub-id filters)))))
       (nostr-relay-subscribe-personal "wss://relay.example" "me"))
@@ -1058,13 +1060,17 @@
       (should (= (length filters) 3))
       (should (equal (alist-get "authors" (nth 0 filters) nil nil #'equal)
                      '("me")))
+      (should (equal (alist-get "since" (nth 0 filters) nil nil #'equal) 123))
       (should (member nostr-kind-metadata
                       (alist-get "kinds" (nth 0 filters) nil nil #'equal)))
-      (should (member nostr-kind-zap-receipt
-                      (alist-get "kinds" (nth 0 filters) nil nil #'equal)))
+      (should-not (member nostr-kind-zap-receipt
+                          (alist-get "kinds" (nth 0 filters) nil nil #'equal)))
       (should-not (alist-get "#p" (nth 0 filters) nil nil #'equal))
       (should (equal (alist-get "#p" (nth 1 filters) nil nil #'equal)
                      '("me")))
+      (should (equal (alist-get "since" (nth 1 filters) nil nil #'equal) 123))
+      (should (member nostr-kind-zap-receipt
+                      (alist-get "kinds" (nth 1 filters) nil nil #'equal)))
       (should-not (alist-get "authors" (nth 1 filters) nil nil #'equal)))))
 
 (ert-deftest nostr-relay-defaults-include-broad-public-relays ()
@@ -1188,8 +1194,12 @@
       (let ((filter (nostr-relay--feed-filter '("alice"))))
         (should (equal (alist-get "since" filter nil nil #'equal) 95))
         (should (equal (alist-get "authors" filter nil nil #'equal) '("alice")))
-        (should (member nostr-kind-zap-receipt
-                        (alist-get "kinds" filter nil nil #'equal)))))))
+        (should (member nostr-kind-text-note
+                        (alist-get "kinds" filter nil nil #'equal)))
+        (should (member nostr-kind-reaction
+                        (alist-get "kinds" filter nil nil #'equal)))
+        (should-not (member nostr-kind-zap-receipt
+                            (alist-get "kinds" filter nil nil #'equal)))))))
 
 (ert-deftest nostr-relay-feed-since-uses-oldest-author-cache-point ()
   "One active followed account must not hide older notes by another."

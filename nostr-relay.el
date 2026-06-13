@@ -32,6 +32,41 @@
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-personal-limit 50
+  "Maximum number of own-account events requested per relay at startup."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-mentions-limit 30
+  "Maximum number of account mentions requested per relay at startup."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-follow-metadata-limit 25
+  "Maximum number of followed-account metadata events requested per relay."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-startup-window-seconds (* 60 60 24 14)
+  "Maximum lookback window for startup relay subscriptions when no cache exists."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-global-limit 30
+  "Maximum number of notes requested per relay for the Global timeline."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-global-window-seconds (* 60 60)
+  "Seconds of history requested when refreshing the Global timeline."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-global-refresh-interval 60
+  "Minimum seconds between automatic Global relay refresh requests."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-relay-since-overlap-seconds (* 60 10)
   "Seconds of overlap to use when resubscribing for cached feeds."
   :type 'integer
@@ -112,6 +147,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--verify-queue nil
   "FIFO queue of pending (URL . EVENT) verification requests.")
 
+(defvar nostr-relay--verify-drain-timer nil
+  "Pending timer that drains queued event verifications.")
+
 (defvar nostr-relay--profile-requests (make-hash-table :test #'equal)
   "Pubkeys with in-flight profile metadata requests.")
 
@@ -127,6 +165,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--event-id-requests (make-hash-table :test #'equal)
   "Event ids recently requested directly by id.")
 
+(defvar nostr-relay--global-last-request-time nil
+  "Last `float-time' when Global requested relay events.")
+
 (defvar nostr-relay-event-hook nil
   "Hook run with normalized events after they are stored.")
 
@@ -138,6 +179,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 
 (defvar nostr-relay--mode-line-string nil
   "Mode-line text describing current Nostr relay activity.")
+
+(defvar nostr-relay--mode-line-timer nil
+  "Pending timer for coalesced Nostr mode-line redisplay.")
 
 (defvar nostr-current-pubkey)
 
@@ -153,7 +197,7 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
   (hash-table-count nostr-relay--profile-requests))
 
 (defun nostr-relay--update-mode-line ()
-  "Refresh the Nostr relay activity mode-line segment."
+  "Refresh the Nostr relay activity mode-line segment state."
   (nostr-relay--ensure-mode-line)
   (let ((profiles (nostr-relay--pending-profile-count))
         (connecting (length nostr-relay--connect-queue)))
@@ -170,7 +214,16 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
            ((> connecting 0)
             (format " Nostr:connecting %d" connecting))
            (t nil))))
-  (force-mode-line-update t))
+  ;; Relay process filters can run while redisplay is evaluating third-party
+  ;; mode-line forms.  Do not force an immediate all-frame mode-line update
+  ;; from that path; coalesce the visual invalidation onto the timer queue.
+  (unless (timerp nostr-relay--mode-line-timer)
+    (setq nostr-relay--mode-line-timer
+          (run-at-time
+           0.2 nil
+           (lambda ()
+             (setq nostr-relay--mode-line-timer nil)
+             (force-mode-line-update))))))
 
 (defun nostr-relay--clear-recent-activity ()
   "Clear recent relay ingestion activity from the mode line."
@@ -262,6 +315,14 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
   (nostr-relay--send url `["CLOSE" ,sub-id])
   (remhash sub-id nostr-relay--subscriptions))
 
+(defun nostr-relay-close-subscription-all (sub-id)
+  "Close SUB-ID on every connected relay."
+  (when (gethash sub-id nostr-relay--subscriptions)
+    (maphash (lambda (url _ws)
+               (nostr-relay--send url `["CLOSE" ,sub-id]))
+             nostr-relay--connections)
+    (remhash sub-id nostr-relay--subscriptions)))
+
 (defun nostr-relay--client-message-event-id (client-message)
   "Return event id from relay-ready CLIENT-MESSAGE, when available."
   (pcase (ignore-errors
@@ -307,12 +368,30 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
     (run-hook-with-args 'nostr-relay-event-hook normalized)
     normalized))
 
+(defun nostr-relay--schedule-verify-drain ()
+  "Schedule queued event verification work outside the current callback stack."
+  (unless (timerp nostr-relay--verify-drain-timer)
+    (setq nostr-relay--verify-drain-timer
+          (run-at-time 0 nil #'nostr-relay--drain-verify-queue))))
+
 (defun nostr-relay--verify-finished ()
-  "Record that one verification finished and dispatch the next queued event."
+  "Record that one verification finished and schedule queued work."
   (when (> nostr-relay--verify-inflight 0)
     (cl-decf nostr-relay--verify-inflight))
-  (when-let* ((next (pop nostr-relay--verify-queue)))
-    (nostr-relay--start-verification (car next) (cdr next))))
+  ;; Backend process sentinels may run while other sentinels are unwinding.
+  ;; Starting the next verification synchronously here can recurse through
+  ;; `nostr-backend-call' callbacks when a burst of subprocesses finishes
+  ;; together.  Use a timer to return to the command loop between batches.
+  (nostr-relay--schedule-verify-drain))
+
+(defun nostr-relay--drain-verify-queue ()
+  "Start queued event verifications up to the concurrency limit."
+  (setq nostr-relay--verify-drain-timer nil)
+  (while (and nostr-relay--verify-queue
+              (< nostr-relay--verify-inflight
+                 nostr-relay-max-concurrent-verifications))
+    (let ((next (pop nostr-relay--verify-queue)))
+      (nostr-relay--start-verification (car next) (cdr next)))))
 
 (defun nostr-relay--start-verification (url event)
   "Spawn a verify-event subprocess for EVENT from URL.
@@ -428,8 +507,13 @@ at the cap are queued (never dropped) and dispatched as verifications finish."
 
 (defun nostr-relay--since-for-pubkeys (pubkeys)
   "Return a since timestamp for PUBKEYS with overlap."
-  (when-let* ((latest (nostr-db-oldest-latest-event-time pubkeys)))
-    (max 0 (- latest nostr-relay-since-overlap-seconds))))
+  (if-let* ((latest (nostr-db-oldest-latest-event-time pubkeys)))
+      (max 0 (- latest nostr-relay-since-overlap-seconds))
+    (max 0 (- (floor (float-time)) nostr-relay-startup-window-seconds))))
+
+(defun nostr-relay--since-for-pubkey (pubkey)
+  "Return a conservative since timestamp for PUBKEY."
+  (nostr-relay--since-for-pubkeys (list pubkey)))
 
 (defun nostr-relay--personal-filters (pubkey)
   "Return personal activity filters for PUBKEY.
@@ -439,13 +523,17 @@ filters or kind-0 metadata will never match."
                  ,nostr-kind-contacts
                  ,nostr-kind-text-note
                  ,nostr-kind-repost
-                 ,nostr-kind-reaction
-                 ,nostr-kind-zap-receipt
                  ,nostr-kind-relay-list))
      ("authors" . (,pubkey))
-     ("limit" . ,nostr-default-feed-limit))
-    (("#p" . (,pubkey))
-     ("limit" . ,nostr-default-feed-limit))))
+     ("since" . ,(nostr-relay--since-for-pubkey pubkey))
+     ("limit" . ,nostr-relay-personal-limit))
+    (("kinds" . (,nostr-kind-text-note
+                 ,nostr-kind-repost
+                 ,nostr-kind-reaction
+                 ,nostr-kind-zap-receipt))
+     ("#p" . (,pubkey))
+     ("since" . ,(nostr-relay--since-for-pubkey pubkey))
+     ("limit" . ,nostr-relay-mentions-limit))))
 
 (defun nostr-relay--contacts-filter (pubkey)
   "Return contact-list filter for PUBKEY."
@@ -455,16 +543,55 @@ filters or kind-0 metadata will never match."
 
 (defun nostr-relay--feed-filter (pubkeys)
   "Return follows feed filter for PUBKEYS."
-	  (delq nil
-	        `(("kinds" . (,nostr-kind-metadata
-	                      ,nostr-kind-text-note
-	                      ,nostr-kind-repost
-	                      ,nostr-kind-reaction
-	                      ,nostr-kind-zap-receipt))
+  (delq nil
+        `(("kinds" . (,nostr-kind-text-note
+                      ,nostr-kind-repost
+                      ,nostr-kind-reaction))
           ("authors" . ,pubkeys)
           ,(when-let* ((since (nostr-relay--since-for-pubkeys pubkeys)))
              `("since" . ,since))
           ("limit" . ,nostr-default-feed-limit))))
+
+(defun nostr-relay--follow-metadata-filter (pubkeys)
+  "Return conservative followed-account metadata filter for PUBKEYS."
+  `(("kinds" . (,nostr-kind-metadata))
+    ("authors" . ,pubkeys)
+    ("since" . ,(nostr-relay--since-for-pubkeys pubkeys))
+    ("limit" . ,nostr-relay-follow-metadata-limit)))
+
+(defun nostr-relay--global-sub-id ()
+  "Return the stable Global timeline subscription id."
+  "global-recent")
+
+(defun nostr-relay--global-filter ()
+  "Return the conservative Global timeline relay filter."
+  `(("kinds" . (,nostr-kind-text-note))
+    ("since" . ,(max 0 (- (floor (float-time))
+                          nostr-relay-global-window-seconds)))
+    ("limit" . ,nostr-relay-global-limit)))
+
+(defun nostr-relay-subscribe-global (&optional force)
+  "Request recent Global timeline events from connected relays.
+When FORCE is nil, suppress repeated requests within
+`nostr-relay-global-refresh-interval'."
+  (let ((now (float-time)))
+    (when (or force
+              (not nostr-relay--global-last-request-time)
+              (>= (- now nostr-relay--global-last-request-time)
+                  nostr-relay-global-refresh-interval))
+      (setq nostr-relay--global-last-request-time now)
+      (let ((sub-id (nostr-relay--global-sub-id))
+            (filter (nostr-relay--global-filter))
+            (sent 0))
+        (maphash (lambda (url _ws)
+                   (nostr-relay-subscribe url sub-id (list filter))
+                   (setq sent (1+ sent)))
+                 nostr-relay--connections)
+        sent))))
+
+(defun nostr-relay-close-global ()
+  "Close any active Global timeline relay subscription."
+  (nostr-relay-close-subscription-all (nostr-relay--global-sub-id)))
 
 (defun nostr-relay-syncing-p ()
   "Return non-nil while the initial-sync feed subscriptions await EOSE."
@@ -525,7 +652,8 @@ timer also marks an in-progress session)."
         (nostr-relay-subscribe
          url
          sub-id
-         (list (nostr-relay--feed-filter follows)))))))
+         (list (nostr-relay--feed-filter follows)
+               (nostr-relay--follow-metadata-filter follows)))))))
 
 (defun nostr-relay--handle-eose (url sub-id)
   "Handle EOSE for SUB-ID on URL."
@@ -735,9 +863,16 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
 	  (clrhash nostr-relay--event-id-requests)
   (when (timerp nostr-relay--activity-timer)
     (cancel-timer nostr-relay--activity-timer))
+  (when (timerp nostr-relay--mode-line-timer)
+    (cancel-timer nostr-relay--mode-line-timer))
+  (when (timerp nostr-relay--verify-drain-timer)
+    (cancel-timer nostr-relay--verify-drain-timer))
   (setq nostr-relay--activity-timer nil
+        nostr-relay--mode-line-timer nil
+        nostr-relay--global-last-request-time nil
         nostr-relay--ingested-event-count 0
         nostr-relay--verify-inflight 0
+        nostr-relay--verify-drain-timer nil
         nostr-relay--verify-queue nil)
   (nostr-relay--update-mode-line))
 

@@ -131,14 +131,16 @@
   (when nostr-e2e-buggy
     (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
     (add-hook 'window-buffer-change-functions #'nostr-e2e--buggy-window-change)
-    ;; Detector self-test: a timer recursion of the same class as the reported
-    ;; crash, so a clean "fixed" run is meaningfully distinguished from one that
-    ;; would surface the failure.
-    (run-at-time 0.3 nil
-                 (lambda ()
-                   (condition-case err
-                       (nostr-e2e--deep-recurse 0)
-                     (error (message "Error running timer 'nostr-e2e': %S" err))))))
+    ;; On a TTY frame the buggy hook cannot re-enter redisplay, so a synthetic
+    ;; timer recursion validates the detector.  On a graphical frame we want to
+    ;; see whether the buggy hook recurses *naturally*, so skip the synthetic
+    ;; one there (NOSTR_E2E_SYNTHETIC=0).
+    (when (equal (getenv "NOSTR_E2E_SYNTHETIC") "1")
+      (run-at-time 0.3 nil
+                   (lambda ()
+                     (condition-case err
+                         (nostr-e2e--deep-recurse 0)
+                       (error (message "Error running timer 'nostr-e2e': %S" err)))))))
   ;; Safety: always finish even if the loop wedges.
   (run-at-time 8 nil #'nostr-e2e-finish)
   (dotimes (_ 50)
