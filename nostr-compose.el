@@ -73,7 +73,7 @@ smaller frames."
   :type '(choice (const :tag "Automatic side window" nil) sexp)
   :group 'nostr)
 
-(defcustom nostr-blossom-upload-server nil
+(defcustom nostr-blossom-upload-server "https://blossom.primal.net"
   "Blossom server URL used for compose media attachment uploads."
   :type '(choice (const :tag "Unset" nil) string)
   :group 'nostr)
