@@ -294,6 +294,14 @@ TITLE may be a string or a function called with the new section."
         (lambda (a b) (< (nostr-ui-section-start a)
                          (nostr-ui-section-start b)))))
 
+(defun nostr-ui--top-level-sections-by-start ()
+  "Return top-level sections sorted by ascending start.
+Inline embedded cards still have sections so point-local commands work inside
+them, but timeline navigation should move between primary cards only."
+  (seq-filter (lambda (section)
+                (null (nostr-ui-section-parent section)))
+              (nostr-ui--sections-by-start)))
+
 (defun nostr-ui-section-at-point ()
   "Return the nearest Nostr UI section at point."
   (or (get-text-property (point) 'nostr-ui-section)
@@ -350,7 +358,7 @@ TITLE may be a string or a function called with the new section."
   (let ((pos (point)))
     (when-let* ((next (cl-find-if
                        (lambda (section) (> (nostr-ui-section-start section) pos))
-                       (nostr-ui--sections-by-start))))
+                       (nostr-ui--top-level-sections-by-start))))
       (goto-char (nostr-ui-section-start next))
       (nostr-ui-update-selection))))
 
@@ -359,7 +367,7 @@ TITLE may be a string or a function called with the new section."
   (interactive)
   (let ((pos (point))
         best)
-    (dolist (section nostr-ui--sections)
+    (dolist (section (nostr-ui--top-level-sections-by-start))
       (when (and (< (nostr-ui-section-start section) pos)
                  (or (not best)
                      (> (nostr-ui-section-start section)
@@ -371,7 +379,7 @@ TITLE may be a string or a function called with the new section."
 
 (defun nostr-ui-goto-first-section ()
   "Move point to the first rendered section and highlight it."
-  (when-let* ((first (car (nostr-ui--sections-by-start))))
+  (when-let* ((first (car (nostr-ui--top-level-sections-by-start))))
     (goto-char (nostr-ui-section-start first))
     (nostr-ui-update-selection)))
 
