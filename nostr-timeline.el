@@ -28,6 +28,7 @@
 
 ;; Defined in nostr.el, which requires this file (avoid a circular require).
 (defvar nostr-debug-logging)
+(defvar nostr-current-pubkey)
 (declare-function nostr-debug-message "nostr" (fmt &rest args))
 
 (defvar nostr-timeline-current-pubkey nil
@@ -217,6 +218,8 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
   ;; keymap and buffer-local state match the rendered feed.
   (unless (derived-mode-p 'nostr-timeline-mode)
     (nostr-timeline-mode))
+  (unless nostr-timeline-current-pubkey
+    (setq-local nostr-timeline-current-pubkey nostr-current-pubkey))
   (setq-local nostr-timeline-feed-kind kind)
   (nostr-timeline-refresh))
 

@@ -255,16 +255,38 @@
 (ert-deftest nostr-notifications-primary-nav-returns-to-feed ()
   "Primary navigation keys keep working from Notifications."
   (nostr-operational-test--with-db
-    (with-temp-buffer
-      (nostr-timeline-mode)
-      (setq-local nostr-timeline-current-pubkey "me")
-      (nostr-timeline-refresh)
-      (nostr-notifications-open)
-      (should (eq major-mode 'nostr-notifications-mode))
-      (call-interactively (lookup-key nostr-notifications-mode-map (kbd "f")))
-      (should (eq major-mode 'nostr-timeline-mode))
-      (should (eq nostr-timeline-feed-kind 'feed))
-      (should (string-match-p "Feed  Nostr" (buffer-string))))))
+    (let ((nostr-current-pubkey "me"))
+      (nostr-db-store-event
+       '((id . "contacts")
+         (pubkey . "me")
+         (created_at . 1)
+         (kind . 3)
+         (tags . (("p" "alice")))))
+      (nostr-db-store-event
+       '((id . "feed-note")
+         (pubkey . "alice")
+         (created_at . 2)
+         (kind . 1)
+         (tags . nil)
+         (content . "still in feed")
+         (sig . "sig")
+         (relay . "wss://relay.example")
+         (root-id . nil)
+         (reply-id . nil)
+         (quote-id . nil)))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (setq-local nostr-timeline-current-pubkey "me")
+        (nostr-timeline-refresh)
+        (should (string-match-p "still in feed" (buffer-string)))
+        (nostr-notifications-open)
+        (should (eq major-mode 'nostr-notifications-mode))
+        (call-interactively (lookup-key nostr-notifications-mode-map (kbd "f")))
+        (should (eq major-mode 'nostr-timeline-mode))
+        (should (eq nostr-timeline-feed-kind 'feed))
+        (should (equal nostr-timeline-current-pubkey "me"))
+        (should (string-match-p "Feed  Nostr" (buffer-string)))
+        (should (string-match-p "still in feed" (buffer-string)))))))
 
 (ert-deftest nostr-relays-render-and-select ()
   "Relays render cached and configured state and expose data at point."
