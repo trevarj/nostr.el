@@ -22,6 +22,12 @@
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
 (declare-function nostr-search-open "nostr-search" (query))
 (declare-function nostr-thread-open "nostr-thread" (event))
+(declare-function nostr-timeline-conversations "nostr-timeline" ())
+(declare-function nostr-timeline-feed "nostr-timeline" ())
+(declare-function nostr-timeline-global "nostr-timeline" ())
+(declare-function nostr-timeline-my-posts "nostr-timeline" ())
+
+(defvar nostr-buffer-name)
 
 (defcustom nostr-notifications-limit 100
   "Maximum number of notifications displayed in `nostr-notifications-mode'."
@@ -52,6 +58,15 @@
     (define-key map (kbd "m") #'nostr-notifications-mark-seen)
     (define-key map (kbd "M") #'nostr-notifications-mark-all-seen)
     (define-key map (kbd "?") #'nostr-notifications-actions)
+    ;; Notifications is a primary page, so keep the primary navigation keys
+    ;; available after switching away from the timeline mode.
+    (define-key map (kbd "f") #'nostr-timeline-feed)
+    (define-key map (kbd "h") #'nostr-timeline-feed)
+    (define-key map (kbd "C") #'nostr-timeline-conversations)
+    (define-key map (kbd "e") #'nostr-timeline-conversations)
+    (define-key map (kbd "G") #'nostr-timeline-global)
+    (define-key map (kbd "P") #'nostr-timeline-my-posts)
+    (define-key map (kbd "N") #'nostr-notifications-open)
     map)
   "Keymap for `nostr-notifications-mode'.")
 
@@ -68,6 +83,10 @@
     ("M" "Mark all seen" nostr-notifications-mark-all-seen)]
    ["Navigation"
     ("g" "Refresh" nostr-notifications-refresh)
+    ("f" "Feed" nostr-timeline-feed)
+    ("C" "Conversations" nostr-timeline-conversations)
+    ("G" "Global" nostr-timeline-global)
+    ("P" "My posts" nostr-timeline-my-posts)
     ("n" "Next notification" nostr-ui-next-section)
     ("p" "Previous notification" nostr-ui-prev-section)
     ("TAB" "Toggle notification" nostr-ui-toggle-section)]])
@@ -367,26 +386,29 @@
              "Mentions, replies, reactions, reposts, and follows will appear here.")))
       (insert (propertize "Database is not open.\n" 'face 'nostr-ui-meta)))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open" "a actor" "m seen" "M all seen" "? actions"))
+     '("g refresh" "f feed" "C conv" "G global" "P posts" "RET open" "? actions"))
     (nostr-ui-finish-refresh position-state)))
 
 ;;;###autoload
 (defun nostr-notifications-open ()
   "Open the Nostr notifications view.
-From the main timeline buffer, switch the current buffer in place so
-Notifications behaves like the other primary navigation tabs.  From other
-buffers, open a standalone notifications buffer."
+Use the main `nostr-buffer-name' buffer when it exists so Notifications behaves
+like the other primary navigation tabs.  Fall back to a standalone buffer only
+when the main Nostr buffer has not been created yet."
   (interactive)
-  (if (eq major-mode 'nostr-timeline-mode)
-      ;; Tab-style in-place switch: only the main timeline buffer is
-      ;; repurposed, and we always re-establish `nostr-notifications-mode'
-      ;; so the buffer's keymap and local state are consistent with the
-      ;; rendered notifications view (`define-derived-mode' resets buffer
-      ;; local variables, clearing stale timeline feed state).
-      (progn
-        (nostr-notifications-mode)
-        (nostr-notifications-refresh))
-    (nostr-notifications-open-standalone)))
+  (let ((main-buffer (and (boundp 'nostr-buffer-name)
+                          (get-buffer nostr-buffer-name))))
+    (cond
+     ((or (eq major-mode 'nostr-timeline-mode)
+          (eq major-mode 'nostr-notifications-mode))
+      (nostr-notifications-mode)
+      (nostr-notifications-refresh))
+     (main-buffer
+      (switch-to-buffer main-buffer)
+      (nostr-notifications-mode)
+      (nostr-notifications-refresh))
+     (t
+      (nostr-notifications-open-standalone)))))
 
 (defun nostr-notifications-open-standalone ()
   "Open the standalone Nostr notifications buffer."
@@ -395,7 +417,7 @@ buffers, open a standalone notifications buffer."
     (with-current-buffer buffer
       (nostr-notifications-mode)
       (nostr-notifications-refresh))
-    (pop-to-buffer buffer)))
+    (switch-to-buffer buffer)))
 
 (provide 'nostr-notifications)
 ;;; nostr-notifications.el ends here

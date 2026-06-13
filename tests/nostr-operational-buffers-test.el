@@ -223,6 +223,49 @@
             (should (string-match-p "Notifications  Nostr" (buffer-string)))
             (should (string-match-p "\\[N Notifications\\]" (buffer-string)))))))))
 
+(ert-deftest nostr-notifications-open-reuses-main-buffer ()
+  "Opening notifications from elsewhere reuses the main Nostr buffer."
+  (nostr-operational-test--with-db
+    (let ((nostr-buffer-name "*Nostr Notifications Test*")
+          (main-buffer (get-buffer-create "*Nostr Notifications Test*"))
+          popped switched)
+      (unwind-protect
+          (progn
+            (with-current-buffer main-buffer
+              (nostr-timeline-mode)
+              (setq-local nostr-timeline-current-pubkey "me")
+              (nostr-timeline-refresh))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _args)
+                         (setq popped buffer)
+                         buffer))
+                      ((symbol-function 'switch-to-buffer)
+                       (lambda (buffer &rest _args)
+                         (setq switched buffer)
+                         (set-buffer buffer))))
+              (with-temp-buffer
+                (nostr-notifications-open))
+              (should (eq switched main-buffer))
+              (should-not popped)
+              (with-current-buffer main-buffer
+                (should (eq major-mode 'nostr-notifications-mode))
+                (should (string-match-p "Notifications  Nostr" (buffer-string))))))
+        (kill-buffer main-buffer)))))
+
+(ert-deftest nostr-notifications-primary-nav-returns-to-feed ()
+  "Primary navigation keys keep working from Notifications."
+  (nostr-operational-test--with-db
+    (with-temp-buffer
+      (nostr-timeline-mode)
+      (setq-local nostr-timeline-current-pubkey "me")
+      (nostr-timeline-refresh)
+      (nostr-notifications-open)
+      (should (eq major-mode 'nostr-notifications-mode))
+      (call-interactively (lookup-key nostr-notifications-mode-map (kbd "f")))
+      (should (eq major-mode 'nostr-timeline-mode))
+      (should (eq nostr-timeline-feed-kind 'feed))
+      (should (string-match-p "Feed  Nostr" (buffer-string))))))
+
 (ert-deftest nostr-relays-render-and-select ()
   "Relays render cached and configured state and expose data at point."
   (nostr-operational-test--with-db

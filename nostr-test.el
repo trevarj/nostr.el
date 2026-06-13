@@ -1341,6 +1341,15 @@
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "P")) #'nostr-timeline-my-posts))
   (should-not (lookup-key nostr-timeline-mode-map (kbd "M"))))
 
+(ert-deftest nostr-notifications-mode-has-primary-navigation-keys ()
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "N")) #'nostr-notifications-open))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "f")) #'nostr-timeline-feed))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "h")) #'nostr-timeline-feed))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "C")) #'nostr-timeline-conversations))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "e")) #'nostr-timeline-conversations))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "G")) #'nostr-timeline-global))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "P")) #'nostr-timeline-my-posts)))
+
 (ert-deftest nostr-ui-pages-bind-question-mark-to-transients ()
   "Every Nostr UI page exposes its action menu on `?'."
   (dolist (entry `((,nostr-timeline-mode-map . nostr-timeline-actions)
