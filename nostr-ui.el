@@ -865,17 +865,13 @@ only when IDENTIFIER is known verified for PUBKEY."
                     (when (and pending (or (not accepted) stale-pending))
                       (format "… %d" pending))))))))
 
-(defun nostr-ui--insert-publish-receipts (event indent)
-  "Insert publish receipts for EVENT using INDENT.
-Publish receipts only exist for the local account's own published notes, so
-skip the per-note query for other authors once the current pubkey is known."
+(defun nostr-ui--publish-footer-chips (event)
+  "Return publish receipt chips for EVENT's footer."
   (when (or (not (bound-and-true-p nostr-current-pubkey))
             (equal (alist-get 'pubkey event) nostr-current-pubkey))
     (when-let* ((event-id (alist-get 'id event))
                 (chips (nostr-ui--publish-receipt-chips event-id)))
-      (insert indent)
-      (insert (propertize "  Publish  " 'face 'nostr-ui-meta))
-      (nostr-ui-insert-badge-line chips ""))))
+      chips)))
 
 (defun nostr-ui--publish-details-text (event receipts)
   "Return details text for EVENT publish RECEIPTS."
@@ -1014,13 +1010,15 @@ looked up from the memoized full counts alist for the event id."
          (zap-msats (nostr-ui--event-count event 'zap-msats))
          (sats (max (nostr-ui--event-stat event '(zap-sats zap_sats sats))
                     (floor (/ (or zap-msats 0) 1000))))
-         (parts (list
-                 (format "↩ %s" (nostr-ui--event-count event 'replies))
-                 (format "♥ %s" (nostr-ui--event-count event 'reactions))
-                 (format "↻ %s" (nostr-ui--event-count event 'reposts))
-                 (if (> sats 0)
-                     (format "⚡ %s (%s sats)" zaps sats)
-                   (format "⚡ %s" zaps)))))
+         (parts (append
+                 (list
+                  (format "↩ %s" (nostr-ui--event-count event 'replies))
+                  (format "♥ %s" (nostr-ui--event-count event 'reactions))
+                  (format "↻ %s" (nostr-ui--event-count event 'reposts))
+                  (if (> sats 0)
+                      (format "⚡ %s (%s sats)" zaps sats)
+                    (format "⚡ %s" zaps)))
+                 (nostr-ui--publish-footer-chips event))))
     (string-join parts "   ")))
 
 (defun nostr-ui--note-badges (event style)
@@ -1339,7 +1337,6 @@ thread/detail style uses exact dates."
 			     (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
 						 'face 'nostr-ui-meta)))
 			   (nostr-ui--insert-filled-content display-content indent)
-			   (nostr-ui--insert-publish-receipts event indent)
 			   (dolist (item (nostr-event-media-items (alist-get 'content event)))
                              (nostr-ui--insert-media-placeholder item indent))
 			   (nostr-ui--restore-note-media section)

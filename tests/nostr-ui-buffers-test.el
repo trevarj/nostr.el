@@ -187,7 +187,9 @@
          (created-at . 120)
          (content . "published locally")))
       (let ((text (buffer-string)))
-        (should (string-match-p "Publish.*✓ 1.*! 1" text))
+        (should (string-match-p "⚡ 0.*✓ 1.*! 1" text))
+        (let ((case-fold-search nil))
+          (should-not (string-match-p "Publish" text)))
         (should-not (string-match-p "accepted:1" text))
         (should-not (string-match-p "pending" text))))))
 
