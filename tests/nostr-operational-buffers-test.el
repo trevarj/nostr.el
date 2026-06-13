@@ -303,7 +303,7 @@
 (ert-deftest nostr-open-renders-main-buffer-without-blocking-on-relays ()
   "Main entrypoint opens the timeline even when one relay start is slow."
   (let ((path (make-temp-file "nostr-open-e2e" nil ".sqlite"))
-        (nostr-current-pubkey nil)
+        (nostr-current-pubkey "me")
         (nostr-relay-urls '("wss://slow.example" "wss://fast.example"))
         (nostr-relay-open-timeout-seconds 0.1)
         (nostr-relay--connections (make-hash-table :test #'equal))
@@ -313,11 +313,7 @@
         (nostr-relay--connect-timer nil)
         opened-relays
         opened-buffers)
-    (cl-letf (((symbol-function 'nostr-setup-derive-pubkey)
-               (lambda ()
-                 (setq nostr-current-pubkey "me")
-                 '((pubkey . "me"))))
-              ((symbol-function 'websocket-open)
+    (cl-letf (((symbol-function 'websocket-open)
                (lambda (url &rest _args)
                  (push url opened-relays)
                  (if (equal url "wss://slow.example")
@@ -338,6 +334,40 @@
                 (should (string-match-p "Feed  Nostr" (buffer-string))))
               (should-not opened-relays)
               (should (= (length nostr-relay--connect-queue) 2)))
+          (nostr-close)
+          (when (get-buffer nostr-buffer-name)
+            (kill-buffer nostr-buffer-name))
+          (when (file-exists-p path)
+            (delete-file path)))))))
+
+(ert-deftest nostr-open-renders-before-account-derivation-finishes ()
+  "Main entrypoint uses async account derivation instead of blocking setup."
+  (let ((path (make-temp-file "nostr-open-async-account" nil ".sqlite"))
+        (nostr-current-pubkey nil)
+        (nostr--opening-account nil)
+        (nostr-relay--connect-queue nil)
+        (nostr-relay--connect-timer nil)
+        opened-buffers
+        async-called)
+    (cl-letf (((symbol-function 'nostr-setup-derive-pubkey)
+               (lambda () (error "sync derivation must not run from nostr-open")))
+              ((symbol-function 'nostr-setup-derive-pubkey-async)
+               (lambda (_success _error)
+                 (setq async-called t)))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _args)
+                 (push (buffer-name buffer) opened-buffers)
+                 buffer)))
+      (let ((nostr-db-path path))
+        (unwind-protect
+            (progn
+              (nostr-open)
+              (should async-called)
+              (should (member nostr-buffer-name opened-buffers))
+              (with-current-buffer nostr-buffer-name
+                (should (eq major-mode 'nostr-timeline-mode))
+                (should (string-match-p "Deriving configured account pubkey"
+                                        (buffer-string)))))
           (nostr-close)
           (when (get-buffer nostr-buffer-name)
             (kill-buffer nostr-buffer-name))

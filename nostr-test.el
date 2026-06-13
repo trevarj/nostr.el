@@ -765,20 +765,22 @@
   "Relay ingestion verifies event signatures before writing to the cache."
   (nostr-test-with-db
     (let ((calls nil))
-      (cl-letf (((symbol-function 'nostr-backend-call-sync)
-                 (lambda (command payload)
+      (cl-letf (((symbol-function 'nostr-backend-call)
+                 (lambda (command payload success _error)
                    (push (list command payload) calls)
-                   (cons 0 '((ok . t) (valid . t))))))
-        (should (nostr-relay--handle-event
-                 "relay"
-                 "sub"
-                 '((id . "verified-note")
-                   (pubkey . "alice")
-                   (created_at . 100)
-                   (kind . 1)
-                   (tags . nil)
-                   (content . "verified")
-                   (sig . "sig")))))
+                   (funcall success '((ok . t) (valid . t)))
+                   :process)))
+        (should (eq (nostr-relay--handle-event
+                     "relay"
+                     "sub"
+                     '((id . "verified-note")
+                       (pubkey . "alice")
+                       (created_at . 100)
+                       (kind . 1)
+                       (tags . nil)
+                       (content . "verified")
+                       (sig . "sig")))
+                    'pending-verification)))
       (should (equal (caar calls) "verify-event"))
       (should (equal (alist-get 'id (alist-get 'event (cadar calls)))
                      "verified-note"))
@@ -791,9 +793,10 @@
                               (valid . nil)
                               (reason . "bad signature")))
           handled)
-      (cl-letf (((symbol-function 'nostr-backend-call-sync)
-                 (lambda (_command _payload)
-                   (cons 0 invalid-response))))
+      (cl-letf (((symbol-function 'nostr-backend-call)
+                 (lambda (_command _payload success _error)
+                   (funcall success invalid-response)
+                   :process)))
         (setq handled
               (nostr-relay--handle-event
                "relay"
@@ -805,7 +808,7 @@
                  (tags . nil)
                  (content . "invalid")
                  (sig . "sig")))))
-      (should-not handled)
+      (should (eq handled 'pending-verification))
       (should-not (nostr-db-event-pubkey "invalid-note"))
       (let ((status (emacsql nostr-db--connection
                              [:select [state message]

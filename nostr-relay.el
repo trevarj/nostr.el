@@ -234,54 +234,60 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
      (alist-get 'id event))
     (_ nil)))
 
-(defun nostr-relay--verify-event (url event)
-  "Return non-nil when EVENT from URL passes backend signature verification."
-  (if (not nostr-relay-verify-events)
-      t
-    (condition-case err
-        (let* ((result (nostr-backend-call-sync "verify-event" `((event . ,event))))
-               (response (cdr result))
-               (valid (alist-get 'valid response)))
-          (cond
-           ((and (zerop (car result)) (alist-get 'ok response) valid)
-            t)
-           (t
-            (nostr-db-store-relay-status
-             url
-             "invalid-event"
-             (format "%s %s"
-                     (or (alist-get 'id event) "(unknown event)")
-                     (or (alist-get 'reason response) "signature verification failed")))
-            nil)))
-      (error
-       (nostr-db-store-relay-status
-        url
-        "invalid-event"
-        (format "%s %s"
-                (or (alist-get 'id event) "(unknown event)")
-                (error-message-string err)))
-       nil))))
+(defun nostr-relay--invalid-event (url event message)
+  "Store an invalid EVENT status from URL with MESSAGE."
+  (nostr-db-store-relay-status
+   url
+   "invalid-event"
+   (format "%s %s"
+           (or (alist-get 'id event) "(unknown event)")
+           (or message "signature verification failed"))))
+
+(defun nostr-relay--store-verified-event (url event)
+  "Store verified EVENT from URL and run follow-up cache workflows."
+  (let ((normalized (nostr-event-normalize event url)))
+    (nostr-db-store-event normalized)
+    (nostr-relay--note-ingested-event)
+    (nostr-relay--maybe-store-notification normalized)
+    (when (equal (alist-get 'kind normalized) nostr-kind-metadata)
+      (nostr-relay--complete-profile-request (alist-get 'pubkey normalized)))
+    (when (memq (alist-get 'kind normalized) (list nostr-kind-text-note
+                                                   nostr-kind-repost
+                                                   nostr-kind-reaction
+                                                   nostr-kind-zap-receipt))
+      (nostr-relay-fetch-profile (alist-get 'pubkey normalized)))
+    (when (and (equal (alist-get 'kind normalized) nostr-kind-relay-list)
+               (boundp 'nostr-current-pubkey)
+               (equal (alist-get 'pubkey normalized) nostr-current-pubkey))
+      (nostr-relay-connect-recommended-deferred nostr-current-pubkey))
+    (run-hook-with-args 'nostr-relay-event-hook normalized)
+    normalized))
 
 (defun nostr-relay--handle-event (url _sub-id event)
-  "Handle EVENT from URL."
-  (when (nostr-relay--verify-event url event)
-    (let ((normalized (nostr-event-normalize event url)))
-      (nostr-db-store-event normalized)
-      (nostr-relay--note-ingested-event)
-      (nostr-relay--maybe-store-notification normalized)
-      (when (equal (alist-get 'kind normalized) nostr-kind-metadata)
-        (nostr-relay--complete-profile-request (alist-get 'pubkey normalized)))
-      (when (memq (alist-get 'kind normalized) (list nostr-kind-text-note
-                                                     nostr-kind-repost
-                                                     nostr-kind-reaction
-                                                     nostr-kind-zap-receipt))
-        (nostr-relay-fetch-profile (alist-get 'pubkey normalized)))
-      (when (and (equal (alist-get 'kind normalized) nostr-kind-relay-list)
-                 (boundp 'nostr-current-pubkey)
-                 (equal (alist-get 'pubkey normalized) nostr-current-pubkey))
-        (nostr-relay-connect-recommended-deferred nostr-current-pubkey))
-      (run-hook-with-args 'nostr-relay-event-hook normalized)
-      normalized)))
+  "Handle EVENT from URL without blocking relay IO."
+  (if (not nostr-relay-verify-events)
+      (nostr-relay--store-verified-event url event)
+    (condition-case err
+        (nostr-backend-call
+         "verify-event"
+         `((event . ,event))
+         (lambda (response)
+           (if (alist-get 'valid response)
+               (nostr-relay--store-verified-event url event)
+             (nostr-relay--invalid-event
+              url event (alist-get 'reason response))))
+         (lambda (response stderr _status)
+           (let ((stderr-message (string-trim (or stderr ""))))
+             (nostr-relay--invalid-event
+              url event
+              (or (alist-get 'message (alist-get 'error response))
+                  (unless (string-empty-p stderr-message)
+                    stderr-message)
+                  "signature verification failed")))))
+      (error
+       (nostr-relay--invalid-event
+        url event (error-message-string err))))
+    'pending-verification))
 
 (defun nostr-relay--maybe-store-notification (event)
   "Store notifications caused by EVENT for `nostr-current-pubkey'."

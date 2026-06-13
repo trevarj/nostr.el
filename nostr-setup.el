@@ -157,6 +157,40 @@ over stdin, never argv.  Return the backend pubkey response."
       (message "Nostr account pubkey: %s" pubkey))
     response))
 
+(defun nostr-setup-derive-pubkey-async (success error)
+  "Derive the current account pubkey without blocking the caller.
+SUCCESS receives the backend response after `nostr-current-pubkey' is set.
+ERROR receives a human-readable failure string.  Secret decryption and backend
+startup can both block, so they run in a worker thread when threads are
+available."
+  (let ((worker
+         (lambda ()
+           (condition-case err
+               (let ((secret (nostr-setup--load-secret)))
+                 (nostr-backend-call
+                  "pubkey"
+                  `((secret_key . ,secret))
+                  (lambda (response)
+                    (let ((pubkey (alist-get 'pubkey response)))
+                      (if (and (stringp pubkey) (not (string-empty-p pubkey)))
+                          (progn
+                            (setq nostr-current-pubkey pubkey)
+                            (funcall success response))
+                        (funcall error
+                                 "Backend returned no pubkey while deriving Nostr account status."))))
+                  (lambda (response stderr _status)
+                    (let ((stderr-message (string-trim (or stderr ""))))
+                      (funcall error
+                               (or (alist-get 'message (alist-get 'error response))
+                                   (unless (string-empty-p stderr-message)
+                                     stderr-message)
+                                   "Could not derive Nostr account pubkey."))))))
+             (error
+              (funcall error (error-message-string err)))))))
+    (if (fboundp 'make-thread)
+        (make-thread worker "nostr-derive-pubkey")
+      (run-at-time 0 nil worker))))
+
 (defun nostr-setup--validate-secret (secret)
   "Validate SECRET with the backend and return the derived account response."
   (let* ((response (nostr-setup--call-sync

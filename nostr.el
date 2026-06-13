@@ -23,6 +23,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'nostr-backend)
 (require 'nostr-actions)
 (require 'nostr-db)
@@ -38,6 +39,7 @@
 (require 'nostr-setup)
 (require 'nostr-share)
 (require 'nostr-timeline)
+(require 'nostr-ui)
 
 (defcustom nostr-db-path (expand-file-name "nostr-db.sqlite" user-emacs-directory)
   "Path to the Nostr SQLite cache."
@@ -57,6 +59,12 @@
 
 (defvar nostr--refresh-timer nil
   "Pending debounced refresh timer.")
+
+(defvar nostr--opening-account nil
+  "Non-nil while `nostr-open' is deriving the account asynchronously.")
+
+(defvar nostr--open-generation 0
+  "Generation counter used to ignore stale async `nostr-open' callbacks.")
 
 (defcustom nostr-refresh-debounce-seconds 0.4
   "Seconds to debounce UI refresh after relay events."
@@ -91,22 +99,70 @@
           ('nostr-notifications-mode (nostr-notifications-refresh))
           ('nostr-relays-mode (nostr-relays-refresh)))))))
 
+(defun nostr--render-opening-buffer (buffer detail)
+  "Render BUFFER as the main Nostr opening screen with DETAIL."
+  (with-current-buffer buffer
+    (nostr-timeline-mode)
+    (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
+    (let ((inhibit-read-only t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-status-header "Feed" "Nostr" detail)
+      (nostr-ui-insert-primary-nav nostr-ui-primary-nav-items 'feed)
+      (nostr-ui-insert-empty-state
+       "Preparing account."
+       "Nostr is deriving the configured account pubkey in the background.")
+      (nostr-ui-insert-footer '("S setup" "? actions"))
+      (nostr-ui-finish-refresh nil))))
+
+(defun nostr--finish-open-after-pubkey (buffer generation)
+  "Finish opening BUFFER once `nostr-current-pubkey' is available."
+  (when (= generation nostr--open-generation)
+    (setq nostr--opening-account nil)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (nostr-timeline-mode)
+        (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
+        (nostr-timeline-refresh)))
+    (nostr-relay-connect-all-deferred nostr-current-pubkey)))
+
+(defun nostr--start-account-open (buffer)
+  "Start asynchronous account setup for `nostr-open' and refresh BUFFER later."
+  (unless nostr--opening-account
+    (let ((generation nostr--open-generation))
+      (setq nostr--opening-account t)
+      (nostr-setup-derive-pubkey-async
+       (lambda (_response)
+         (run-at-time 0 nil #'nostr--finish-open-after-pubkey buffer generation))
+       (lambda (message)
+         (run-at-time
+          0 nil
+          (lambda ()
+            (when (= generation nostr--open-generation)
+              (setq nostr--opening-account nil)
+              (when (buffer-live-p buffer)
+                (nostr--render-opening-buffer
+                 buffer
+                 (format "Account setup failed: %s" message)))))))))))
+
 ;;;###autoload
 (defun nostr-open ()
   "Open the main Nostr client buffer."
   (interactive)
   (unless nostr-db--connection
     (nostr-db-open nostr-db-path))
-  (unless nostr-current-pubkey
-    (nostr-setup-derive-pubkey))
+  (cl-incf nostr--open-generation)
   (add-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
   (let ((buffer (get-buffer-create nostr-buffer-name)))
-    (with-current-buffer buffer
-      (nostr-timeline-mode)
-      (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
-      (nostr-timeline-refresh))
-    (pop-to-buffer buffer))
-  (nostr-relay-connect-all-deferred nostr-current-pubkey))
+    (if nostr-current-pubkey
+        (with-current-buffer buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
+          (nostr-timeline-refresh))
+      (nostr--render-opening-buffer buffer "Deriving configured account pubkey."))
+    (pop-to-buffer buffer)
+    (if nostr-current-pubkey
+        (nostr-relay-connect-all-deferred nostr-current-pubkey)
+      (nostr--start-account-open buffer))))
 
 ;;;###autoload
 (defun nostr-close ()
@@ -115,7 +171,9 @@
   (when (timerp nostr--refresh-timer)
     (cancel-timer nostr--refresh-timer)
     (setq nostr--refresh-timer nil))
+  (setq nostr--opening-account nil)
   (remove-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  (cl-incf nostr--open-generation)
   (nostr-relay-disconnect-all)
   (nostr-db-close))
 
