@@ -164,6 +164,10 @@ so that is accepted as a fallback."
   "\\(?:nostr:\\)?nevent1[023456789acdefghjklmnpqrstuvwxyz]+"
   "Regexp matching NIP-19 nevent identifiers in note content.")
 
+(defconst nostr-event-npub-regexp
+  "\\(?:nostr:\\)?npub1[023456789acdefghjklmnpqrstuvwxyz]+"
+  "Regexp matching NIP-19 npub identifiers in note content.")
+
 (defun nostr-event-media-type (url)
   "Return media type symbol for URL."
   (cond
@@ -201,6 +205,16 @@ media and are not downloaded for inline image display."
       (insert (or content ""))
       (goto-char (point-min))
       (while (re-search-forward nostr-event-nevent-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
+
+(defun nostr-event-npubs (content)
+  "Return NIP-19 npub identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-npub-regexp nil t)
         (push (match-string-no-properties 0) values)))
     (delete-dups (nreverse values))))
 

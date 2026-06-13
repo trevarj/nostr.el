@@ -132,7 +132,11 @@ Persists across renders so a repeated avatar is decoded once, not per note.")
 (defvar nostr-ui--nevent-cache (make-hash-table :test #'equal)
   "Cache of nevent strings to decoded event ids or `invalid'.")
 
+(defvar nostr-ui--npub-decode-cache (make-hash-table :test #'equal)
+  "Cache of npub strings to decoded hex pubkeys or `invalid'.")
+
 (declare-function nostr-relay-fetch-events-by-id "nostr-relay" (event-ids &optional limit))
+(declare-function nostr-relay-fetch-profile "nostr-relay" (pubkey &optional url))
 
 (defcustom nostr-ui-show-avatars t
   "Whether note cards and profile headers show profile picture placeholders."
@@ -1086,6 +1090,55 @@ looked up from the memoized full counts alist for the event id."
          (puthash value 'invalid nostr-ui--nevent-cache)
          nil))))))
 
+(defun nostr-ui--decode-npub-pubkey (npub)
+  "Return pubkey decoded from NPUB, caching the backend result."
+  (let* ((value (nostr-ui--strip-nostr-uri npub))
+         (cached (gethash value nostr-ui--npub-decode-cache)))
+    (cond
+     ((eq cached 'invalid) nil)
+     (cached cached)
+     (t
+      (condition-case nil
+          (let* ((decoded (nostr-nip19-decode-sync value))
+                 (entity (alist-get 'entity decoded nil nil #'equal))
+                 (pubkey (and (equal entity "npub")
+                              (alist-get 'pubkey decoded))))
+            (if (stringp pubkey)
+                (puthash value pubkey nostr-ui--npub-decode-cache)
+              (puthash value 'invalid nostr-ui--npub-decode-cache)
+              nil))
+        (error
+         (puthash value 'invalid nostr-ui--npub-decode-cache)
+         nil))))))
+
+(defun nostr-ui--format-profile-mention (npub)
+  "Return compact mention text for NPUB."
+  (let* ((pubkey (nostr-ui--decode-npub-pubkey npub))
+         (profile (and pubkey (nostr-ui--cached-profile pubkey)))
+         (name (nostr-ui--string-value
+                (nth 2 profile)
+                (nth 1 profile)
+                (nostr-ui-format-nip05 (nth 5 profile) pubkey))))
+    (when (and pubkey (not profile) (fboundp 'nostr-relay-fetch-profile))
+      (nostr-relay-fetch-profile pubkey))
+    (cond
+     (name (concat "@" name))
+     (pubkey (format "@%s" (nostr-ui--shorten-identifier
+                            (or (nostr-ui--cached-npub pubkey)
+                                (nostr-ui--strip-nostr-uri npub)))))
+     (t npub))))
+
+(defun nostr-ui--content-with-profile-mentions (content)
+  "Return CONTENT with NIP-19 npubs rendered as profile mentions."
+  (let ((text (or content "")))
+    (dolist (npub (nostr-event-npubs text))
+      (setq text (replace-regexp-in-string
+                  (regexp-quote npub)
+                  (lambda (_match)
+                    (nostr-ui--format-profile-mention npub))
+                  text t t)))
+    text))
+
 (defun nostr-ui--event-by-id (event-id)
   "Return cached EVENT-ID as an event alist."
   (car (nostr-db-select-thread event-id)))
@@ -1336,6 +1389,8 @@ thread/detail style uses exact dates."
          (represented-nevents (nostr-ui--represented-nevents event))
          (display-content (nostr-ui--content-without-nevents
                            content represented-nevents))
+         (display-content (nostr-ui--content-with-profile-mentions
+                           display-content))
          (picture (nostr-ui--event-picture event)))
     (insert indent)
     (insert (propertize "────────────────────────────────────────\n"
