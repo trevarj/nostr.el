@@ -372,6 +372,152 @@
       (when (file-directory-p dir)
         (delete-directory dir t)))))
 
+(ert-deftest nostr-ui-video-placeholder-plays-directly ()
+  "Activating a video placeholder plays the visible URL directly."
+  (let ((url "https://example.test/movie.mp4")
+        played-url)
+    (cl-letf (((symbol-function 'nostr-media-play-video-at-point)
+               (lambda (&optional button)
+                 (setq played-url (button-get button 'nostr-media-url))
+                 played-url)))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           `((id . "note-video")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . ,(format "watch %s" url))
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (goto-char (point-min))
+        (search-forward "[video:")
+        (button-activate (button-at (1- (point))))
+        (should (equal played-url url))
+        (should-not (string-match-p "\\[play video:"
+                                    (buffer-string)))))))
+
+(ert-deftest nostr-ui-toggle-note-media-plays-single-video ()
+  "`m' on a single-video note opens that video without rendering a button."
+  (let ((url "https://example.test/movie.mp4")
+        played-url)
+    (cl-letf (((symbol-function 'nostr-media-play-video-url)
+               (lambda (target-url)
+                 (setq played-url target-url)
+                 target-url)))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           `((id . "note-video")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . ,(format "watch %s" url))
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (nostr-ui-goto-first-section)
+        (nostr-ui-toggle-note-media)
+        (should (equal played-url url))
+        (should-not (text-property-any (point-min) (point-max)
+                                       'nostr-media-rendered t))
+        (should-not (string-match-p "\\[play video:"
+                                    (buffer-string)))))))
+
+(ert-deftest nostr-ui-toggle-note-media-prompts-for-multiple-videos ()
+  "`m' prompts for the video URL when a note has multiple videos."
+  (let ((first-url "https://example.test/one.mp4")
+        (second-url "https://example.test/two.mp4")
+        played-url
+        choices)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _)
+                 (setq choices collection)
+                 second-url))
+              ((symbol-function 'nostr-media-play-video-url)
+               (lambda (target-url)
+                 (setq played-url target-url)
+                 target-url)))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           `((id . "note-videos")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . ,(format "watch %s and %s" first-url second-url))
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (nostr-ui-goto-first-section)
+        (nostr-ui-toggle-note-media)
+        (should (equal choices (list first-url second-url)))
+        (should (equal played-url second-url))))))
+
+(ert-deftest nostr-ui-toggle-note-media-plays-video-and-toggles-images ()
+  "`m' on mixed media plays video and toggles image previews."
+  (let* ((dir (make-temp-file "nostr-note-mixed-media-test" t))
+         (image-url "https://example.test/photo.png")
+         (video-url "https://example.test/movie.mp4")
+         (nostr-media-cache-directory dir)
+         (played-url nil)
+         (nostr-media-fetch-function
+          (lambda (_url success _error)
+            (funcall success
+                     '(("content-type" . "image/png")
+                       ("content-length" . "8"))
+                     "png-data"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'nostr-media-play-video-url)
+                   (lambda (target-url)
+                     (setq played-url target-url)
+                     target-url)))
+          (with-temp-buffer
+            (let ((inhibit-read-only t))
+              (nostr-ui-clear)
+              (nostr-ui-insert-note
+               `((id . "note-mixed")
+                 (pubkey . "alice")
+                 (created-at . 1736776800)
+                 (content . ,(format "look %s watch %s" image-url video-url))
+                 (replies . 0)
+                 (reactions . 0)
+                 (reposts . 0))))
+            (nostr-ui-goto-first-section)
+            (nostr-ui-toggle-note-media)
+            (should (equal played-url video-url))
+            (should (text-property-any (point-min) (point-max)
+                                       'nostr-media-rendered t))
+            (nostr-ui-toggle-note-media)
+            (should-not (text-property-any (point-min) (point-max)
+                                           'nostr-media-rendered t))))
+      (when (file-directory-p dir)
+        (delete-directory dir t)))))
+
+(ert-deftest nostr-ui-note-card-refresh-does-not-play-video ()
+  "Refreshing an open-media video note does not start video playback."
+  (let ((url "https://example.test/movie.mp4"))
+    (cl-letf (((symbol-function 'nostr-media-play-video-url)
+               (lambda (&rest _)
+                 (ert-fail "refresh restore should not play videos"))))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (puthash "note-video" t (nostr-ui--open-media-notes))
+          (nostr-ui-insert-note
+           `((id . "note-video")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . ,(format "watch %s" url))
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (should (string-match-p "\\[video: https://example.test/movie.mp4\\]"
+                                (buffer-string)))
+        (should-not (text-property-any (point-min) (point-max)
+                                       'nostr-media-rendered t))))))
+
 (ert-deftest nostr-ui-note-card-embeds-cached-nevent ()
   "A top-level nevent renders its cached target as an embedded card."
   (let ((nostr-ui-show-avatars nil)

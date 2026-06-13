@@ -250,22 +250,22 @@ binary DATA.  ERROR receives a human-readable message.")
                          text)
     text))
 
-(defun nostr-media--video-string (url)
-  "Return the rendered video row text for URL."
-  (let ((text (concat "\n[play video: " url "]")))
-    (add-text-properties 0 (length text)
-                         `(nostr-media-rendered t
-                           nostr-media-type video
-                           nostr-media-url ,url
-                           rear-nonsticky t)
-                         text)
-    (add-text-properties 0 1
-                         '(nostr-media-render-start t)
-                         text)
-    (add-text-properties (1- (length text)) (length text)
-                         '(nostr-media-render-end t)
-                         text)
-    text))
+(defun nostr-media-play-video-url (url)
+  "Play video URL with the configured player."
+  (if-let* ((command (and (stringp nostr-media-video-player-command)
+                          (not (string-empty-p nostr-media-video-player-command))
+                          (executable-find nostr-media-video-player-command))))
+      (let ((process (apply #'start-process
+                            "nostr-media-video"
+                            nil
+                            command
+                            (append nostr-media-video-player-args
+                                    (list url)))))
+        (set-process-query-on-exit-flag process nil)
+        (message "Playing video with %s" nostr-media-video-player-command))
+    (browse-url url)
+    (message "Video player not found; opened video in browser"))
+  url)
 
 (defun nostr-media-play-video-at-point (&optional button)
   "Play the video URL represented at point or BUTTON with the configured player."
@@ -273,51 +273,7 @@ binary DATA.  ERROR receives a human-readable message.")
   (let ((url (or (and button (button-get button 'nostr-media-url))
                  (nostr-media-url-at-point)
                  (user-error "No Nostr video URL at point"))))
-    (if-let* ((command (and (stringp nostr-media-video-player-command)
-                            (not (string-empty-p nostr-media-video-player-command))
-                            (executable-find nostr-media-video-player-command))))
-        (let ((process (apply #'start-process
-                              "nostr-media-video"
-                              nil
-                              command
-                              (append nostr-media-video-player-args
-                                      (list url)))))
-          (set-process-query-on-exit-flag process nil)
-          (message "Playing video with %s" nostr-media-video-player-command))
-      (browse-url url)
-      (message "Video player not found; opened video in browser"))
-    url))
-
-(defun nostr-media-render-video-at-point (url &optional position)
-  "Render a video play button for URL at POSITION or point."
-  (let* ((marker (copy-marker (or position (point))))
-         (buffer (marker-buffer marker)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (save-excursion
-          (goto-char marker)
-          (end-of-line)
-          (nostr-media-remove-rendered-url-in-region
-           url
-           (line-beginning-position)
-           (save-excursion
-             (forward-line 2)
-             (point)))
-          (let ((inhibit-read-only t))
-            (let ((start (point)))
-              (insert-text-button
-               (nostr-media--video-string url)
-               'follow-link t
-               'nostr-media-url url
-               'nostr-media-type 'video
-               'help-echo "Play this video"
-               'action (lambda (button) (nostr-media-play-video-at-point button)))
-              (add-text-properties start (point)
-                                   `(nostr-media-rendered t
-                                     nostr-media-type video
-                                     nostr-media-url ,url
-                                     rear-nonsticky t)))))))
-    url))
+    (nostr-media-play-video-url url)))
 
 (defun nostr-media--rendered-block-end (pos limit)
   "Return end position for rendered preview block starting at POS before LIMIT."
@@ -392,7 +348,7 @@ start a network request."
          (marker (copy-marker (point) t)))
     (cond
      ((eq type 'video)
-      (nostr-media-render-video-at-point url marker))
+      (nostr-media-play-video-url url))
      ((file-exists-p file)
         (nostr-media-render-file-at-point url file marker)
       url)

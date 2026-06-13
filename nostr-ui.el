@@ -1152,9 +1152,12 @@ looked up from the memoized full counts alist for the event id."
      'nostr-media-url url
      'nostr-media-type type
      'help-echo (if (eq type 'video)
-                    "Show an external video link"
+                    "Play this video"
                   "Load this image inline")
-     'action (lambda (_button) (nostr-media-load-at-point)))
+     'action (lambda (button)
+               (if (eq (button-get button 'nostr-media-type) 'video)
+                   (nostr-media-play-video-at-point button)
+                 (nostr-media-load-at-point))))
     (insert "\n")))
 
 (defun nostr-ui--insert-note-heading (section indent picture author)
@@ -1203,6 +1206,21 @@ looked up from the memoized full counts alist for the event id."
       (setq pos (next-single-property-change pos 'nostr-media-url nil end)))
     found))
 
+(defun nostr-ui--media-item-urls (items type)
+  "Return URL values from ITEMS matching media TYPE."
+  (delq nil
+        (mapcar (lambda (item)
+                  (when (eq (alist-get 'type item) type)
+                    (alist-get 'url item)))
+                items)))
+
+(defun nostr-ui--choose-video-url (urls)
+  "Return the video URL to play from URLS."
+  (cond
+   ((null urls) nil)
+   ((null (cdr urls)) (car urls))
+   (t (completing-read "Play video: " urls nil t))))
+
 (defun nostr-ui--open-media-notes ()
   "Return the buffer-local note media state table."
   (unless (hash-table-p nostr-ui--open-media-notes)
@@ -1215,7 +1233,8 @@ looked up from the memoized full counts alist for the event id."
                            (nostr-ui--open-media-notes))))
     (when (or explicit nostr-media-auto-preview)
       (let* ((event (nostr-ui-section-data section))
-             (urls (nostr-event-media-urls (alist-get 'content event)))
+             (items (nostr-event-media-items (alist-get 'content event)))
+             (urls (nostr-ui--media-item-urls items 'image))
              (urls (if explicit
                        urls
                      (seq-take urls (max 0 nostr-media-auto-preview-max-per-note))))
@@ -1233,34 +1252,42 @@ looked up from the memoized full counts alist for the event id."
                 (nostr-media-load-at-point (not nostr-media-auto-preview))))))))))
 
 (defun nostr-ui-toggle-note-media ()
-  "Toggle rendered media previews for the selected note."
+  "Toggle selected note image previews and play video media."
   (interactive)
   (let* ((section (or (nostr-ui-section-at-point)
                       (user-error "No note selected")))
          (event (nostr-ui-section-data section)))
     (unless (eq (nostr-ui-section-type section) 'note)
       (user-error "No note selected"))
-    (let* ((urls (nostr-event-media-urls (alist-get 'content event)))
+    (let* ((items (nostr-event-media-items (alist-get 'content event)))
+           (image-urls (nostr-ui--media-item-urls items 'image))
+           (video-urls (nostr-ui--media-item-urls items 'video))
+           (video-url (nostr-ui--choose-video-url video-urls))
            (bounds (nostr-ui--section-media-region section))
            (start (car bounds))
            (end (cdr bounds)))
-      (unless urls
+      (unless items
         (user-error "Selected note has no supported media"))
-      (if (nostr-media-rendered-in-region-p start end)
-          (progn
-            (remhash (nostr-ui-section-id section) (nostr-ui--open-media-notes))
-            (message "Removed %d media preview%s"
-                     (nostr-media-remove-rendered-in-region start end)
-                     (if (= (length urls) 1) "" "s")))
+      (when video-url
+        (nostr-media-play-video-url video-url))
+      (cond
+       ((not image-urls)
+        (message "Playing video"))
+       ((nostr-media-rendered-in-region-p start end)
+        (remhash (nostr-ui-section-id section) (nostr-ui--open-media-notes))
+        (message "Removed %d media preview%s"
+                 (nostr-media-remove-rendered-in-region start end)
+                 (if (= (length image-urls) 1) "" "s")))
+       (t
         (puthash (nostr-ui-section-id section) t (nostr-ui--open-media-notes))
-        (dolist (url urls)
+        (dolist (url image-urls)
           (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
             (save-excursion
               (goto-char position)
               (nostr-media-load-at-point))))
         (message "Loading %d media preview%s"
-                 (length urls)
-                 (if (= (length urls) 1) "" "s"))))))
+                 (length image-urls)
+                 (if (= (length image-urls) 1) "" "s")))))))
 
 (defun nostr-ui-insert-note (event &optional options)
   "Insert EVENT as a note section.

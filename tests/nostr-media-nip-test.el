@@ -96,25 +96,29 @@
           (should-not (string-match-p "\\[image loaded:" (buffer-string))))
       (delete-directory dir t))))
 
-(ert-deftest nostr-media-video-renders-play-button-without-fetching ()
-  "Video media renders as a play button without a download."
+(ert-deftest nostr-media-video-placeholder-plays-without-fetching ()
+  "Video media placeholders play directly without downloading."
   (let ((url "https://example.com/movie.mp4")
+        played-url
         (nostr-media-fetch-function
          (lambda (&rest _)
            (ert-fail "video media should not fetch"))))
-    (with-temp-buffer
-      (insert-text-button "[video]"
-                          'nostr-media-url url
-                          'nostr-media-type 'video
-                          'follow-link t)
-      (goto-char (point-min))
-      (should (equal (nostr-media-load-at-point) url))
-      (should (text-property-any (point-min) (point-max)
-                                 'nostr-media-rendered t))
-      (should (string-match-p "\\[play video: https://example.com/movie.mp4\\]"
-                              (buffer-string)))
-      (search-forward "[play video:")
-      (should (button-at (point))))))
+    (cl-letf (((symbol-function 'nostr-media-play-video-url)
+               (lambda (target-url)
+                 (setq played-url target-url)
+                 target-url)))
+      (with-temp-buffer
+        (insert-text-button "[video]"
+                            'nostr-media-url url
+                            'nostr-media-type 'video
+                            'follow-link t)
+        (goto-char (point-min))
+        (should (equal (nostr-media-load-at-point) url))
+        (should (equal played-url url))
+        (should-not (text-property-any (point-min) (point-max)
+                                       'nostr-media-rendered t))
+        (should-not (string-match-p "\\[play video:"
+                                    (buffer-string)))))))
 
 (ert-deftest nostr-media-video-play-launches-configured-player ()
   "Video play buttons launch the configured external player."
