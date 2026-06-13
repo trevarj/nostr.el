@@ -152,22 +152,45 @@
         (should (= refreshed 1))
         (should-not nostr--refresh-dirty)))))
 
-(ert-deftest nostr-window-change-repaints-dirty-buffer ()
-  "A dirty buffer that becomes visible is repainted once."
-  (let ((refreshed 0))
-    (with-temp-buffer
-      (nostr-timeline-mode)
-      (setq nostr--refresh-dirty t)
-      (let ((buf (current-buffer)))
-        (cl-letf (((symbol-function 'nostr-timeline-refresh)
-                   (lambda () (cl-incf refreshed)))
-                  ((symbol-function 'window-list)
-                   (lambda (&rest _) (list 'fake-window)))
-                  ((symbol-function 'window-buffer)
-                   (lambda (&rest _) buf)))
-          (nostr--refresh-on-window-change)
-          (should (= refreshed 1))
-          (should-not nostr--refresh-dirty))))))
+(ert-deftest nostr-window-change-schedules-deferred-refresh ()
+  "The window-change handler defers a refresh; it never refreshes synchronously.
+Refreshing synchronously inside the redisplay-time hook re-enters redisplay and
+recurses, so the handler must only schedule a timer."
+  (let ((nostr--refresh-timer nil)
+        (nostr--refresh-pending-since nil)
+        (nostr--refreshing nil)
+        (refreshed 0))
+    (unwind-protect
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq nostr--refresh-dirty t)
+          (let ((buf (current-buffer)))
+            (cl-letf (((symbol-function 'nostr-timeline-refresh)
+                       (lambda () (cl-incf refreshed)))
+                      ((symbol-function 'window-list)
+                       (lambda (&rest _) (list 'fake-window)))
+                      ((symbol-function 'window-buffer)
+                       (lambda (&rest _) buf)))
+              (nostr--refresh-on-window-change)
+              ;; Deferred: a timer is scheduled, nothing refreshed synchronously.
+              (should (timerp nostr--refresh-timer))
+              (should (= refreshed 0)))))
+      (when (timerp nostr--refresh-timer)
+        (cancel-timer nostr--refresh-timer)))))
+
+(ert-deftest nostr-refresh-visible-buffers-not-reentrant ()
+  "A refresh requested while one is already running is a no-op (no recursion)."
+  (let ((nostr--refreshing t)
+        (nostr--refresh-timer nil)
+        (nostr--refresh-pending-since nil)
+        (refreshed 0))
+    (cl-letf (((symbol-function 'nostr-timeline-refresh)
+               (lambda () (cl-incf refreshed)))
+              ((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (nostr-refresh-visible-buffers)
+        (should (= refreshed 0))))))
 
 ;;; Stage 2 --- batched database loads
 

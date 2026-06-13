@@ -139,6 +139,11 @@ pending refresh longer than `nostr-refresh-max-wait-seconds'."
     ('nostr-notifications-mode #'nostr-notifications-refresh)
     ('nostr-relays-mode #'nostr-relays-refresh)))
 
+(defvar nostr--refreshing nil
+  "Non-nil while `nostr-refresh-visible-buffers' is running.
+Guards against re-entrant refreshes (e.g. a window-change handler firing during
+a refresh), which would otherwise recurse through redisplay.")
+
 (defun nostr-refresh-visible-buffers ()
   "Refresh Nostr buffers shown in a visible window.
 Buffers with no visible window are marked dirty and repainted the next time
@@ -146,26 +151,39 @@ they become visible (see `nostr--refresh-on-window-change'), so off-screen
 buffers do no rendering work during a sync burst."
   (setq nostr--refresh-timer nil
         nostr--refresh-pending-since nil)
-  (dolist (buffer (buffer-list))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when-let* ((refresh (nostr--buffer-refresh-function)))
-          (if (get-buffer-window buffer 'visible)
-              (progn
-                (setq nostr--refresh-dirty nil)
-                (funcall refresh))
-            (setq nostr--refresh-dirty t)))))))
+  ;; Never refresh re-entrantly: refreshing mutates buffers and window points,
+  ;; which can fire `window-buffer-change-functions' and call us again.
+  (unless nostr--refreshing
+    (let ((nostr--refreshing t))
+      (dolist (buffer (buffer-list))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when-let* ((refresh (nostr--buffer-refresh-function)))
+              (if (get-buffer-window buffer 'visible)
+                  (progn
+                    (setq nostr--refresh-dirty nil)
+                    (funcall refresh))
+                (setq nostr--refresh-dirty t)))))))))
 
 (defun nostr--refresh-on-window-change (&rest _ignored)
-  "Repaint any visible Nostr buffer that skipped a refresh while hidden."
-  (dolist (window (window-list nil 'no-minibuf))
-    (let ((buffer (window-buffer window)))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (when-let* (((bound-and-true-p nostr--refresh-dirty))
-                      (refresh (nostr--buffer-refresh-function)))
-            (setq nostr--refresh-dirty nil)
-            (funcall refresh)))))))
+  "Schedule a repaint when a visible Nostr buffer skipped a refresh while hidden.
+Runs from `window-buffer-change-functions' during redisplay, so it must stay
+cheap: it only inspects windows and schedules a deferred refresh, never
+refreshing synchronously (which would re-enter redisplay and recurse)."
+  (when (and (not nostr--refreshing)
+             (not (timerp nostr--refresh-timer))
+             (catch 'found
+               (dolist (window (window-list nil 'no-minibuf))
+                 (let ((buffer (window-buffer window)))
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer
+                       (when (and (bound-and-true-p nostr--refresh-dirty)
+                                  (nostr--buffer-refresh-function))
+                         (throw 'found t))))))
+               nil))
+    (setq nostr--refresh-pending-since (float-time))
+    (setq nostr--refresh-timer
+          (run-at-time 0 nil #'nostr-refresh-visible-buffers))))
 
 (defun nostr--render-opening-buffer (buffer detail)
   "Render BUFFER as the main Nostr opening screen with DETAIL."
