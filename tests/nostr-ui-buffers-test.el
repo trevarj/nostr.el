@@ -112,6 +112,7 @@
 (ert-deftest nostr-profile-verify-nip05-uses-cached-profile ()
   "Profile verification command uses cached NIP-05 metadata."
   (nostr-ui-buffers-test-with-db
+    (clrhash nostr-ui--verified-nip05-cache)
     (nostr-ui-buffers-test-store-event
      '((id . "profile-event")
        (pubkey . "alice-pubkey")
@@ -131,7 +132,8 @@
           (nostr-profile-mode)
           (setq-local nostr-profile-pubkey "alice-pubkey")
           (nostr-profile-verify-nip05)))
-      (should (equal requested '("alice@example.com" "alice-pubkey"))))))
+      (should (equal requested '("alice@example.com" "alice-pubkey")))
+      (should (nostr-ui-nip05-verified-p "alice-pubkey" "alice@example.com")))))
 
 (ert-deftest nostr-search-renders-local-results ()
   "Search buffers show local DB results and keep point identity."

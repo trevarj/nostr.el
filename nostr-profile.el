@@ -160,7 +160,10 @@
                      (about . "About")))
       (when-let* ((value (alist-get (car field) profile)))
         (insert (propertize (format "%-10s " (cdr field)) 'face 'nostr-ui-meta))
-        (insert (format "%s\n" value))))
+        (insert (format "%s\n"
+                        (if (eq (car field) 'nip05)
+                            (nostr-ui-format-nip05 value (alist-get 'pubkey profile))
+                          value)))))
     (insert "\n")))
 
 (defun nostr-profile-refresh ()
@@ -230,6 +233,10 @@
     (nostr-nip05-verify
      identifier nostr-profile-pubkey
      (lambda (result)
+       (when (alist-get 'verified result)
+         (nostr-ui-record-nip05-verification nostr-profile-pubkey identifier)
+         (when (derived-mode-p 'nostr-profile-mode)
+           (nostr-profile-refresh)))
        (message "NIP-05 %s: %s"
                 (if (alist-get 'verified result) "verified" "mismatch")
                 identifier))

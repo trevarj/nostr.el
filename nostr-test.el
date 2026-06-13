@@ -121,6 +121,28 @@
       (should (equal (alist-get 'author (car feed)) "Alice A"))
       (should (= (alist-get 'replies (nostr-db-event-counts "root")) 1)))))
 
+(ert-deftest nostr-db-tracks-inbound-relay-presence ()
+  "Storing the same event from multiple relays keeps one event and counts relays."
+  (nostr-test-with-db
+    (dolist (relay '("wss://relay-a.example" "wss://relay-b.example"))
+      (nostr-db-store-event
+       `((id . "multi-relay")
+         (pubkey . "alice")
+         (created_at . 100)
+         (kind . 1)
+         (tags . nil)
+         (content . "hello")
+         (sig . "sig")
+         (relay . ,relay)
+         (root-id . nil)
+         (reply-id . nil)
+         (quote-id . nil))))
+    (should (= 1 (length (emacsql nostr-db--connection
+                                  [:select [id] :from events
+                                           :where (= id "multi-relay")]))))
+    (should (= 2 (alist-get 'relay-count
+                            (nostr-db-event-counts "multi-relay"))))))
+
 (ert-deftest nostr-feed-counts-load-lazily-when-rendered ()
   "Feed queries avoid eager count fields; note rendering loads visible counts."
   (nostr-test-with-db
@@ -437,6 +459,22 @@
       (should (nostr-ui-section-folded (nostr-ui-section-at-point)))
       (nostr-ui-toggle-section)
       (should-not (nostr-ui-section-folded (nostr-ui-section-at-point))))))
+
+(ert-deftest nostr-ui-note-heading-does-not-steal-ret ()
+  "Navigating to a note heading should leave RET for the mode command."
+  (with-temp-buffer
+    (nostr-timeline-mode)
+    (let ((inhibit-read-only t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-note
+       '((id . "root") (pubkey . "alice") (created-at . 1) (content . "hello"))))
+    (nostr-ui-goto-first-section)
+    (should (equal (alist-get 'id (nostr-ui-selected-data)) "root"))
+    (should-not (button-at (point)))
+    (should (eq (lookup-key nostr-timeline-mode-map (kbd "RET"))
+                #'nostr-timeline-open-thread))
+    (nostr-ui-toggle-section)
+    (should (nostr-ui-section-folded (nostr-ui-section-at-point)))))
 
 (ert-deftest nostr-ui-section-navigation-updates-selection-overlay ()
   (with-temp-buffer

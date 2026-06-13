@@ -115,8 +115,21 @@ Reset each render and primed once per feed so the per-note author lookups
   "Cache of decoded image descriptors keyed by (FILE SIZE MTIME).
 Persists across renders so a repeated avatar is decoded once, not per note.")
 
+(defvar nostr-ui--verified-nip05-cache (make-hash-table :test #'equal)
+  "Verified NIP-05 identifiers keyed by pubkey and identifier.")
+
+(defvar nostr-ui--avatar-fetches (make-hash-table :test #'equal)
+  "Avatar URLs currently being fetched automatically.")
+
 (defcustom nostr-ui-show-avatars t
   "Whether note cards and profile headers show profile picture placeholders."
+  :type 'boolean
+  :group 'nostr)
+
+(defcustom nostr-ui-auto-load-avatars t
+  "Whether unloaded avatar placeholders should fetch images automatically.
+When nil, `[Avatar]' remains a manual button that can be loaded with RET or
+mouse activation."
   :type 'boolean
   :group 'nostr)
 
@@ -139,6 +152,11 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
 (defcustom nostr-ui-card-fill-column 88
   "Preferred fill column for note card body text."
   :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-ui-relay-count-icon "◉"
+  "Compact icon used before the inbound relay count on note cards."
+  :type 'string
   :group 'nostr)
 
 (defcustom nostr-ui-default-avatar-file
@@ -601,6 +619,22 @@ When URL is non-nil, add media properties for the source URL."
       (goto-char start)
       (insert (nostr-ui--avatar-string url size)))))
 
+(defun nostr-ui--replace-avatar-placeholders (url size)
+  "Replace all live avatar placeholders for URL in the current buffer."
+  (save-excursion
+    (let ((pos (point-min))
+          (inhibit-read-only t))
+      (while (< pos (point-max))
+        (let ((next (next-single-property-change pos 'nostr-media-url nil
+                                                 (point-max))))
+          (when (and (equal (get-text-property pos 'nostr-media-url) url)
+                     (button-at pos))
+            (let ((button (button-at pos)))
+              (delete-region (button-start button) (button-end button))
+              (goto-char pos)
+              (insert (nostr-ui--avatar-string url size))))
+          (setq pos (if (= next pos) (1+ pos) next)))))))
+
 (defun nostr-ui-load-avatar-at-point (&optional button)
   "Load avatar at point or BUTTON and replace the placeholder in-place."
   (interactive)
@@ -614,7 +648,7 @@ When URL is non-nil, add media properties for the source URL."
                    nostr-ui-avatar-size))
          (file (nostr-media-cache-file url)))
     (if (file-exists-p file)
-        (nostr-ui--replace-avatar-button button url size)
+        (nostr-ui--replace-avatar-placeholders url size)
       (let ((buf (current-buffer)))
         (nostr-media-fetch
          url
@@ -624,26 +658,31 @@ When URL is non-nil, add media properties for the source URL."
                  (nostr-media--write-cache url headers data)
                  ;; A `g' refresh (erase-buffer) or buffer kill may have
                  ;; happened during the network fetch; only touch the buffer
-                 ;; if it is still live and the captured button still exists
-                 ;; at its recorded position with the same media URL.
+                 ;; if it is still live.
                  (when (buffer-live-p buf)
                    (with-current-buffer buf
-                     ;; Buttons here are text-property buttons, so a fresh
-                     ;; `button-at' returns a distinct object; match on the URL
-                     ;; property rather than `eq' identity.
-                     (let* ((start (ignore-errors (button-start button)))
-                            (current (and (integerp start)
-                                          (<= (point-min) start)
-                                          (< start (point-max))
-                                          (button-at start))))
-                       (when (and current
-                                  (equal (button-get current 'nostr-media-url)
-                                         url))
-                         (nostr-ui--replace-avatar-button current url size))))))
+                     (nostr-ui--replace-avatar-placeholders url size))))
              (error (message "[nostr] %s" (error-message-string err)))))
          (lambda (message)
            (message "[nostr] %s" message)))))
     url))
+
+(defun nostr-ui--maybe-auto-load-avatar (button url)
+  "Auto-load avatar BUTTON for URL when customization allows it."
+  (when (and nostr-ui-auto-load-avatars
+             (not (gethash url nostr-ui--avatar-fetches)))
+    (puthash url t nostr-ui--avatar-fetches)
+    (let ((buffer (current-buffer)))
+      (run-at-time
+       0 nil
+       (lambda ()
+         (unwind-protect
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (when (and (ignore-errors (button-start button))
+                            (equal (button-get button 'nostr-media-url) url))
+                   (nostr-ui-load-avatar-at-point button))))
+           (remhash url nostr-ui--avatar-fetches)))))))
 
 (defun nostr-ui-insert-avatar (url &optional size)
   "Insert avatar for URL using SIZE.
@@ -664,7 +703,8 @@ shared media cache and replaces itself in-place."
                'nostr-media-url url
                'nostr-avatar-size size
                'help-echo "Load this profile picture"
-               'action (lambda (button) (nostr-ui-load-avatar-at-point button)))))
+               'action (lambda (button) (nostr-ui-load-avatar-at-point button)))
+              (nostr-ui--maybe-auto-load-avatar (button-at (1- (point))) url)))
         (insert (nostr-ui--default-avatar-string size))))))
 
 (defun nostr-ui--cached-npub (pubkey)
@@ -679,12 +719,38 @@ shared media cache and replaces itself in-place."
                 (puthash pubkey npub nostr-ui--npub-cache)
                 npub)))))))
 
+(defun nostr-ui-record-nip05-verification (pubkey identifier)
+  "Record that IDENTIFIER has verified for PUBKEY in this Emacs session."
+  (when (and (stringp pubkey) (stringp identifier))
+    (puthash (cons pubkey identifier) t nostr-ui--verified-nip05-cache)))
+
+(defun nostr-ui-nip05-verified-p (pubkey identifier)
+  "Return non-nil when IDENTIFIER is verified for PUBKEY."
+  (and (stringp pubkey)
+       (stringp identifier)
+       (gethash (cons pubkey identifier) nostr-ui--verified-nip05-cache)))
+
+(defun nostr-ui-format-nip05 (identifier &optional pubkey)
+  "Format NIP-05 IDENTIFIER for display.
+The special local part `_@domain' is shown as `domain'.  A checkmark is shown
+only when IDENTIFIER is known verified for PUBKEY."
+  (when (stringp identifier)
+    (let* ((parsed (ignore-errors (nostr-nip05-parse-identifier identifier)))
+           (name (alist-get 'name parsed))
+           (domain (alist-get 'domain parsed))
+           (display (if (and name domain (string= name "_"))
+                        domain
+                      identifier)))
+      (if (nostr-ui-nip05-verified-p pubkey identifier)
+          (format "✓ %s" display)
+        display))))
+
 (defun nostr-ui-format-author (event)
   "Return formatted author identity for EVENT."
   (let* ((pubkey (alist-get 'pubkey event))
          (name (nostr-ui--event-profile-name event))
          (nip05 (nostr-ui--event-nip05 event))
-         (identifier (or nip05
+         (identifier (or (nostr-ui-format-nip05 nip05 pubkey)
                          (when-let* ((npub (nostr-ui--cached-npub pubkey)))
                            (nostr-ui--shorten-identifier npub))
                          (nostr-ui--shorten-identifier pubkey))))
@@ -697,7 +763,7 @@ shared media cache and replaces itself in-place."
   (when-let* ((pubkey (alist-get 'reposted-by event)))
     (let* ((name (nostr-ui--string-value (alist-get 'reposted-by-name event)))
            (nip05 (nostr-ui--string-value (alist-get 'reposted-by-nip05 event)))
-           (identifier (or nip05
+           (identifier (or (nostr-ui-format-nip05 nip05 pubkey)
                            (when-let* ((npub (nostr-ui--cached-npub pubkey)))
                              (nostr-ui--shorten-identifier npub))
                            (nostr-ui--shorten-identifier pubkey))))
@@ -826,16 +892,16 @@ looked up from the memoized full counts alist for the event id."
   "Return compact metadata badges for EVENT using STYLE."
   (let* ((created (or (alist-get 'created-at event) (alist-get 'created_at event)))
          (time (nostr-ui-format-time created style))
-         (relay (alist-get 'relay event))
+         (relay-count (nostr-ui--event-count event 'relay-count))
          (reply-id (or (alist-get 'reply-id event) (alist-get 'reply_id event)))
          (root-id (or (alist-get 'root-id event) (alist-get 'root_id event)))
          (quote-id (or (alist-get 'quote-id event) (alist-get 'quote_id event)))
          (media-count (length (nostr-event-media-urls (alist-get 'content event)))))
     (delq nil
           (list time
-                (when relay (format "relay %s" relay))
-                (when reply-id "reply")
-                (when (and root-id (not reply-id)) "conversation")
+                (when (> relay-count 0)
+                  (format "%s %d" nostr-ui-relay-count-icon relay-count))
+                (when (or reply-id root-id) "reply")
                 (when quote-id "quote")
                 (when (> media-count 0)
                   (format "media %d" media-count))))))
@@ -843,20 +909,13 @@ looked up from the memoized full counts alist for the event id."
 (defun nostr-ui--insert-note-heading (section indent picture author)
   "Insert note SECTION heading with INDENT, PICTURE, and AUTHOR."
   (insert indent)
-  (insert-text-button
-   "▾"
-   'follow-link t
-   'nostr-ui-section section
-   'action (lambda (_button) (nostr-ui-toggle-section)))
+  (insert (propertize "▾" 'nostr-ui-section section))
   (insert " ")
   (nostr-ui-insert-avatar picture nostr-ui-avatar-size)
   (insert " ")
-  (insert-text-button
-   (format "%s\n" author)
-   'face 'nostr-ui-author
-   'follow-link t
-   'nostr-ui-section section
-   'action (lambda (_button) (nostr-ui-toggle-section))))
+  (insert (propertize (format "%s\n" author)
+                      'face 'nostr-ui-author
+                      'nostr-ui-section section)))
 
 (defun nostr-ui--insert-filled-content (content indent)
   "Insert CONTENT as filled card body text using INDENT."
@@ -876,15 +935,11 @@ looked up from the memoized full counts alist for the event id."
 
 (defun nostr-ui--section-media-region (section)
   "Return cons of content bounds for SECTION."
-  (let* ((start (nostr-ui-section-content-start section))
-         (section-start (nostr-ui-section-start section))
-         (next (cl-find-if
-                (lambda (candidate)
-                  (> (nostr-ui-section-start candidate) section-start))
-                (nostr-ui--sections-by-start))))
-    (cons start (if next
-                    (nostr-ui-section-start next)
-                  (point-max)))))
+  (let ((overlay (nostr-ui-section-overlay section)))
+    (cons (nostr-ui-section-content-start section)
+          (if (overlayp overlay)
+              (overlay-end overlay)
+            (point-max)))))
 
 (defun nostr-ui--media-placeholder-position (url start end)
   "Return position of URL media placeholder between START and END."

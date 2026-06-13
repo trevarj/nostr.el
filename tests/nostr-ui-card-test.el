@@ -31,6 +31,7 @@
 (ert-deftest nostr-ui-author-prefers-nip05-and-caches-npub ()
   "Author formatting uses NIP-05 first, then cached npub, then hex fallback."
   (clrhash nostr-ui--npub-cache)
+  (clrhash nostr-ui--verified-nip05-cache)
   (should (equal (nostr-ui-format-author
                   '((pubkey . "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                     (author . "Alice")
@@ -54,6 +55,23 @@
   (should (equal (nostr-ui-format-author
                   '((pubkey . "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")))
                  "cccccccc...cccccccc")))
+
+(ert-deftest nostr-ui-formats-nip05-domain-and-verification ()
+  "NIP-05 display hides _@ and marks identifiers only after verification."
+  (clrhash nostr-ui--verified-nip05-cache)
+  (should (equal (nostr-ui-format-nip05 "_@trevs.site" "alice")
+                 "trevs.site"))
+  (should (equal (nostr-ui-format-author
+                  '((pubkey . "alice")
+                    (author . "Alice")
+                    (nip05 . "_@trevs.site")))
+                 "Alice · trevs.site"))
+  (nostr-ui-record-nip05-verification "alice" "_@trevs.site")
+  (should (equal (nostr-ui-format-author
+                  '((pubkey . "alice")
+                    (author . "Alice")
+                    (nip05 . "_@trevs.site")))
+                 "Alice · ✓ trevs.site")))
 
 (ert-deftest nostr-ui-avatar-image-props-center-inline ()
   "Avatar image props vertically center the image on the author line."
@@ -92,28 +110,29 @@
 
 (ert-deftest nostr-ui-note-card-renders-avatar-button ()
   "Cards render a loadable avatar when an author picture URL is available."
-  (with-temp-buffer
-    (let ((inhibit-read-only t))
-      (nostr-ui-clear)
-      (nostr-ui-insert-note
-       '((id . "note-avatar")
-         (pubkey . "alice-pubkey")
-         (author . "Alice")
-         (picture . "https://example.test/alice.png")
-         (created-at . 1736776800)
-         (content . "with avatar")
-         (replies . 0)
-         (reactions . 0)
-         (reposts . 0))))
-    (goto-char (point-min))
-    (search-forward "[Avatar]")
-    (should (save-excursion
-              (beginning-of-line)
-              (looking-at-p "▾ .*\\[Avatar\\] Alice")))
-    (let ((button (button-at (1- (point)))))
-      (should button)
-      (should (equal (button-get button 'nostr-media-url)
-                     "https://example.test/alice.png")))))
+  (let ((nostr-ui-auto-load-avatars nil))
+    (with-temp-buffer
+      (let ((inhibit-read-only t))
+        (nostr-ui-clear)
+        (nostr-ui-insert-note
+         '((id . "note-avatar")
+           (pubkey . "alice-pubkey")
+           (author . "Alice")
+           (picture . "https://example.test/alice.png")
+           (created-at . 1736776800)
+           (content . "with avatar")
+           (replies . 0)
+           (reactions . 0)
+           (reposts . 0))))
+      (goto-char (point-min))
+      (search-forward "[Avatar]")
+      (should (save-excursion
+                (beginning-of-line)
+                (looking-at-p "▾ .*\\[Avatar\\] Alice")))
+      (let ((button (button-at (1- (point)))))
+        (should button)
+        (should (equal (button-get button 'nostr-media-url)
+                       "https://example.test/alice.png"))))))
 
 (ert-deftest nostr-ui-note-card-renders-repost-attribution ()
   "Cards show who reposted a feed item."
@@ -136,12 +155,57 @@
       (should (string-match-p "Carol" text))
       (should (string-match-p "↻ Reposted by Alice · alice@example.test" text)))))
 
+(ert-deftest nostr-ui-note-card-renders-relay-count-not-url ()
+  "Cards show a stable inbound relay count instead of a relay URL tag."
+  (with-temp-buffer
+    (let ((inhibit-read-only t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-note
+       '((id . "relay-count-note")
+         (pubkey . "alice")
+         (created-at . 1736776800)
+         (content . "seen in several places")
+         (relay . "wss://relay-a.example")
+         (relay-count . 2)
+         (replies . 0)
+         (reactions . 0)
+         (reposts . 0))))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p (regexp-quote (format "%s 2" nostr-ui-relay-count-icon))
+                              text))
+      (should-not (string-match-p "relay wss://relay-a.example" text)))))
+
+(ert-deftest nostr-ui-note-card-collapses-conversation-tag-to-reply ()
+  "Any threaded note is tagged as reply, not conversation."
+  (dolist (event '(((id . "root-only")
+                   (pubkey . "alice")
+                   (created-at . 1736776800)
+                   (content . "root linked")
+                   (root-id . "root")
+                   (reactions . 0)
+                   (reposts . 0))
+                  ((id . "reply-only")
+                   (pubkey . "alice")
+                   (created-at . 1736776800)
+                   (content . "direct reply")
+                   (reply-id . "root")
+                   (reactions . 0)
+                   (reposts . 0))))
+    (with-temp-buffer
+      (let ((inhibit-read-only t))
+        (nostr-ui-clear)
+        (nostr-ui-insert-note event))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p " reply " text))
+        (should-not (string-match-p "conversation" text))))))
+
 (ert-deftest nostr-ui-avatar-load-replaces-placeholder-in-place ()
   "Loading an avatar replaces its button instead of appending repeated images."
   (let* ((dir (make-temp-file "nostr-avatar-test" t))
          (url "https://example.test/alice.png")
          (file nil)
          (nostr-media-cache-directory dir)
+         (nostr-ui-auto-load-avatars nil)
          (nostr-media-fetch-function
           (lambda (_url success _error)
             (funcall success
@@ -168,6 +232,42 @@
       (when (file-directory-p dir)
         (delete-directory dir t)))))
 
+(ert-deftest nostr-ui-avatar-auto-loads-placeholder-by-default ()
+  "Uncached avatar placeholders fetch themselves unless customization disables it."
+  (let* ((dir (make-temp-file "nostr-avatar-auto-test" t))
+         (url "https://example.test/alice.png")
+         (file nil)
+         (fetches 0)
+         (nostr-media-cache-directory dir)
+         (nostr-ui-auto-load-avatars t)
+         (nostr-media-fetch-function
+          (lambda (_url success _error)
+            (setq fetches (1+ fetches))
+            (funcall success
+                     '(("content-type" . "image/png")
+                       ("content-length" . "8"))
+                     "png-data"))))
+    (unwind-protect
+        (with-temp-buffer
+          (clrhash nostr-ui--avatar-fetches)
+          (let ((inhibit-read-only t))
+            (nostr-ui-clear)
+            (nostr-ui-insert-avatar url 18))
+          (setq file (nostr-media-cache-file url))
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (and (not (file-exists-p file))
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.01)))
+          (should (file-exists-p file))
+          (should (= fetches 1))
+          (goto-char (point-min))
+          (should (get-text-property (point) 'nostr-media-cache-file))
+          (should-not (button-at (point))))
+      (when (and file (file-exists-p file))
+        (delete-file file))
+      (when (file-directory-p dir)
+        (delete-directory dir t)))))
+
 (ert-deftest nostr-ui-note-card-toggles-media-previews ()
   "The note-level media command loads and removes rendered previews."
   (let* ((dir (make-temp-file "nostr-note-media-test" t))
@@ -188,6 +288,14 @@
                (pubkey . "alice")
                (created-at . 1736776800)
                (content . ,(format "look %s" url))
+               (replies . 0)
+               (reactions . 0)
+               (reposts . 0)))
+            (nostr-ui-insert-note
+             '((id . "after-media")
+               (pubkey . "bob")
+               (created-at . 1736776801)
+               (content . "second card")
                (replies . 0)
                (reactions . 0)
                (reposts . 0))))

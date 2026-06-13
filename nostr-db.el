@@ -61,7 +61,26 @@ so new columns must be added explicitly."
   (nostr-db--ensure-column "profiles" "lud16")
   (nostr-db--ensure-column "follows" "relay")
   (nostr-db--ensure-column "follows" "petname")
-  (nostr-db--ensure-column "notifications" "seen" "integer default 0"))
+  (nostr-db--ensure-column "notifications" "seen" "integer default 0")
+  (nostr-db--ensure-event-relays-table))
+
+(defun nostr-db--ensure-event-relays-table ()
+  "Ensure inbound event relay presence exists and is backfilled."
+  (emacsql nostr-db--connection
+           [:create-table :if-not-exists event_relays
+                          ([event_id
+                            url
+                            (seen_at integer)]
+                           (:unique [event_id url]))])
+  (emacsql nostr-db--connection
+           [:create-index :if-not-exists idx_event_relays_event
+                          :on event_relays ([event_id])])
+  (emacsql nostr-db--connection
+           [:insert-or-ignore :into event_relays
+                              [event_id url seen_at]
+                              :select [id relay created_at]
+                              :from events
+                              :where (is-not relay nil)]))
 
 (defun nostr-db-init ()
   "Initialize a fresh v1 database schema."
@@ -91,6 +110,7 @@ so new columns must be added explicitly."
            [:create-index :if-not-exists idx_events_kind :on events ([kind])])
   (emacsql nostr-db--connection
            [:create-index :if-not-exists idx_events_root_id :on events ([root_id])])
+  (nostr-db--ensure-event-relays-table)
   (emacsql nostr-db--connection
            [:create-table :if-not-exists profiles
                           ([(pubkey :primary-key)
@@ -246,6 +266,15 @@ so new columns must be added explicitly."
            (alist-get 'reply-id event)
            (alist-get 'quote-id event)))
 
+(defun nostr-db-store-event-relay (event)
+  "Record the inbound relay that delivered EVENT, when known."
+  (when-let* ((event-id (alist-get 'id event))
+              (relay (alist-get 'relay event)))
+    (emacsql nostr-db--connection
+             [:insert-or-replace :into event_relays
+                                 :values [$s1 $s2 $s3]]
+             event-id relay (truncate (float-time)))))
+
 (defun nostr-db-store-reaction-event (event)
   "Store kind 7 reaction EVENT."
   (when-let* ((event-id (nostr-event-reaction-event-id event)))
@@ -304,6 +333,7 @@ so new columns must be added explicitly."
 
 (defun nostr-db-store-event (event)
   "Store normalized EVENT."
+  (nostr-db-store-event-relay event)
   (pcase (alist-get 'kind event)
     (0 (nostr-db-store-profile-event event))
     (1 (nostr-db-store-text-event event))
@@ -429,7 +459,8 @@ so new columns must be added explicitly."
         (cons 'reposts 0)
         (cons 'replies 0)
         (cons 'zaps 0)
-        (cons 'zap-msats 0)))
+        (cons 'zap-msats 0)
+        (cons 'relay-count 0)))
 
 (defun nostr-db-event-counts-batch (event-ids)
   "Return an alist mapping each of EVENT-IDS to its interaction counts.
@@ -474,6 +505,15 @@ reaction/repost/reply tables for rows that may never be rendered."
           (when-let* ((row (gethash id result)))
             (setf (alist-get 'zaps row) (or n 0))
             (setf (alist-get 'zap-msats row) (or sum 0))))
+        (pcase-dolist (`(,id ,n)
+                       (emacsql nostr-db--connection
+                                [:select [event_id (funcall count *)]
+                                         :from event_relays
+                                         :where (in event_id $v1)
+                                         :group-by event_id]
+                                vids))
+          (when-let* ((row (gethash id result)))
+            (setf (alist-get 'relay-count row) (or n 0))))
         ;; Replies: any event referencing a target via reply_id OR root_id,
         ;; deduped per target so an event whose reply_id and root_id are the same
         ;; target (a common NIP-10 direct reply) is counted once -- matching the
@@ -503,7 +543,8 @@ reaction/repost/reply tables for rows that may never be rendered."
 
 (defun nostr-db-event-counts (event-id)
   "Return cached interaction counts for EVENT-ID.
-Shape: an alist of `reactions', `reposts', `replies', `zaps' and `zap-msats'.
+Shape: an alist of `reactions', `reposts', `replies', `zaps', `zap-msats',
+and `relay-count'.
 Delegates to `nostr-db-event-counts-batch' so there is a single query path."
   (or (cdr (car (nostr-db-event-counts-batch (list event-id))))
       (nostr-db--zero-counts)))
