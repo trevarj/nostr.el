@@ -25,6 +25,10 @@
 (require 'nostr-share)
 (require 'nostr-ui)
 
+;; Defined in nostr.el, which requires this file (avoid a circular require).
+(defvar nostr-debug-logging)
+(declare-function nostr-debug-message "nostr" (fmt &rest args))
+
 (defvar nostr-timeline-current-pubkey nil
   "Pubkey whose follows feed is displayed.")
 
@@ -158,7 +162,9 @@
   "Refresh the current timeline buffer."
   (interactive)
   (let ((inhibit-read-only t)
-        (position-state (nostr-ui-capture-position)))
+        (position-state (nostr-ui-capture-position))
+        (start (and nostr-debug-logging (float-time)))
+        (rendered 0))
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      (nostr-timeline--feed-title)
@@ -175,13 +181,17 @@
       (nostr-timeline--backfill-visible-metadata events)
       (if events
           (dolist (event events)
-            (nostr-ui-insert-note event))
+            (nostr-ui-insert-note event)
+            (setq rendered (1+ rendered)))
         (nostr-ui-insert-empty-state
          "No cached notes for this feed."
          "Use g to refresh, / to search, or c to compose.")))
     (nostr-ui-insert-footer
      '("g refresh" "c compose" "/ search" "L relays" "? actions"))
-    (nostr-ui-finish-refresh position-state)))
+    (nostr-ui-finish-refresh position-state)
+    (when start
+      (nostr-debug-message "timeline refresh: %d notes in %.1f ms"
+                           rendered (* 1000 (- (float-time) start))))))
 
 (defun nostr-timeline-set-feed (kind)
   "Set timeline feed KIND and refresh."
