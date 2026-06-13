@@ -1,0 +1,47 @@
+name: Backend Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    name: Build Linux x86_64 backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build backend
+        run: cargo build --release --locked -p nostr-el-backend
+
+      - name: Package backend
+        run: |
+          set -euo pipefail
+          name="nostr-el-backend-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${name}"
+          cp target/release/nostr-el-backend "dist/${name}/"
+          strip "dist/${name}/nostr-el-backend"
+          cat > "dist/${name}/README.txt" <<'EOF'
+          nostr-el-backend for Linux x86_64.
+
+          Put nostr-el-backend on PATH, or set Emacs variable
+          nostr-backend-command to this binary's absolute path.
+          EOF
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          sha256sum "dist/${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nostr-el-backend-x86_64-unknown-linux-gnu.tar.gz
+            dist/nostr-el-backend-x86_64-unknown-linux-gnu.tar.gz.sha256

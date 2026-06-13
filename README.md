@@ -35,6 +35,15 @@ guix shell -m manifest.scm
 
 ## Build The Backend
 
+Linux x86_64 users can download a release binary:
+
+```text
+https://github.com/trevarj/nostr.el/releases/latest/download/nostr-el-backend-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Verify the checksum from the matching `.sha256` file in the release, then put
+`nostr-el-backend` on `PATH` or point Emacs at it with `nostr-backend-command`.
+
 From the repository root:
 
 ```sh
@@ -97,16 +106,3 @@ transient menu.
 Inline media is opt-in. Use `M-x nostr-media-load-at-point` on a media
 placeholder, or set `nostr-media-auto-preview` after reviewing the size and
 content-type limits.
-
-## Backend Distribution
-
-The package should not silently fetch and execute a binary. The preferred
-distribution path is:
-
-- publish `nostr-el-backend` binaries in GitHub Releases;
-- verify checksums before installation;
-- provide an explicit interactive command that asks before downloading;
-- keep source builds documented for Guix and other reproducible setups.
-
-Until that exists, users must build the backend locally or install a trusted
-release binary themselves and set `nostr-backend-command`.
