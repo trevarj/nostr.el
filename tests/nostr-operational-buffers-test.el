@@ -205,6 +205,24 @@
           (nostr-notifications-open-at-point)
           (should (equal searched "missing-note")))))))
 
+(ert-deftest nostr-notifications-open-from-timeline-switches-in-place ()
+  "Notifications behave like a primary nav tab from the timeline buffer."
+  (nostr-operational-test--with-db
+    (let (popped)
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (buffer &rest _args)
+                   (setq popped buffer)
+                   buffer)))
+        (with-temp-buffer
+          (let ((buffer (current-buffer)))
+            (nostr-timeline-mode)
+            (nostr-notifications-open)
+            (should (eq (current-buffer) buffer))
+            (should-not popped)
+            (should (eq major-mode 'nostr-notifications-mode))
+            (should (string-match-p "Notifications  Nostr" (buffer-string)))
+            (should (string-match-p "\\[N Notifications\\]" (buffer-string)))))))))
+
 (ert-deftest nostr-relays-render-and-select ()
   "Relays render cached and configured state and expose data at point."
   (nostr-operational-test--with-db

@@ -371,7 +371,23 @@
 
 ;;;###autoload
 (defun nostr-notifications-open ()
-  "Open the Nostr notifications buffer."
+  "Open the Nostr notifications view.
+From the main timeline buffer, switch the current buffer in place so
+Notifications behaves like the other primary navigation tabs.  From other
+buffers, open a standalone notifications buffer."
+  (interactive)
+  (if (eq major-mode 'nostr-timeline-mode)
+      (progn
+        (nostr-notifications-mode)
+        (nostr-notifications-refresh))
+    (let ((buffer (get-buffer-create "*Nostr Notifications*")))
+      (with-current-buffer buffer
+        (nostr-notifications-mode)
+        (nostr-notifications-refresh))
+      (pop-to-buffer buffer))))
+
+(defun nostr-notifications-open-standalone ()
+  "Open the standalone Nostr notifications buffer."
   (interactive)
   (let ((buffer (get-buffer-create "*Nostr Notifications*")))
     (with-current-buffer buffer
