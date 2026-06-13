@@ -77,6 +77,24 @@
           (should-not (string-match-p "\\[image loaded:" (buffer-string))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-media-video-renders-without-fetching ()
+  "Video media renders as an external placeholder without a download."
+  (let ((url "https://example.com/movie.mp4")
+        (nostr-media-fetch-function
+         (lambda (&rest _)
+           (ert-fail "video media should not fetch"))))
+    (with-temp-buffer
+      (insert-text-button "[video]"
+                          'nostr-media-url url
+                          'nostr-media-type 'video
+                          'follow-link t)
+      (goto-char (point-min))
+      (should (equal (nostr-media-load-at-point) url))
+      (should (text-property-any (point-min) (point-max)
+                                 'nostr-media-rendered t))
+      (should (string-match-p "\\[video: https://example.com/movie.mp4\\]"
+                              (buffer-string))))))
+
 (ert-deftest nostr-nip05-verifies-matching-pubkey ()
   "NIP-05 verification succeeds when the names map contains the pubkey."
   (let ((nostr-nip05-fetch-function

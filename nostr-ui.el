@@ -127,6 +127,11 @@ Persists across renders so a repeated avatar is decoded once, not per note.")
 (defvar nostr-ui--avatar-fetches (make-hash-table :test #'equal)
   "Avatar URLs currently being fetched automatically.")
 
+(defvar nostr-ui--nevent-cache (make-hash-table :test #'equal)
+  "Cache of nevent strings to decoded event ids or `invalid'.")
+
+(declare-function nostr-relay-fetch-events-by-id "nostr-relay" (event-ids &optional limit))
+
 (defcustom nostr-ui-show-avatars t
   "Whether note cards and profile headers show profile picture placeholders."
   :type 'boolean
@@ -947,7 +952,7 @@ looked up from the memoized full counts alist for the event id."
          (reply-id (or (alist-get 'reply-id event) (alist-get 'reply_id event)))
          (root-id (or (alist-get 'root-id event) (alist-get 'root_id event)))
          (quote-id (or (alist-get 'quote-id event) (alist-get 'quote_id event)))
-         (media-count (length (nostr-event-media-urls (alist-get 'content event)))))
+         (media-count (length (nostr-event-media-items (alist-get 'content event)))))
     (delq nil
           (list time
                 (when (> relay-count 0)
@@ -956,6 +961,122 @@ looked up from the memoized full counts alist for the event id."
                 (when quote-id "quote")
                 (when (> media-count 0)
                   (format "media %d" media-count))))))
+
+(defun nostr-ui--strip-nostr-uri (value)
+  "Return VALUE without a nostr URI prefix."
+  (if (and (stringp value)
+           (string-prefix-p "nostr:" value))
+      (substring value 6)
+    value))
+
+(defun nostr-ui--short-id (value)
+  "Return shortened display text for VALUE."
+  (if (and (stringp value) (> (length value) 16))
+      (concat (substring value 0 8) "…" (substring value -8))
+    (or value "")))
+
+(defun nostr-ui--decode-nevent-event-id (nevent)
+  "Return event id decoded from NEVENT, caching the backend result."
+  (let* ((value (nostr-ui--strip-nostr-uri nevent))
+         (cached (gethash value nostr-ui--nevent-cache)))
+    (cond
+     ((eq cached 'invalid) nil)
+     (cached cached)
+     (t
+      (condition-case nil
+          (let* ((decoded (nostr-nip19-decode-sync value))
+                 (entity (alist-get 'entity decoded nil nil #'equal))
+                 (event-id (and (equal entity "nevent")
+                                (alist-get 'event_id decoded))))
+            (if (stringp event-id)
+                (puthash value event-id nostr-ui--nevent-cache)
+              (puthash value 'invalid nostr-ui--nevent-cache)
+              nil))
+        (error
+         (puthash value 'invalid nostr-ui--nevent-cache)
+         nil))))))
+
+(defun nostr-ui--event-by-id (event-id)
+  "Return cached EVENT-ID as an event alist."
+  (car (nostr-db-select-thread event-id)))
+
+(defun nostr-ui--maybe-fetch-embedded-event (event-id)
+  "Request EVENT-ID from relays when the relay module is loaded."
+  (when (and (stringp event-id)
+             (fboundp 'nostr-relay-fetch-events-by-id))
+    (nostr-relay-fetch-events-by-id (list event-id) 1)))
+
+(defun nostr-ui--embedded-event-summary (event)
+  "Return one-line summary for embedded EVENT."
+  (let* ((author (nostr-ui-format-author event))
+         (content (string-trim (or (alist-get 'content event) "")))
+         (content (replace-regexp-in-string "[\n\t ]+" " " content)))
+    (string-trim
+     (concat author
+             (when (not (string-empty-p content))
+               (concat " · " (truncate-string-to-width content 72 nil nil "…")))))))
+
+(defun nostr-ui--insert-nevent-summaries (event indent)
+  "Insert compact nested nevent summaries for EVENT at INDENT."
+  (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
+    (let* ((event-id (nostr-ui--decode-nevent-event-id nevent))
+           (embedded (and event-id (nostr-ui--event-by-id event-id))))
+      (insert indent)
+      (insert (propertize "  ↳ " 'face 'nostr-ui-meta))
+      (insert (propertize
+               (if embedded
+                   (format "Quoted %s" (nostr-ui--embedded-event-summary embedded))
+                 (format "Quoted %s" (nostr-ui--short-id
+                                      (or event-id (nostr-ui--strip-nostr-uri nevent)))))
+               'face 'nostr-ui-meta))
+      (insert "\n")
+      (unless embedded
+        (nostr-ui--maybe-fetch-embedded-event event-id)))))
+
+(defun nostr-ui--insert-nevent-embeds (event depth style embed-depth)
+  "Insert embedded nevent cards for EVENT."
+  (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
+    (let* ((event-id (nostr-ui--decode-nevent-event-id nevent))
+           (embedded (and event-id (nostr-ui--event-by-id event-id)))
+           (indent (make-string (* (1+ depth) 2) ?\s)))
+      (cond
+       (embedded
+        (nostr-ui-insert-note
+         embedded
+         (list :depth (1+ depth)
+               :style style
+               :embed-depth (1+ embed-depth))))
+       (event-id
+        (insert indent)
+        (insert (propertize
+                 (format "↳ Quoted note %s is not cached yet.\n"
+                         (nostr-ui--short-id event-id))
+                 'face 'nostr-ui-meta))
+        (nostr-ui--maybe-fetch-embedded-event event-id))
+       (t
+        (insert indent)
+        (insert (propertize
+                 (format "↳ Quoted %s could not be decoded.\n"
+                         (nostr-ui--short-id
+                          (nostr-ui--strip-nostr-uri nevent)))
+                 'face 'nostr-ui-meta)))))))
+
+(defun nostr-ui--insert-media-placeholder (item indent)
+  "Insert media placeholder ITEM with INDENT."
+  (let ((url (alist-get 'url item))
+        (type (alist-get 'type item)))
+    (insert indent)
+    (insert (propertize "  " 'face 'nostr-ui-card-border))
+    (insert-text-button
+     (format "[%s: %s]" (if (eq type 'video) "video" "image") url)
+     'follow-link t
+     'nostr-media-url url
+     'nostr-media-type type
+     'help-echo (if (eq type 'video)
+                    "Show an external video link"
+                  "Load this image inline")
+     'action (lambda (_button) (nostr-media-load-at-point)))
+    (insert "\n")))
 
 (defun nostr-ui--insert-note-heading (section indent picture author)
   "Insert note SECTION heading with INDENT, PICTURE, and AUTHOR."
@@ -1065,10 +1186,11 @@ looked up from the memoized full counts alist for the event id."
 (defun nostr-ui-insert-note (event &optional options)
   "Insert EVENT as a note section.
 OPTIONS may be a numeric thread DEPTH for compatibility, or a plist accepting
-`:depth' and `:style'.  Feed style uses relative dates; thread/detail style uses
-exact dates."
+`:depth', `:style', and `:embed-depth'.  Feed style uses relative dates;
+thread/detail style uses exact dates."
   (let* ((depth (nostr-ui--note-depth options))
          (style (nostr-ui--note-style options))
+         (embed-depth (or (nostr-ui--note-option options :embed-depth 0) 0))
          (indent (make-string (* depth 2) ?\s))
          (author (nostr-ui-format-author event))
          (content (or (alist-get 'content event) ""))
@@ -1087,17 +1209,12 @@ exact dates."
 						 'face 'nostr-ui-meta)))
 			   (nostr-ui--insert-filled-content content indent)
 			   (nostr-ui--insert-publish-receipts event indent)
-			   (dolist (url (nostr-event-media-urls (alist-get 'content event)))
-			     (insert indent)
-			     (insert (propertize "  " 'face 'nostr-ui-card-border))
-			     (insert-text-button
-			      (format "[image: %s]" url)
-			      'follow-link t
-			      'nostr-media-url url
-			      'help-echo "Load this image inline"
-			      'action (lambda (_button) (nostr-media-load-at-point)))
-			     (insert "\n"))
+			   (dolist (item (nostr-event-media-items (alist-get 'content event)))
+                             (nostr-ui--insert-media-placeholder item indent))
 			   (nostr-ui--restore-note-media section)
+                           (if (> embed-depth 0)
+                               (nostr-ui--insert-nevent-summaries event indent)
+                             (nostr-ui--insert-nevent-embeds event depth style embed-depth))
 			   (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
 						       (concat indent "  "))
 			   (insert "\n")

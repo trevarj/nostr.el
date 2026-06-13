@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'button)
+(require 'browse-url)
 (require 'cl-lib)
 (require 'subr-x)
 (require 'url)
@@ -179,6 +180,12 @@ binary DATA.  ERROR receives a human-readable message.")
       (when-let* ((button (button-at (point))))
         (button-get button 'nostr-media-url))))
 
+(defun nostr-media-type-at-point ()
+  "Return the media type represented at point, when any."
+  (or (get-text-property (point) 'nostr-media-type)
+      (when-let* ((button (button-at (point))))
+        (button-get button 'nostr-media-type))))
+
 (defun nostr-media--image-string (url file)
   "Return display string for URL cached at FILE."
   (let ((label (format "[image loaded: %s]" url)))
@@ -207,6 +214,42 @@ binary DATA.  ERROR receives a human-readable message.")
                          '(nostr-media-render-end t)
                          text)
     text))
+
+(defun nostr-media--video-string (url)
+  "Return a rendered external video placeholder for URL."
+  (let ((text (concat "\n[video: " url "]")))
+    (add-text-properties 0 (length text)
+                         `(nostr-media-rendered t
+                           nostr-media-type video
+                           nostr-media-url ,url
+                           rear-nonsticky t)
+                         text)
+    (add-text-properties 0 1
+                         '(nostr-media-render-start t)
+                         text)
+    (add-text-properties (1- (length text)) (length text)
+                         '(nostr-media-render-end t)
+                         text)
+    text))
+
+(defun nostr-media-render-video-at-point (url &optional position)
+  "Render a video placeholder for URL at POSITION or point."
+  (let* ((marker (copy-marker (or position (point))))
+         (buffer (marker-buffer marker)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char marker)
+          (end-of-line)
+          (nostr-media-remove-rendered-url-in-region
+           url
+           (line-beginning-position)
+           (save-excursion
+             (forward-line 2)
+             (point)))
+          (let ((inhibit-read-only t))
+            (insert (nostr-media--video-string url))))))
+    url))
 
 (defun nostr-media--rendered-block-end (pos limit)
   "Return end position for rendered preview block starting at POS before LIMIT."
@@ -276,24 +319,38 @@ start a network request."
   (interactive)
   (let* ((url (or (nostr-media-url-at-point)
                   (user-error "No Nostr media placeholder at point")))
+         (type (nostr-media-type-at-point))
          (file (nostr-media-cache-file url))
          (marker (copy-marker (point) t)))
-    (if (file-exists-p file)
+    (cond
+     ((eq type 'video)
+      (nostr-media-render-video-at-point url marker))
+     ((file-exists-p file)
         (nostr-media-render-file-at-point url file marker)
-      (unless cached-only
-        (nostr-media-fetch
-         url
-         (lambda (headers data)
-           (condition-case err
-               (nostr-media-render-file-at-point
-                url
-                (nostr-media--write-cache url headers data)
-                marker)
-             (error (message "[nostr] %s" (error-message-string err)))))
-         (lambda (message)
-           (message "[nostr] %s" message)))))
-    (unless (and cached-only (not (file-exists-p file)))
-      url)))
+      url)
+     (cached-only nil)
+     (t
+      (nostr-media-fetch
+       url
+       (lambda (headers data)
+         (condition-case err
+             (nostr-media-render-file-at-point
+              url
+              (nostr-media--write-cache url headers data)
+              marker)
+           (error (message "[nostr] %s" (error-message-string err)))))
+       (lambda (message)
+         (message "[nostr] %s" message)))
+      url))))
+
+;;;###autoload
+(defun nostr-media-open-at-point ()
+  "Open the media URL at point externally."
+  (interactive)
+  (let ((url (or (nostr-media-url-at-point)
+                 (user-error "No Nostr media URL at point"))))
+    (browse-url url)
+    url))
 
 (provide 'nostr-media)
 ;;; nostr-media.el ends here

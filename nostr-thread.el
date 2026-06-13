@@ -15,6 +15,7 @@
 (require 'nostr-actions)
 (require 'nostr-compose)
 (require 'nostr-db)
+(require 'nostr-event)
 (require 'nostr-relay)
 (require 'nostr-share)
 (require 'nostr-ui)
@@ -22,6 +23,7 @@
 (require 'transient)
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
+(declare-function nostr-open-identifier "nostr-dispatch" (value))
 
 (defvar-local nostr-thread-root-event nil
   "Root event for the current thread buffer.")
@@ -36,6 +38,7 @@
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
+    (define-key map (kbd "o") #'nostr-thread-open-embedded-nevent)
     (define-key map (kbd "r") #'nostr-thread-reply)
     (define-key map (kbd "l") #'nostr-thread-like)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
@@ -59,6 +62,7 @@
     ("a" "Open author" nostr-thread-open-author)]
    ["Thread"
     ("g" "Refresh" nostr-thread-refresh)
+    ("o" "Open embedded" nostr-thread-open-embedded-nevent)
     ("n" "Next note" nostr-ui-next-section)
     ("p" "Previous note" nostr-ui-prev-section)
     ("TAB" "Toggle note" nostr-ui-toggle-section)]
@@ -185,6 +189,20 @@
               (pubkey (alist-get 'pubkey event)))
     (require 'nostr-profile)
     (nostr-profile-open pubkey)))
+
+(defun nostr-thread-open-embedded-nevent ()
+  "Open an embedded nevent from the selected thread note."
+  (interactive)
+  (let* ((event (or (nostr-ui-selected-data)
+                    (user-error "No note selected")))
+         (nevents (nostr-event-nevents (alist-get 'content event))))
+    (unless nevents
+      (user-error "Selected note has no embedded nevent"))
+    (let ((choice (if (= (length nevents) 1)
+                      (car nevents)
+                    (completing-read "Open embedded nevent: " nevents nil t))))
+      (require 'nostr-dispatch)
+      (nostr-open-identifier (string-remove-prefix "nostr:" choice)))))
 
 (defun nostr-thread-open (event)
   "Open the conversation containing EVENT and focus EVENT."

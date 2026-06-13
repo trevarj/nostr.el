@@ -87,6 +87,20 @@
                  '("https://example.test/a.jpg"
                    "https://example.test/b.webp?x=1"))))
 
+(ert-deftest nostr-event-media-items-include-mp4 ()
+  "Media extraction classifies mp4 URLs as external video media."
+  (should (equal (nostr-event-media-items
+                  "watch https://example.test/a.mp4 and https://example.test/b.webp")
+                 '(((url . "https://example.test/a.mp4") (type . video))
+                   ((url . "https://example.test/b.webp") (type . image))))))
+
+(ert-deftest nostr-event-nevents-finds-nostr-uri-values ()
+  "Embedded nevent extraction accepts bare and nostr: URI values."
+  (should (equal (nostr-event-nevents
+                  "see nostr:nevent1qqqqqqqqqqqqqq and nevent1qqqqqqqqqqqqqq")
+                 '("nostr:nevent1qqqqqqqqqqqqqq"
+                   "nevent1qqqqqqqqqqqqqq"))))
+
 (ert-deftest nostr-event-parses-zap-receipt-target-and-amount ()
   "Zap receipts get their target from e-tags and amount from description JSON."
   (let* ((zap-request "{\"kind\":9734,\"tags\":[[\"e\",\"note-zapped\"],[\"p\",\"alice\"],[\"amount\",\"21000\"]]}")
@@ -441,6 +455,28 @@
                 (should (equal nostr-thread-focus-id "reply-2")))
             (kill-buffer (current-buffer))))))))
 
+(ert-deftest nostr-thread-open-embedded-nevent-dispatches-selected-note-link ()
+  "Thread drill-in opens an embedded nevent from the selected note."
+  (let (opened)
+    (cl-letf (((symbol-function 'nostr-open-identifier)
+               (lambda (value) (setq opened value))))
+      (with-temp-buffer
+        (nostr-thread-mode)
+        (let ((inhibit-read-only t)
+              (nostr-ui-show-avatars nil))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           '((id . "note-with-nevent")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . "see nostr:nevent1qqqqqqqqqqqqqq")
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (nostr-ui-goto-first-section)
+        (nostr-thread-open-embedded-nevent)))
+    (should (equal opened "nevent1qqqqqqqqqqqqqq"))))
+
 (ert-deftest nostr-ui-section-toggle-and-selection ()
   (with-temp-buffer
     (nostr-timeline-mode)
@@ -517,7 +553,7 @@
       (setq-local nostr-timeline-current-pubkey "me")
       (nostr-timeline-refresh)
       (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-        (should (string-match-p "Feed  Nostr" text))
+        (should (string-match-p "\\[Nostr\\]  Feed" text))
         (should (string-match-p "\\[f Feed\\]" text))
         (should (string-match-p " C Conversations " text))
         (should (string-match-p " N Notifications " text))
@@ -583,27 +619,27 @@
           (global (nostr-test-render-timeline-feed 'global))
           (posts (nostr-test-render-timeline-feed 'my-posts))
           (media (nostr-test-render-timeline-feed 'media)))
-      (should (string-match-p "Feed  Nostr" home))
+      (should (string-match-p "\\[Nostr\\]  Feed" home))
       (should (string-match-p "home root" home))
       (should-not (string-match-p "own root" home))
       (should-not (string-match-p "home reply" home))
       (should-not (string-match-p "global root" home))
-      (should (string-match-p "Conversations  Nostr" replies))
+      (should (string-match-p "\\[Nostr\\]  Conversations" replies))
       (should (string-match-p "\\[C Conversations\\]" replies))
       (should (string-match-p "home reply" replies))
       (should-not (string-match-p "own reply" replies))
       (should-not (string-match-p "home root" replies))
-      (should (string-match-p "Global  Nostr" global))
+      (should (string-match-p "\\[Nostr\\]  Global" global))
       (should (string-match-p "\\[G Global\\]" global))
       (should (string-match-p "global root" global))
       (should (string-match-p "home root" global))
       (should (string-match-p "home reply" global))
-      (should (string-match-p "My Posts  Nostr" posts))
+      (should (string-match-p "\\[Nostr\\]  My Posts" posts))
       (should (string-match-p "\\[P My Posts\\]" posts))
       (should (string-match-p "own root" posts))
       (should (string-match-p "own reply" posts))
       (should-not (string-match-p "home root" posts))
-      (should (string-match-p "Media  Nostr" media))
+      (should (string-match-p "\\[Nostr\\]  Media" media))
       (should-not (string-match-p "\\[M Media\\]" media))
       (should (string-match-p "media https://example.test/pic.jpg" media))
       (should-not (string-match-p "home root" media)))))
@@ -686,19 +722,19 @@
       (setq-local nostr-timeline-current-pubkey "me")
       (nostr-timeline-conversations)
       (should (eq nostr-timeline-feed-kind 'conversations))
-      (should (string-match-p "Conversations  Nostr" (buffer-string)))
+      (should (string-match-p "\\[Nostr\\]  Conversations" (buffer-string)))
       (nostr-timeline-global)
       (should (eq nostr-timeline-feed-kind 'global))
-      (should (string-match-p "Global  Nostr" (buffer-string)))
+      (should (string-match-p "\\[Nostr\\]  Global" (buffer-string)))
       (nostr-timeline-my-posts)
       (should (eq nostr-timeline-feed-kind 'my-posts))
-      (should (string-match-p "My Posts  Nostr" (buffer-string)))
+      (should (string-match-p "\\[Nostr\\]  My Posts" (buffer-string)))
       (nostr-timeline-media)
       (should (eq nostr-timeline-feed-kind 'media))
-      (should (string-match-p "Media  Nostr" (buffer-string)))
+      (should (string-match-p "\\[Nostr\\]  Media" (buffer-string)))
       (nostr-timeline-feed)
       (should (eq nostr-timeline-feed-kind 'feed))
-      (should (string-match-p "Feed  Nostr" (buffer-string))))))
+      (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))))
 
 (ert-deftest nostr-compose-content-strips-comment-context ()
   (with-temp-buffer

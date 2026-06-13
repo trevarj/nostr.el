@@ -61,7 +61,7 @@
       (nostr-notifications-mode)
       (nostr-notifications-refresh)
       (should (eq major-mode 'nostr-notifications-mode))
-      (should (string-match-p "Notifications  Nostr" (buffer-string)))
+      (should (string-match-p "\\[Nostr\\]  Notifications" (buffer-string)))
       (should (string-match-p "Alice mentioned you" (buffer-string)))
       (should (string-match-p "●" (buffer-string)))
       (should (string-match-p "hello from nostr" (buffer-string)))
@@ -237,7 +237,7 @@
             (should (eq (current-buffer) buffer))
             (should-not popped)
             (should (eq major-mode 'nostr-notifications-mode))
-            (should (string-match-p "Notifications  Nostr" (buffer-string)))
+            (should (string-match-p "\\[Nostr\\]  Notifications" (buffer-string)))
             (should (string-match-p "\\[N Notifications\\]" (buffer-string)))))))))
 
 (ert-deftest nostr-notifications-open-reuses-main-buffer ()
@@ -266,7 +266,7 @@
               (should-not popped)
               (with-current-buffer main-buffer
                 (should (eq major-mode 'nostr-notifications-mode))
-                (should (string-match-p "Notifications  Nostr" (buffer-string))))))
+                (should (string-match-p "\\[Nostr\\]  Notifications" (buffer-string))))))
         (kill-buffer main-buffer)))))
 
 (ert-deftest nostr-notifications-primary-nav-returns-to-feed ()
@@ -302,7 +302,7 @@
         (should (eq major-mode 'nostr-timeline-mode))
         (should (eq nostr-timeline-feed-kind 'feed))
         (should (equal nostr-timeline-current-pubkey "me"))
-        (should (string-match-p "Feed  Nostr" (buffer-string)))
+        (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string)))
         (should (string-match-p "still in feed" (buffer-string)))))))
 
 (ert-deftest nostr-relays-render-and-select ()
@@ -413,7 +413,7 @@
               (should (member nostr-buffer-name opened-buffers))
               (with-current-buffer nostr-buffer-name
                 (should (eq major-mode 'nostr-timeline-mode))
-                (should (string-match-p "Feed  Nostr" (buffer-string))))
+                (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))
               (should-not opened-relays)
               (should (= (length nostr-relay--connect-queue) 2)))
           (nostr-close)

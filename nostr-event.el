@@ -157,11 +157,35 @@ so that is accepted as a fallback."
     ("p" ,(alist-get 'pubkey repost))))
 
 (defconst nostr-event-media-url-regexp
-  "\\bhttps?://[^][(){}<>[:space:]\"]+\\.\\(png\\|jpe?g\\|gif\\|webp\\)\\(?:?[^\n[:space:]]*\\)?"
-  "Regexp matching image URLs that can be previewed.")
+  "\\bhttps?://[^][(){}<>[:space:]\"]+\\.\\(png\\|jpe?g\\|gif\\|webp\\|mp4\\)\\(?:?[^\n[:space:]]*\\)?"
+  "Regexp matching media URLs that can be represented in note cards.")
+
+(defconst nostr-event-nevent-regexp
+  "\\(?:nostr:\\)?nevent1[023456789acdefghjklmnpqrstuvwxyz]+"
+  "Regexp matching NIP-19 nevent identifiers in note content.")
+
+(defun nostr-event-media-type (url)
+  "Return media type symbol for URL."
+  (cond
+   ((and (stringp url)
+         (string-match-p "\\.mp4\\(?:[?].*\\)?\\'" url))
+    'video)
+   ((and (stringp url)
+         (string-match-p "\\.\\(png\\|jpe?g\\|gif\\|webp\\)\\(?:[?].*\\)?\\'" url))
+    'image)))
+
+(defun nostr-event-media-items (content)
+  "Return media item alists found in CONTENT.
+Each item has `url' and `type' keys.  Video items are represented as external
+media and are not downloaded for inline image display."
+  (delq nil
+        (mapcar (lambda (url)
+                  (when-let* ((type (nostr-event-media-type url)))
+                    `((url . ,url) (type . ,type))))
+                (nostr-event-media-urls content))))
 
 (defun nostr-event-media-urls (content)
-  "Return image URLs found in CONTENT."
+  "Return media URLs found in CONTENT."
   (let (urls)
     (with-temp-buffer
       (insert (or content ""))
@@ -169,6 +193,16 @@ so that is accepted as a fallback."
       (while (re-search-forward nostr-event-media-url-regexp nil t)
         (push (match-string-no-properties 0) urls)))
     (nreverse urls)))
+
+(defun nostr-event-nevents (content)
+  "Return NIP-19 nevent identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-nevent-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
 
 (defun nostr-event-normalize (event relay)
   "Return EVENT alist with derived fields and RELAY."
