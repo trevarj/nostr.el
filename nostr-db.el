@@ -796,6 +796,19 @@ stored profile are absent from the result.  Runs one query for the whole batch."
                                 :where (in pubkey $v1)]
                        (vconcat ids))))))
 
+(defun nostr-db-select-profile-completions (&optional limit)
+  "Return cached profile rows useful for compose completion.
+Rows are PUBKEY, NAME, DISPLAY_NAME, NIP05 ordered by display value."
+  (emacsql nostr-db--connection
+           [:select [pubkey name display_name nip05]
+                    :from profiles
+                    :where (or (is-not display_name nil)
+                               (is-not name nil)
+                               (is-not nip05 nil))
+                    :order-by [(asc display_name) (asc name) (asc nip05)]
+                    :limit $s1]
+           (or limit 200)))
+
 (defun nostr-db-select-relays ()
   "Return stored relay status rows."
   (emacsql nostr-db--connection

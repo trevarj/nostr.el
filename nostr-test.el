@@ -736,10 +736,12 @@
       (should (eq nostr-timeline-feed-kind 'feed))
       (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))))
 
-(ert-deftest nostr-compose-content-strips-comment-context ()
+(ert-deftest nostr-compose-content-reads-editable-region ()
   (with-temp-buffer
     (nostr-compose-mode)
-    (insert ";; Replying to Alice\n\nhello\n")
+    (insert "readonly context\n")
+    (setq-local nostr-compose-content-start (copy-marker (point)))
+    (insert "hello\n")
     (should (equal (nostr-compose--content) "hello"))))
 
 (ert-deftest nostr-compose-header-shows-context-and-count ()
@@ -756,7 +758,7 @@
 
 (ert-deftest nostr-compose-open-renders-reply-context ()
   (let (opened)
-    (cl-letf (((symbol-function 'switch-to-buffer)
+    (cl-letf (((symbol-function 'nostr-compose--display-buffer)
                (lambda (buffer) (setq opened buffer))))
       (nostr-compose-open '((id . "reply-id")
                             (author . "Alice")
@@ -764,8 +766,10 @@
     (unwind-protect
         (with-current-buffer opened
           (should (eq major-mode 'nostr-compose-mode))
-          (should (string-match-p ";; Replying to Alice" (buffer-string)))
-          (should (string-match-p ";; hello from alice" (buffer-string)))
+          (should (string-match-p "Context" (buffer-string)))
+          (should (string-match-p "hello from alice" (buffer-string)))
+          (should (get-text-property (point-min) 'read-only))
+          (should (markerp nostr-compose-content-start))
           (should-not nostr-compose-dirty))
       (when (buffer-live-p opened)
         (with-current-buffer opened
@@ -787,13 +791,14 @@
        (reply-id . nil)
        (quote-id . nil)))
     (let (opened)
-      (cl-letf (((symbol-function 'switch-to-buffer)
+      (cl-letf (((symbol-function 'nostr-compose--display-buffer)
                  (lambda (buffer) (setq opened buffer))))
         (nostr-compose-open nil '(("q" "quote-id" "relay"))))
       (unwind-protect
           (with-current-buffer opened
-            (should (string-match-p ";; Quoting bob" (buffer-string)))
-            (should (string-match-p ";; quoted content" (buffer-string)))
+            (should (string-match-p "Context" (buffer-string)))
+            (should (string-match-p "quoted content" (buffer-string)))
+            (should (markerp nostr-compose-content-start))
             (should-not nostr-compose-dirty))
         (when (buffer-live-p opened)
           (with-current-buffer opened
@@ -854,6 +859,29 @@
     (should (equal captured-content "quoted note"))
     (should (equal (alist-get 'id stored-event) "signed"))
     (should (equal (alist-get 'id hook-event) "signed"))))
+
+(ert-deftest nostr-compose-send-replaces-attachment-token-before-signing ()
+  (let (captured-content)
+    (cl-letf (((symbol-function 'nostr-compose--upload-attachments)
+               (lambda (_paths success _error)
+                 (funcall success '(("/tmp/pic.jpg" . "https://cdn.example/pic.jpg")))))
+              ((symbol-function 'nostr-backend-sign-event)
+               (lambda (_kind _tags content success _error)
+                 (setq captured-content content)
+                 (funcall success '((client_message . "[\"EVENT\",{}]")
+                                    (event . ((id . "signed")
+                                              (kind . 1)
+                                              (created_at . 1)
+                                              (tags . nil)))))))
+              ((symbol-function 'nostr-relay-send-client-message)
+               (lambda (_message) 1))
+              ((symbol-function 'nostr-db-store-event)
+               (lambda (_event) t)))
+      (with-temp-buffer
+        (nostr-compose-mode)
+        (insert "photo\n[attachment:/tmp/pic.jpg]\n")
+        (nostr-compose-send)))
+    (should (equal captured-content "photo\nhttps://cdn.example/pic.jpg"))))
 
 (ert-deftest nostr-actions-like-and-repost-build-public-events ()
   (let (sent)
