@@ -15,6 +15,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'url-parse)
 (require 'websocket)
 (require 'nostr-backend)
 (require 'nostr-db)
@@ -71,6 +72,11 @@ number of `nostr-el-backend verify-event' subprocesses."
 
 (defvar nostr-relay--connections (make-hash-table :test #'equal)
   "Relay URL to websocket connection map.")
+
+(defvar nostr-relay--connecting (make-hash-table :test #'equal)
+  "Relay URL to in-flight reachability probe process map.
+A URL is present while its non-blocking TCP probe is pending, so duplicate
+connection attempts are suppressed before the websocket exists.")
 
 (defvar nostr-relay--connect-queue nil
   "Pending deferred relay connection requests as (URL . PUBKEY).")
@@ -263,6 +269,11 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
     (nostr-db-store-event normalized)
     (nostr-relay--note-ingested-event)
     (nostr-relay--maybe-store-notification normalized)
+    (when (equal (alist-get 'kind normalized) nostr-kind-repost)
+      ;; Repost feed items render the original note, so fetch missing targets
+      ;; as soon as a followed-account repost enters the cache.
+      (when-let* ((target (nostr-event-repost-event-id normalized)))
+        (nostr-relay-fetch-events-by-id (list target))))
     (when (equal (alist-get 'kind normalized) nostr-kind-metadata)
       (nostr-relay--complete-profile-request (alist-get 'pubkey normalized)))
     (when (memq (alist-get 'kind normalized) (list nostr-kind-text-note
@@ -460,12 +471,25 @@ filters or kind-0 metadata will never match."
              (string-prefix-p "personal-" sub-id))
     (nostr-relay-subscribe-follows-feed url nostr-current-pubkey)))
 
-(defun nostr-relay-open (url pubkey)
-  "Open websocket to URL for PUBKEY.
-Because the socket is opened with `:nowait t', a one-shot timer guards the
-handshake: if the connection has not opened within
-`nostr-relay-open-timeout-seconds', the socket is closed and a \"timeout\"
-status is stored.  The timer is cancelled once the connection opens."
+(defun nostr-relay--ws-endpoint (url)
+  "Return (HOST . PORT) for websocket URL.
+Defaults the port to 443 for wss and 80 for ws when URL omits it."
+  (let* ((parsed (url-generic-parse-url url))
+         (host (url-host parsed))
+         (raw-port (url-portspec parsed))
+         (port (if (and (integerp raw-port) (> raw-port 0))
+                   raw-port
+                 (if (equal (url-type parsed) "wss") 443 80))))
+    (unless (and (stringp host) (not (string-empty-p host)))
+      (error "Relay URL has no host: %s" url))
+    (cons host port)))
+
+(defun nostr-relay--open-websocket (url pubkey)
+  "Open and register the relay websocket to URL for PUBKEY.
+Called only after URL was shown reachable by `nostr-relay-open's probe, so the
+eager handshake send in `websocket-open' blocks only for the brief remaining
+connect rather than a full unreachable-host timeout.  Returns the websocket or
+nil on failure."
   (condition-case err
       (let (timeout-timer ws)
         (setq ws (websocket-open
@@ -493,10 +517,72 @@ status is stored.  The timer is cancelled once the connection opens."
                    (nostr-db-store-relay-status
                     url "timeout" "Connection attempt timed out")))))
         (puthash url ws nostr-relay--connections)
+        (nostr-relay--update-mode-line)
         ws)
     (error
      (nostr-db-store-relay-status url "error" (error-message-string err))
      nil)))
+
+(defun nostr-relay-open (url pubkey)
+  "Connect to relay URL for PUBKEY without blocking on a slow TCP connect.
+
+`websocket-open' sends the HTTP upgrade with `process-send-string' while the
+`:nowait' socket is still in the `connect' state (its handshake guard only
+matches the connecting status, so the send cannot be deferred to the sentinel).
+Writing to a not-yet-connected socket blocks Emacs in C until the connection
+completes or the OS connect timeout elapses, so a single slow or unreachable
+relay freezes the whole session at startup.
+
+To stay non-blocking, first probe reachability with a `:nowait' socket that is
+never written to -- and therefore cannot block -- bounded by a one-shot timer of
+`nostr-relay-open-timeout-seconds'.  Only once the probe reports `open' do we
+hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
+\"timeout\"/\"error\" status and never reaches `websocket-open'."
+  (unless (or (gethash url nostr-relay--connections)
+              (gethash url nostr-relay--connecting))
+    (condition-case err
+        (let* ((endpoint (nostr-relay--ws-endpoint url))
+               probe timer)
+          (cl-labels
+              ((finish (status-fn)
+                 ;; Tear down probe + timer once, then run STATUS-FN.  Guarded
+                 ;; by the connecting table so a late timer/sentinel after
+                 ;; teardown (or `nostr-relay-disconnect-all') is a no-op.
+                 (when (gethash url nostr-relay--connecting)
+                   (remhash url nostr-relay--connecting)
+                   (when (timerp timer) (cancel-timer timer))
+                   (when (process-live-p probe) (delete-process probe))
+                   (when status-fn (funcall status-fn))
+                   (nostr-relay--update-mode-line))))
+            (setq probe
+                  (make-network-process
+                   :name (format "nostr-probe %s" url)
+                   :host (car endpoint) :service (cdr endpoint)
+                   :nowait t :buffer nil
+                   :filter #'ignore
+                   :sentinel
+                   (lambda (p _change)
+                     (pcase (process-status p)
+                       ('open
+                        (finish (lambda () (nostr-relay--open-websocket url pubkey))))
+                       ((or 'failed 'closed 'exit 'signal)
+                        (finish (lambda ()
+                                  (nostr-db-store-relay-status
+                                   url "error" "Could not connect to relay"))))))))
+            (puthash url probe nostr-relay--connecting)
+            (setq timer
+                  (run-at-time
+                   nostr-relay-open-timeout-seconds nil
+                   (lambda ()
+                     (finish (lambda ()
+                               (nostr-db-store-relay-status
+                                url "timeout" "Connection attempt timed out"))))))
+            (nostr-relay--update-mode-line)
+            probe))
+      (error
+       (remhash url nostr-relay--connecting)
+       (nostr-db-store-relay-status url "error" (error-message-string err))
+       nil))))
 
 (defun nostr-relay-connect-all (pubkey)
   "Connect all configured relays for PUBKEY."
@@ -559,6 +645,13 @@ status is stored.  The timer is cancelled once the connection opens."
     (cancel-timer nostr-relay--connect-timer))
   (setq nostr-relay--connect-timer nil
         nostr-relay--connect-queue nil)
+  ;; Tear down in-flight reachability probes.  Clear the table first so any
+  ;; sentinel triggered by `delete-process' finds nothing and no-ops.
+  (let (probes)
+    (maphash (lambda (_url probe) (push probe probes)) nostr-relay--connecting)
+    (clrhash nostr-relay--connecting)
+    (dolist (probe probes)
+      (when (process-live-p probe) (delete-process probe))))
   (maphash (lambda (_url ws)
              (when (websocket-openp ws)
                (websocket-close ws)))
