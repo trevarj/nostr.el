@@ -615,8 +615,8 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
   (pcase-let ((`(,url ,marker ,read ,write) row))
     `((url . ,url)
       (marker . ,marker)
-      (read . ,(not (zerop read)))
-      (write . ,(not (zerop write))))))
+      (read . ,(not (zerop (or read 0))))
+      (write . ,(not (zerop (or write 0)))))))
 
 (defun nostr-db-select-relay-list (pubkey)
   "Return PUBKEY's NIP-65 relay list metadata."

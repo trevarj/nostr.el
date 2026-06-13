@@ -46,7 +46,7 @@
   :type 'file
   :group 'nostr)
 
-(defcustom nostr-debug-logging t
+(defcustom nostr-debug-logging nil
   "Whether to emit Nostr debug messages."
   :type 'boolean
   :group 'nostr)
@@ -159,7 +159,7 @@
           (setq-local nostr-timeline-current-pubkey nostr-current-pubkey)
           (nostr-timeline-refresh))
       (nostr--render-opening-buffer buffer "Deriving configured account pubkey."))
-    (pop-to-buffer buffer)
+    (switch-to-buffer buffer)
     (if nostr-current-pubkey
         (nostr-relay-connect-all-deferred nostr-current-pubkey)
       (nostr--start-account-open buffer))))

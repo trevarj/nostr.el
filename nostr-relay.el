@@ -46,6 +46,14 @@
   :type 'number
   :group 'nostr)
 
+(defcustom nostr-relay-max-concurrent-verifications 8
+  "Maximum number of concurrent event-signature verification subprocesses.
+Incoming relay events beyond this limit are queued and verified as
+in-flight verifications finish, so a busy feed cannot fork an unbounded
+number of `nostr-el-backend verify-event' subprocesses."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-relay-connect-interval 0.05
   "Seconds between deferred relay connection attempts."
   :type 'number
@@ -72,6 +80,12 @@
 
 (defvar nostr-relay--subscriptions (make-hash-table :test #'equal)
   "Active subscription IDs.")
+
+(defvar nostr-relay--verify-inflight 0
+  "Number of event-signature verifications currently in flight.")
+
+(defvar nostr-relay--verify-queue nil
+  "FIFO queue of pending (URL . EVENT) verification requests.")
 
 (defvar nostr-relay--profile-requests (make-hash-table :test #'equal)
   "Pubkeys with in-flight profile metadata requests.")
@@ -263,31 +277,59 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
     (run-hook-with-args 'nostr-relay-event-hook normalized)
     normalized))
 
+(defun nostr-relay--verify-finished ()
+  "Record that one verification finished and dispatch the next queued event."
+  (when (> nostr-relay--verify-inflight 0)
+    (cl-decf nostr-relay--verify-inflight))
+  (when-let* ((next (pop nostr-relay--verify-queue)))
+    (nostr-relay--start-verification (car next) (cdr next))))
+
+(defun nostr-relay--start-verification (url event)
+  "Spawn a verify-event subprocess for EVENT from URL.
+Increments the in-flight counter and decrements it (dispatching the next
+queued event) when the verification resolves."
+  (cl-incf nostr-relay--verify-inflight)
+  (condition-case err
+      (nostr-backend-call
+       "verify-event"
+       `((event . ,event))
+       (lambda (response)
+         (unwind-protect
+             (if (alist-get 'valid response)
+                 (nostr-relay--store-verified-event url event)
+               (nostr-relay--invalid-event
+                url event (alist-get 'reason response)))
+           (nostr-relay--verify-finished)))
+       (lambda (response stderr _status)
+         (unwind-protect
+             (let ((stderr-message (string-trim (or stderr ""))))
+               (nostr-relay--invalid-event
+                url event
+                (or (alist-get 'message (alist-get 'error response))
+                    (unless (string-empty-p stderr-message)
+                      stderr-message)
+                    "signature verification failed")))
+           (nostr-relay--verify-finished))))
+    (error
+     (nostr-relay--invalid-event
+      url event (error-message-string err))
+     (nostr-relay--verify-finished)))
+  'pending-verification)
+
 (defun nostr-relay--handle-event (url _sub-id event)
-  "Handle EVENT from URL without blocking relay IO."
+  "Handle EVENT from URL without blocking relay IO.
+When `nostr-relay-verify-events' is non-nil, verification subprocesses are
+bounded by `nostr-relay-max-concurrent-verifications'; events arriving while
+at the cap are queued (never dropped) and dispatched as verifications finish."
   (if (not nostr-relay-verify-events)
       (nostr-relay--store-verified-event url event)
-    (condition-case err
-        (nostr-backend-call
-         "verify-event"
-         `((event . ,event))
-         (lambda (response)
-           (if (alist-get 'valid response)
-               (nostr-relay--store-verified-event url event)
-             (nostr-relay--invalid-event
-              url event (alist-get 'reason response))))
-         (lambda (response stderr _status)
-           (let ((stderr-message (string-trim (or stderr ""))))
-             (nostr-relay--invalid-event
-              url event
-              (or (alist-get 'message (alist-get 'error response))
-                  (unless (string-empty-p stderr-message)
-                    stderr-message)
-                  "signature verification failed")))))
-      (error
-       (nostr-relay--invalid-event
-        url event (error-message-string err))))
-    'pending-verification))
+    (if (>= nostr-relay--verify-inflight
+            nostr-relay-max-concurrent-verifications)
+        (progn
+          (setq nostr-relay--verify-queue
+                (nconc nostr-relay--verify-queue (list (cons url event))))
+          'pending-verification)
+      (nostr-relay--start-verification url event))))
 
 (defun nostr-relay--maybe-store-notification (event)
   "Store notifications caused by EVENT for `nostr-current-pubkey'."
@@ -335,22 +377,23 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
      (nostr-db-store-relay-status url "eose" sub-id)
      (nostr-relay--note-profile-eose sub-id)
      (nostr-relay--handle-eose url sub-id))
-    (`("NOTICE" ,message)
-     (nostr-db-store-relay-status url "notice" message))
-    (`("CLOSED" ,sub-id ,message)
+    (`("NOTICE" . ,rest)
+     (nostr-db-store-relay-status url "notice" (car rest)))
+    (`("CLOSED" ,sub-id . ,rest)
      (remhash sub-id nostr-relay--subscriptions)
      (nostr-relay--note-profile-eose sub-id)
-     (nostr-db-store-relay-status url "closed" message))
-    (`("OK" ,event-id ,accepted ,message)
-     (nostr-db-store-publish-receipt
-      event-id
-      url
-      (if accepted "accepted" "rejected")
-      message)
-     (nostr-db-store-relay-status
-      url
-      (if accepted "ok" "rejected")
-      (format "%s %s" event-id message)))
+     (nostr-db-store-relay-status url "closed" (car rest)))
+    (`("OK" ,event-id ,accepted . ,rest)
+     (let ((message (car rest)))
+       (nostr-db-store-publish-receipt
+        event-id
+        url
+        (if accepted "accepted" "rejected")
+        message)
+       (nostr-db-store-relay-status
+        url
+        (if accepted "ok" "rejected")
+        (format "%s %s" event-id (or message "")))))
     (_ nil)))
 
 (defun nostr-relay--since-for-pubkeys (pubkeys)
@@ -418,24 +461,39 @@ filters or kind-0 metadata will never match."
     (nostr-relay-subscribe-follows-feed url nostr-current-pubkey)))
 
 (defun nostr-relay-open (url pubkey)
-  "Open websocket to URL for PUBKEY."
+  "Open websocket to URL for PUBKEY.
+Because the socket is opened with `:nowait t', a one-shot timer guards the
+handshake: if the connection has not opened within
+`nostr-relay-open-timeout-seconds', the socket is closed and a \"timeout\"
+status is stored.  The timer is cancelled once the connection opens."
   (condition-case err
-      (with-timeout (nostr-relay-open-timeout-seconds
-                     (nostr-db-store-relay-status url "timeout" "Connection attempt timed out")
-                     nil)
-        (let ((ws (websocket-open
-                   url
-                   :nowait t
-                   :on-message (lambda (_ws frame)
-                                 (nostr-relay-handle-frame url (websocket-frame-payload frame)))
-                   :on-open (lambda (_ws)
-                              (nostr-db-store-relay-status url "open")
-                              (nostr-relay-subscribe-personal url pubkey)
-                              (nostr-relay-subscribe-follows-feed url pubkey))
-                   :on-close (lambda (_ws)
-                               (nostr-db-store-relay-status url "closed")))))
-          (puthash url ws nostr-relay--connections)
-          ws))
+      (let (timeout-timer ws)
+        (setq ws (websocket-open
+                  url
+                  :nowait t
+                  :on-message (lambda (_ws frame)
+                                (nostr-relay-handle-frame url (websocket-frame-payload frame)))
+                  :on-open (lambda (_ws)
+                             (when (timerp timeout-timer)
+                               (cancel-timer timeout-timer))
+                             (nostr-db-store-relay-status url "open")
+                             (nostr-relay-subscribe-personal url pubkey)
+                             (nostr-relay-subscribe-follows-feed url pubkey))
+                  :on-close (lambda (_ws)
+                              (when (timerp timeout-timer)
+                                (cancel-timer timeout-timer))
+                              (nostr-db-store-relay-status url "closed"))))
+        (setq timeout-timer
+              (run-at-time
+               nostr-relay-open-timeout-seconds
+               nil
+               (lambda ()
+                 (when (and (websocket-p ws) (not (websocket-openp ws)))
+                   (ignore-errors (websocket-close ws))
+                   (nostr-db-store-relay-status
+                    url "timeout" "Connection attempt timed out")))))
+        (puthash url ws nostr-relay--connections)
+        ws)
     (error
      (nostr-db-store-relay-status url "error" (error-message-string err))
      nil)))
@@ -515,7 +573,9 @@ filters or kind-0 metadata will never match."
   (when (timerp nostr-relay--activity-timer)
     (cancel-timer nostr-relay--activity-timer))
   (setq nostr-relay--activity-timer nil
-        nostr-relay--ingested-event-count 0)
+        nostr-relay--ingested-event-count 0
+        nostr-relay--verify-inflight 0
+        nostr-relay--verify-queue nil)
   (nostr-relay--update-mode-line))
 
 (defun nostr-relay-send-client-message (client-message)

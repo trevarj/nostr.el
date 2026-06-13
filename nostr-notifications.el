@@ -378,14 +378,15 @@ Notifications behaves like the other primary navigation tabs.  From other
 buffers, open a standalone notifications buffer."
   (interactive)
   (if (eq major-mode 'nostr-timeline-mode)
+      ;; Tab-style in-place switch: only the main timeline buffer is
+      ;; repurposed, and we always re-establish `nostr-notifications-mode'
+      ;; so the buffer's keymap and local state are consistent with the
+      ;; rendered notifications view (`define-derived-mode' resets buffer
+      ;; local variables, clearing stale timeline feed state).
       (progn
         (nostr-notifications-mode)
         (nostr-notifications-refresh))
-    (let ((buffer (get-buffer-create "*Nostr Notifications*")))
-      (with-current-buffer buffer
-        (nostr-notifications-mode)
-        (nostr-notifications-refresh))
-      (pop-to-buffer buffer))))
+    (nostr-notifications-open-standalone)))
 
 (defun nostr-notifications-open-standalone ()
   "Open the standalone Nostr notifications buffer."

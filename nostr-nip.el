@@ -50,21 +50,44 @@ text.  ERROR receives a human-readable message.")
   "Fetch NIP-05 URL and call SUCCESS or ERROR."
   (if nostr-nip05-fetch-function
       (funcall nostr-nip05-fetch-function url success error)
-    (url-retrieve
-     url
-     (lambda (status)
-       (unwind-protect
-           (if-let* ((err (plist-get status :error)))
-               (funcall error (format "Could not fetch %s: %S" url err))
-             (if (not (equal url-http-response-status 200))
-                 (funcall error (format "Could not fetch %s: HTTP %s"
-                                        url url-http-response-status))
-               (funcall success
-                        (buffer-substring-no-properties
-                         (1+ url-http-end-of-headers)
-                         (point-max)))))
-         (kill-buffer (current-buffer))))
-     nil t)))
+    (let* ((settled nil)
+           (timer nil)
+           (buffer nil)
+           (finish (lambda (callback arg)
+                     ;; Ensure exactly one of SUCCESS/ERROR runs even if
+                     ;; both the retrieval callback and the timeout fire.
+                     (unless settled
+                       (setq settled t)
+                       (when timer (cancel-timer timer))
+                       (funcall callback arg)))))
+      (setq buffer
+            (url-retrieve
+             url
+             (lambda (status)
+               (unwind-protect
+                   (if-let* ((err (plist-get status :error)))
+                       (funcall finish error
+                                (format "Could not fetch %s: %S" url err))
+                     (if (not (equal url-http-response-status 200))
+                         (funcall finish error
+                                  (format "Could not fetch %s: HTTP %s"
+                                          url url-http-response-status))
+                       (funcall finish success
+                                (buffer-substring-no-properties
+                                 (1+ url-http-end-of-headers)
+                                 (point-max)))))
+                 (kill-buffer (current-buffer))))
+             nil t))
+      ;; Wire `nostr-nip05-timeout' so a hung host does not block forever.
+      (setq timer
+            (run-at-time
+             (max 0 nostr-nip05-timeout) nil
+             (lambda ()
+               (when (buffer-live-p buffer)
+                 (kill-buffer buffer))
+               (funcall finish error
+                        (format "Could not fetch %s: timed out after %s s"
+                                url nostr-nip05-timeout))))))))
 
 (defun nostr-nip05--response-pubkey (identifier json-text)
   "Return IDENTIFIER's pubkey from NIP-05 JSON-TEXT."
@@ -72,7 +95,12 @@ text.  ERROR receives a human-readable message.")
                                     :false-object nil))
          (name (alist-get 'name (nostr-nip05-parse-identifier identifier)))
          (names (alist-get 'names parsed)))
-    (alist-get (intern name) names nil nil #'eq)))
+    ;; NIP-05 local parts are case-insensitive.  Compare names without
+    ;; interning untrusted remote JSON keys into the global obarray.
+    (cl-loop for (key . value) in names
+             when (and (symbolp key)
+                       (string-equal-ignore-case (symbol-name key) name))
+             return value)))
 
 (defun nostr-nip05-verify (identifier pubkey success error)
   "Verify IDENTIFIER resolves to PUBKEY.
@@ -94,14 +122,24 @@ receives a human-readable message."
      error)))
 
 (defun nostr-nip05-verify-sync (identifier pubkey)
-  "Synchronously verify IDENTIFIER resolves to PUBKEY."
-  (let (result failure)
+  "Synchronously verify IDENTIFIER resolves to PUBKEY.
+Blocks until the verification completes or `nostr-nip05-timeout' seconds
+elapse, whichever comes first."
+  (let (result failure done)
     (nostr-nip05-verify identifier pubkey
-                        (lambda (value) (setq result value))
-                        (lambda (message) (setq failure message)))
-    (when failure
-      (error "%s" failure))
-    result))
+                        (lambda (value) (setq result value done t))
+                        (lambda (message) (setq failure message done t)))
+    ;; When the fetch is async (real `url-retrieve'), the callbacks have
+    ;; not run yet.  Pump process output until a callback fires or the
+    ;; timeout deadline passes.  A synchronous-callback fetch (e.g. the
+    ;; test hook) already set DONE, so the loop is skipped.
+    (let ((deadline (+ (float-time) (max 0 nostr-nip05-timeout))))
+      (while (and (not done) (< (float-time) deadline))
+        (accept-process-output nil 0.1)))
+    (cond
+     (failure (error "%s" failure))
+     ((not done) (error "NIP-05 verification timed out for %s" identifier))
+     (t result))))
 
 (defun nostr-nip19-decode (value success error)
   "Decode NIP-19 VALUE asynchronously using the backend."

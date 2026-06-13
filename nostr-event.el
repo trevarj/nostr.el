@@ -62,7 +62,15 @@
   "Return EVENT's NIP-10 direct reply event id, when present."
   (let* ((tags (alist-get 'tags event))
          (markers (nostr-event-e-tags-by-marker tags)))
-    (car (plist-get markers :reply))))
+    (or (car (plist-get markers :reply))
+        ;; NIP-10 deprecated positional scheme: with no :reply marker,
+        ;; the last of >=2 plain (unmarked) e-tags is the reply (first is
+        ;; root); a single e-tag is the root only, so reply stays nil.
+        (let ((plain-e-tags
+               (seq-filter (lambda (tag) (null (nth 3 tag)))
+                           (nostr-event-tags-by-name tags "e"))))
+          (when (>= (length plain-e-tags) 2)
+            (nth 1 (car (last plain-e-tags))))))))
 
 (defun nostr-event-quote-id (event)
   "Return EVENT's quoted event id, when present."

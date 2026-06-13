@@ -94,6 +94,9 @@
 (defvar-local nostr-ui--current-parent nil
   "Parent section currently being rendered.")
 
+(defvar-local nostr-ui--event-counts-cache nil
+  "Buffer-local memoization of `nostr-db-event-counts' keyed by event id.")
+
 (defvar-local nostr-ui--selection-overlay nil
   "Overlay highlighting the current section heading.")
 
@@ -145,7 +148,8 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
 (defun nostr-ui-clear ()
   "Clear current buffer UI state."
   (setq nostr-ui--sections nil
-        nostr-ui--current-parent nil)
+        nostr-ui--current-parent nil
+        nostr-ui--event-counts-cache nil)
   (remove-overlays (point-min) (point-max) 'nostr-ui-section t)
   (when (overlayp nostr-ui--selection-overlay)
     (delete-overlay nostr-ui--selection-overlay))
@@ -178,6 +182,12 @@ TITLE may be a string or a function called with the new section."
        (setf (nostr-ui-section-overlay section) ov))
      (push section nostr-ui--sections)
      section))
+
+(defun nostr-ui--sections-by-start ()
+  "Return `nostr-ui--sections' as a fresh list sorted by ascending start."
+  (sort (copy-sequence nostr-ui--sections)
+        (lambda (a b) (< (nostr-ui-section-start a)
+                         (nostr-ui-section-start b)))))
 
 (defun nostr-ui-section-at-point ()
   "Return the nearest Nostr UI section at point."
@@ -223,9 +233,13 @@ TITLE may be a string or a function called with the new section."
     (overlay-put overlay 'invisible (nostr-ui-section-folded section))
     (save-excursion
       (goto-char (nostr-ui-section-start section))
-      (let ((inhibit-read-only t))
-        (delete-char 1)
-        (insert (if (nostr-ui-section-folded section) "▸" "▾"))))
+      ;; The fold glyph is not necessarily the first character at
+      ;; section-start: note headings capture `start' before inserting
+      ;; indentation, so search the heading line for the actual glyph.
+      (when (re-search-forward "[▾▸]" (line-end-position) t)
+        (let ((inhibit-read-only t))
+          (delete-char -1)
+          (insert (if (nostr-ui-section-folded section) "▸" "▾")))))
     (nostr-ui-update-selection)))
 
 (defun nostr-ui-next-section ()
@@ -234,9 +248,7 @@ TITLE may be a string or a function called with the new section."
   (let ((pos (point)))
     (when-let* ((next (cl-find-if
                        (lambda (section) (> (nostr-ui-section-start section) pos))
-                       (sort (copy-sequence nostr-ui--sections)
-                             (lambda (a b) (< (nostr-ui-section-start a)
-                                              (nostr-ui-section-start b)))))))
+                       (nostr-ui--sections-by-start))))
       (goto-char (nostr-ui-section-start next))
       (nostr-ui-update-selection))))
 
@@ -257,9 +269,7 @@ TITLE may be a string or a function called with the new section."
 
 (defun nostr-ui-goto-first-section ()
   "Move point to the first rendered section and highlight it."
-  (when-let* ((first (car (sort (copy-sequence nostr-ui--sections)
-                                (lambda (a b) (< (nostr-ui-section-start a)
-                                                 (nostr-ui-section-start b)))))))
+  (when-let* ((first (car (nostr-ui--sections-by-start))))
     (goto-char (nostr-ui-section-start first))
     (nostr-ui-update-selection)))
 
@@ -573,16 +583,34 @@ When URL is non-nil, add media properties for the source URL."
          (file (nostr-media-cache-file url)))
     (if (file-exists-p file)
         (nostr-ui--replace-avatar-button button url size)
-      (nostr-media-fetch
-       url
-       (lambda (headers data)
-         (condition-case err
-             (progn
-               (nostr-media--write-cache url headers data)
-               (nostr-ui--replace-avatar-button button url size))
-           (error (message "[nostr] %s" (error-message-string err)))))
-       (lambda (message)
-         (message "[nostr] %s" message))))
+      (let ((buf (current-buffer)))
+        (nostr-media-fetch
+         url
+         (lambda (headers data)
+           (condition-case err
+               (progn
+                 (nostr-media--write-cache url headers data)
+                 ;; A `g' refresh (erase-buffer) or buffer kill may have
+                 ;; happened during the network fetch; only touch the buffer
+                 ;; if it is still live and the captured button still exists
+                 ;; at its recorded position with the same media URL.
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     ;; Buttons here are text-property buttons, so a fresh
+                     ;; `button-at' returns a distinct object; match on the URL
+                     ;; property rather than `eq' identity.
+                     (let* ((start (ignore-errors (button-start button)))
+                            (current (and (integerp start)
+                                          (<= (point-min) start)
+                                          (< start (point-max))
+                                          (button-at start))))
+                       (when (and current
+                                  (equal (button-get current 'nostr-media-url)
+                                         url))
+                         (nostr-ui--replace-avatar-button current url size))))))
+             (error (message "[nostr] %s" (error-message-string err)))))
+         (lambda (message)
+           (message "[nostr] %s" message)))))
     url))
 
 (defun nostr-ui-insert-avatar (url &optional size)
@@ -656,16 +684,27 @@ shared media cache and replaces itself in-place."
     (insert indent)
     (insert (propertize (format "Publish  %s\n" summary) 'face 'nostr-ui-meta))))
 
+(defun nostr-ui--event-counts (event)
+  "Return the full interaction counts alist for EVENT, memoized per buffer.
+Counts are fetched from the database at most once per event id, so a single
+render or refresh runs `nostr-db-event-counts' once rather than once per key."
+  (when-let* ((id (alist-get 'id event)))
+    (unless nostr-ui--event-counts-cache
+      (setq nostr-ui--event-counts-cache (make-hash-table :test #'equal)))
+    (let ((cached (gethash id nostr-ui--event-counts-cache 'missing)))
+      (if (not (eq cached 'missing))
+          cached
+        (puthash id
+                 (and nostr-db--connection (nostr-db-event-counts id))
+                 nostr-ui--event-counts-cache)))))
+
 (defun nostr-ui--event-count (event key)
-  "Return EVENT count KEY, loading cached counts lazily when needed."
+  "Return EVENT count KEY, loading cached counts lazily when needed.
+A count carried inline on EVENT takes precedence; otherwise the value is
+looked up from the memoized full counts alist for the event id."
   (if-let* ((existing (assoc key event)))
       (or (cdr existing) 0)
-    (let* ((counts (and nostr-db--connection
-                        (alist-get 'id event)
-                        (nostr-db-event-counts (alist-get 'id event))))
-           (value (alist-get key counts)))
-      (setf (alist-get key event) value)
-      (or value 0))))
+    (or (alist-get key (nostr-ui--event-counts event)) 0)))
 
 (defun nostr-ui--note-option (options key default)
   "Return OPTIONS plist KEY or DEFAULT."
@@ -772,10 +811,7 @@ shared media cache and replaces itself in-place."
          (next (cl-find-if
                 (lambda (candidate)
                   (> (nostr-ui-section-start candidate) section-start))
-                (sort (copy-sequence nostr-ui--sections)
-                      (lambda (a b)
-                        (< (nostr-ui-section-start a)
-                           (nostr-ui-section-start b)))))))
+                (nostr-ui--sections-by-start))))
     (cons start (if next
                     (nostr-ui-section-start next)
                   (point-max)))))

@@ -228,7 +228,7 @@
   (unless (string-prefix-p "wss://" url)
     (user-error "Relay URL must start with wss://"))
   (cl-pushnew url nostr-relay-urls :test #'equal)
-  (setq nostr-relay-urls (sort nostr-relay-urls #'string<))
+  (setq nostr-relay-urls (sort (copy-sequence nostr-relay-urls) #'string<))
   (nostr-relays-refresh))
 
 (defun nostr-relays-remove ()

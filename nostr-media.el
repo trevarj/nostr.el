@@ -117,10 +117,25 @@ binary DATA.  ERROR receives a human-readable message.")
                    (funcall error (format "Could not fetch %s: HTTP %s"
                                           url
                                           (or (nostr-media--header headers "status") "unknown")))
-                 (let ((data (buffer-substring-no-properties
-                              (1+ url-http-end-of-headers)
-                              (point-max))))
-                   (funcall success headers data)))))
+                 (let* ((content-length (nostr-media--header headers "content-length"))
+                        (declared-size (and content-length
+                                            (string-to-number content-length))))
+                   ;; Enforce the size cap before reading the body into memory:
+                   ;; an absent or oversized content-length is a hard early
+                   ;; reject so an oversized URL cannot OOM Emacs.
+                   (cond
+                    ((null declared-size)
+                     (funcall error
+                              (format "Refusing %s: missing content-length" url)))
+                    ((> declared-size nostr-media-max-bytes)
+                     (funcall error
+                              (format "Media exceeds size limit for %s: %s bytes"
+                                      url declared-size)))
+                    (t
+                     (let ((data (buffer-substring-no-properties
+                                  (1+ url-http-end-of-headers)
+                                  (point-max))))
+                       (funcall success headers data))))))))
          (kill-buffer (current-buffer))))
      nil t)))
 
@@ -201,19 +216,22 @@ Return the number of removed preview blocks."
 
 (defun nostr-media-render-file-at-point (url file &optional position)
   "Render cached media URL from FILE at POSITION or point."
-  (let ((marker (copy-marker (or position (point)))))
-    (with-current-buffer (marker-buffer marker)
-      (save-excursion
-        (goto-char marker)
-        (end-of-line)
-        (nostr-media-remove-rendered-url-in-region
-         url
-         (line-beginning-position)
-         (save-excursion
-           (forward-line 2)
-           (point)))
-        (let ((inhibit-read-only t))
-          (insert (nostr-media--rendered-string url file)))))
+  (let* ((marker (copy-marker (or position (point))))
+         (buffer (marker-buffer marker)))
+    (if (not (buffer-live-p buffer))
+        (message "[nostr] Media buffer closed before %s could be rendered" url)
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char marker)
+          (end-of-line)
+          (nostr-media-remove-rendered-url-in-region
+           url
+           (line-beginning-position)
+           (save-excursion
+             (forward-line 2)
+             (point)))
+          (let ((inhibit-read-only t))
+            (insert (nostr-media--rendered-string url file))))))
     file))
 
 ;;;###autoload

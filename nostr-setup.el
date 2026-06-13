@@ -163,30 +163,48 @@ SUCCESS receives the backend response after `nostr-current-pubkey' is set.
 ERROR receives a human-readable failure string.  Secret decryption and backend
 startup can both block, so they run in a worker thread when threads are
 available."
-  (let ((worker
-         (lambda ()
-           (condition-case err
-               (let ((secret (nostr-setup--load-secret)))
-                 (nostr-backend-call
-                  "pubkey"
-                  `((secret_key . ,secret))
-                  (lambda (response)
-                    (let ((pubkey (alist-get 'pubkey response)))
-                      (if (and (stringp pubkey) (not (string-empty-p pubkey)))
-                          (progn
-                            (setq nostr-current-pubkey pubkey)
-                            (funcall success response))
-                        (funcall error
-                                 "Backend returned no pubkey while deriving Nostr account status."))))
-                  (lambda (response stderr _status)
-                    (let ((stderr-message (string-trim (or stderr ""))))
-                      (funcall error
-                               (or (alist-get 'message (alist-get 'error response))
-                                   (unless (string-empty-p stderr-message)
-                                     stderr-message)
-                                   "Could not derive Nostr account pubkey."))))))
-             (error
-              (funcall error (error-message-string err)))))))
+  (let* ((on-main
+          ;; Runs on the main thread.  Starting the backend process and
+          ;; mutating buffers/`nostr-current-pubkey' from its sentinel must
+          ;; never happen on a worker thread, so all of this is marshalled
+          ;; back via `run-at-time'.  SECRET is consumed here and not retained.
+          (lambda (secret)
+            (condition-case err
+                (nostr-backend-call
+                 "pubkey"
+                 `((secret_key . ,secret))
+                 (lambda (response)
+                   (let ((pubkey (alist-get 'pubkey response)))
+                     (if (and (stringp pubkey) (not (string-empty-p pubkey)))
+                         (progn
+                           (setq nostr-current-pubkey pubkey)
+                           (funcall success response))
+                       (funcall error
+                                "Backend returned no pubkey while deriving Nostr account status."))))
+                 (lambda (response stderr _status)
+                   (let ((stderr-message (string-trim (or stderr ""))))
+                     (funcall error
+                              (or (alist-get 'message (alist-get 'error response))
+                                  (unless (string-empty-p stderr-message)
+                                    stderr-message)
+                                  "Could not derive Nostr account pubkey.")))))
+              (error
+               (funcall error (error-message-string err))))))
+         (worker
+          ;; Only the potentially blocking GPG decrypt runs here.  It may run
+          ;; on a worker thread, so it must not touch buffers, processes or
+          ;; redisplay; it hands the secret straight to the main thread.
+          (lambda ()
+            (condition-case err
+                (let ((secret (nostr-setup--load-secret)))
+                  (run-at-time 0 nil
+                               (lambda ()
+                                 (unwind-protect
+                                     (funcall on-main secret)
+                                   (setq secret nil)))))
+              (error
+               (let ((message (error-message-string err)))
+                 (run-at-time 0 nil (lambda () (funcall error message)))))))))
     (if (fboundp 'make-thread)
         (make-thread worker "nostr-derive-pubkey")
       (run-at-time 0 nil worker))))
@@ -206,13 +224,16 @@ available."
   "Encrypt SECRET into OUTPUT-PATH using GPG."
   (let* ((expanded-path (expand-file-name output-path))
          (directory (file-name-directory expanded-path))
-         (plain-file (make-temp-file "nostr-secret-plain"))
+         ;; Create the plaintext file owner-only so the secret is never
+         ;; world/group-readable, even for the instant between creation and an
+         ;; explicit chmod (avoids a create-then-chmod TOCTOU window).
+         ;; `with-file-modes' applies the restriction atomically at creation.
+         ;; The file is always removed in the `unwind-protect' below.
+         (plain-file (with-file-modes #o600 (make-temp-file "nostr-secret-plain")))
          (cipher-file (make-temp-file "nostr-secret-cipher")))
     (unwind-protect
         (progn
           (make-directory directory t)
-          ;; Keep the temporary plaintext readable only by the current user.
-          (set-file-modes plain-file #o600)
           (let ((coding-system-for-write 'utf-8-unix))
             (write-region (concat (string-trim secret) "\n") nil plain-file nil 'silent))
           (epg-encrypt-file

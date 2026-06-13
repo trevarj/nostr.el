@@ -175,6 +175,12 @@
 
 (defun nostr-timeline-set-feed (kind)
   "Set timeline feed KIND and refresh."
+  ;; The notifications view can switch this buffer to `nostr-notifications-mode'
+  ;; in place; re-establish the timeline mode (before `setq-local', since
+  ;; `kill-all-local-variables' would otherwise clear the feed kind) so the
+  ;; keymap and buffer-local state match the rendered feed.
+  (unless (derived-mode-p 'nostr-timeline-mode)
+    (nostr-timeline-mode))
   (setq-local nostr-timeline-feed-kind kind)
   (nostr-timeline-refresh))
 
