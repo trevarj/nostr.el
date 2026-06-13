@@ -33,7 +33,7 @@ file and GPG prompts locally for its passphrase."
   "Buffer name for Nostr account setup status.")
 
 (defconst nostr-setup-required-backend-commands
-  '("capabilities" "generate-key" "pubkey" "sign-event" "verify-event" "nip19-decode" "nip19-encode")
+  '("capabilities" "generate-key" "pubkey" "sign-event" "verify-event" "nip19-decode" "nip19-encode" "blossom-auth")
   "Backend commands required by nostr.el.")
 
 (defvar nostr-setup-mode-map

@@ -149,5 +149,16 @@ stderr text, and exit status."
    success
    error))
 
+(defun nostr-backend-blossom-auth (server sha256 expiration success error)
+  "Build a Blossom upload authorization event for SERVER and SHA256."
+  (nostr-backend-call
+   "blossom-auth"
+   `((secret_key . ,(nostr-backend-load-secret))
+     (server . ,server)
+     (sha256 . ,sha256)
+     (expiration . ,expiration))
+   success
+   error))
+
 (provide 'nostr-backend)
 ;;; nostr-backend.el ends here

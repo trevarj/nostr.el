@@ -1,3 +1,4 @@
+use base64::engine::{general_purpose, Engine};
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -94,6 +95,14 @@ struct Nip19EncodeRequest {
     value: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BlossomAuthRequest {
+    secret_key: String,
+    server: String,
+    sha256: String,
+    expiration: u64,
+}
+
 pub fn handle_command(command: &str, input: &str) -> CommandResult {
     match dispatch(command, input) {
         Ok(value) => ok(value),
@@ -114,6 +123,7 @@ fn dispatch(command: &str, input: &str) -> Result<Value, ProtocolError> {
         "verify-event" => verify_event(input),
         "nip19-decode" => nip19_decode(input),
         "nip19-encode" => nip19_encode(input),
+        "blossom-auth" => blossom_auth(input),
         _ => Err(ProtocolError::with_details(
             "unknown-command",
             "Unknown command",
@@ -132,7 +142,8 @@ fn capabilities(input: &str) -> Result<Value, ProtocolError> {
             "sign-event",
             "verify-event",
             "nip19-decode",
-            "nip19-encode"
+            "nip19-encode",
+            "blossom-auth"
         ],
         "protocol_version": 1,
         "backend": "nostr-el-backend"
@@ -274,6 +285,32 @@ fn nip19_encode(input: &str) -> Result<Value, ProtocolError> {
             json!({ "entity": request.entity }),
         )),
     }
+}
+
+fn blossom_auth(input: &str) -> Result<Value, ProtocolError> {
+    let request: BlossomAuthRequest = parse_request(input)?;
+    let keys = parse_keys(&request.secret_key)?;
+    let tags = parse_tags(vec![
+        vec!["t".to_string(), "upload".to_string()],
+        vec!["expiration".to_string(), request.expiration.to_string()],
+        vec!["server".to_string(), request.server.clone()],
+        vec!["x".to_string(), request.sha256.clone()],
+    ])?;
+    let event = EventBuilder::new(Kind::from(24242), "")
+        .tags(tags)
+        .sign_with_keys(&keys)
+        .map_err(|err| ProtocolError::new("crypto-error", err.to_string()))?;
+    let event_json = serde_json::to_string(&event)
+        .map_err(|err| ProtocolError::new("serialization-error", err.to_string()))?;
+    let authorization = format!("Nostr {}", general_purpose::STANDARD.encode(event_json));
+
+    Ok(json!({
+        "authorization": authorization,
+        "event": event,
+        "server": request.server,
+        "sha256": request.sha256,
+        "expiration": request.expiration
+    }))
 }
 
 fn parse_request<T: for<'de> Deserialize<'de>>(input: &str) -> Result<T, ProtocolError> {
@@ -421,6 +458,39 @@ mod tests {
         let verify = response("verify-event", json!({ "event": value["event"].clone() }));
         assert_eq!(verify["ok"], true);
         assert_eq!(verify["valid"], true);
+    }
+
+    #[test]
+    fn blossom_auth_returns_upload_authorization_event() {
+        let value = response(
+            "blossom-auth",
+            json!({
+                "secret_key": TEST_SECRET,
+                "server": "https://blossom.example",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "expiration": 1234
+            }),
+        );
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["event"]["kind"], 24242);
+        assert_eq!(value["event"]["content"], "");
+        assert!(value["authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Nostr "));
+        assert!(value["event"]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["t", "upload"])));
+        assert!(value["event"]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["server", "https://blossom.example"])));
+        assert!(value["event"]["tags"].as_array().unwrap().contains(&json!([
+            "x",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ])));
     }
 
     #[test]

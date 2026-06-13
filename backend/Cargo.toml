@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 clap = { version = "4.5.23", features = ["derive"] }
 nostr-sdk = { version = "0.44.1", default-features = false }
 serde = { version = "1.0.217", features = ["derive"] }

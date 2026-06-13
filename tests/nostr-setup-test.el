@@ -23,7 +23,8 @@
 	                                      "sign-event"
                                       "verify-event"
                                       "nip19-decode"
-                                      "nip19-encode")))))))
+                                      "nip19-encode"
+                                      "blossom-auth")))))))
       (let ((response (nostr-setup-check-backend)))
         (should (equal called-command "capabilities"))
         (should (hash-table-p called-payload))
@@ -284,7 +285,8 @@
 	                                         "sign-event"
                                          "verify-event"
                                          "nip19-decode"
-                                         "nip19-encode")))))
+                                         "nip19-encode"
+                                         "blossom-auth")))))
                    ("pubkey"
                     (cons 0
                           '((ok . t)

@@ -747,6 +747,7 @@ dependencies = [
 name = "nostr-el-backend"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "nostr-sdk",
  "serde",
