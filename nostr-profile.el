@@ -75,12 +75,12 @@
   (pcase row
     (`(,row-pubkey ,name ,display-name ,about ,picture ,nip05 ,lud16 ,updated-at)
      `((pubkey . ,row-pubkey)
-       (name . ,name)
-       (display-name . ,display-name)
-       (about . ,about)
-       (picture . ,picture)
-       (nip05 . ,nip05)
-       (lud16 . ,lud16)
+       (name . ,(and (stringp name) name))
+       (display-name . ,(and (stringp display-name) display-name))
+       (about . ,(and (stringp about) about))
+       (picture . ,(and (stringp picture) picture))
+       (nip05 . ,(and (stringp nip05) nip05))
+       (lud16 . ,(and (stringp lud16) lud16))
        (updated-at . ,updated-at)))
     (_ `((pubkey . ,pubkey)))))
 

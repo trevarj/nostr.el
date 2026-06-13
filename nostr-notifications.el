@@ -209,8 +209,9 @@
 
 (defun nostr-notifications--actor-label (pubkey name display-name nip05)
   "Return compact actor label from PUBKEY and profile fields."
-  (let ((label (or display-name name))
-        (identifier (or nip05
+  (let ((label (or (and (stringp display-name) display-name)
+                   (and (stringp name) name)))
+        (identifier (or (and (stringp nip05) nip05)
                         (when-let* ((npub (nostr-ui--cached-npub pubkey)))
                           (nostr-ui--shorten-identifier npub))
                         (nostr-ui--shorten-identifier pubkey))))

@@ -222,6 +222,19 @@
       (should (equal (nth 1 profile) "alice"))
       (should (equal (nth 2 profile) "Alice Display")))))
 
+(ert-deftest nostr-db-profile-metadata-ignores-json-null-fields ()
+  "Profile metadata JSON null values are stored as missing values."
+  (nostr-test-with-db
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 100)
+       (kind . 0)
+       (content . "{\"name\":\"alice\",\"picture\":null,\"nip05\":null}")))
+    (let ((profile (nostr-db-select-profile "alice")))
+      (should (equal (nth 1 profile) "alice"))
+      (should-not (nth 4 profile))
+      (should-not (nth 5 profile)))))
+
 (ert-deftest nostr-db-feed-includes-own-root-notes ()
   (nostr-test-with-db
     (nostr-db-store-event

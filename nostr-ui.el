@@ -459,7 +459,7 @@ relative dates; thread/detail style uses exact dates."
 
 (defun nostr-ui--shorten-identifier (value &optional prefix)
   "Shorten VALUE with optional PREFIX for compact display."
-  (let* ((text (or value "unknown"))
+  (let* ((text (if (stringp value) value "unknown"))
          (prefix (or prefix "")))
     (if (<= (length text) 16)
         (concat prefix text)
@@ -468,30 +468,41 @@ relative dates; thread/detail style uses exact dates."
               (substring text 0 8)
               (substring text -8)))))
 
+(defun nostr-ui--string-value (&rest values)
+  "Return the first non-empty string from VALUES."
+  (seq-find (lambda (value)
+              (and (stringp value)
+                   (not (string-empty-p value))))
+            values))
+
 (defun nostr-ui--event-nip05 (event)
   "Return EVENT's cached NIP-05 identifier, when present."
-  (or (alist-get 'nip05 event)
-      (alist-get 'author-nip05 event)
-      (alist-get 'profile-nip05 event)
-      (when (and nostr-db--connection (alist-get 'pubkey event))
-        (nth 5 (nostr-db-select-profile (alist-get 'pubkey event))))))
+  (nostr-ui--string-value
+   (alist-get 'nip05 event)
+   (alist-get 'author-nip05 event)
+   (alist-get 'profile-nip05 event)
+   (when (and nostr-db--connection (alist-get 'pubkey event))
+     (nth 5 (nostr-db-select-profile (alist-get 'pubkey event))))))
 
 (defun nostr-ui--event-profile-name (event)
   "Return cached author profile name for EVENT, when available."
-  (or (alist-get 'author event)
-      (alist-get 'display-name event)
-      (alist-get 'display_name event)
-      (alist-get 'name event)
-      (when (and nostr-db--connection (alist-get 'pubkey event))
-        (let ((profile (nostr-db-select-profile (alist-get 'pubkey event))))
-          (or (nth 2 profile) (nth 1 profile))))))
+  (let ((profile (when (and nostr-db--connection (alist-get 'pubkey event))
+                   (nostr-db-select-profile (alist-get 'pubkey event)))))
+    (nostr-ui--string-value
+     (alist-get 'author event)
+     (alist-get 'display-name event)
+     (alist-get 'display_name event)
+     (alist-get 'name event)
+     (nth 2 profile)
+     (nth 1 profile))))
 
 (defun nostr-ui--event-picture (event)
   "Return cached author picture URL for EVENT, when available."
-  (or (alist-get 'picture event)
-      (alist-get 'profile-picture event)
-      (when (and nostr-db--connection (alist-get 'pubkey event))
-        (nth 4 (nostr-db-select-profile (alist-get 'pubkey event))))))
+  (nostr-ui--string-value
+   (alist-get 'picture event)
+   (alist-get 'profile-picture event)
+   (when (and nostr-db--connection (alist-get 'pubkey event))
+     (nth 4 (nostr-db-select-profile (alist-get 'pubkey event))))))
 
 (defun nostr-ui--image-display-props (size)
   "Return display image props constrained to SIZE pixels."
@@ -521,7 +532,8 @@ When URL is non-nil, add media properties for the source URL."
 
 (defun nostr-ui--avatar-string (url size)
   "Return a display string or button label for avatar URL at SIZE."
-  (let ((file (and url (nostr-media-cache-file url))))
+  (let* ((url (and (stringp url) url))
+         (file (and url (nostr-media-cache-file url))))
     (cond
      ((and file
            (file-exists-p file)
@@ -578,7 +590,8 @@ When URL is non-nil, add media properties for the source URL."
 Cached images render inline.  Uncached URLs render as a button that uses the
 shared media cache and replaces itself in-place."
   (when nostr-ui-show-avatars
-    (let ((size (or size nostr-ui-avatar-size)))
+    (let ((size (or size nostr-ui-avatar-size))
+          (url (and (stringp url) url)))
       (if url
           (let ((file (nostr-media-cache-file url)))
             (if (and (file-exists-p file)
@@ -596,7 +609,7 @@ shared media cache and replaces itself in-place."
 
 (defun nostr-ui--cached-npub (pubkey)
   "Return cached or synchronously encodable npub for PUBKEY."
-  (when pubkey
+  (when (stringp pubkey)
     (or (gethash pubkey nostr-ui--npub-cache)
         (when (fboundp 'nostr-nip19-encode-sync)
           (ignore-errors

@@ -185,9 +185,16 @@ so new columns must be added explicitly."
 (defun nostr-db--profile-name-from-json (content key &rest aliases)
   "Return KEY or one of ALIASES from metadata JSON CONTENT."
   (let ((parsed (ignore-errors
-                  (json-parse-string content :object-type 'alist :array-type 'list))))
+                  (json-parse-string content
+                                     :object-type 'alist
+                                     :array-type 'list
+                                     :null-object nil
+                                     :false-object nil))))
     (seq-some (lambda (field)
-                (alist-get field parsed))
+                (let ((value (alist-get field parsed)))
+                  (when (and (stringp value)
+                             (not (string-empty-p value)))
+                    value)))
               (cons key aliases))))
 
 (defun nostr-db-store-profile-event (event)

@@ -246,5 +246,35 @@
                             (buffer-substring-no-properties
                              (point-min) (point-max))))))
 
+(ert-deftest nostr-ui-null-avatar-renders-default-avatar ()
+  "JSON null profile pictures are treated as missing avatars."
+  (with-temp-buffer
+    (let ((inhibit-read-only t)
+          (nostr-ui-show-avatars t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-note
+       '((id . "note-null-avatar")
+         (pubkey . "alice")
+         (author . "Alice")
+         (picture . :null)
+         (created-at . 1736776800)
+         (content . "null avatar")
+         (replies . 0)
+         (reactions . 0)
+         (reposts . 0))))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "\\[Ostrich\\]" text))
+      (should-not (string-match-p "\\[Avatar\\]" text)))))
+
+(ert-deftest nostr-ui-null-profile-fields-fall-back-to-pubkey ()
+  "JSON null profile names and identifiers are ignored in author labels."
+  (should (equal (nostr-ui-format-author
+                  '((pubkey . "alice-pubkey")
+                    (author . :null)
+                    (display-name . :null)
+                    (name . :null)
+                    (nip05 . :null)))
+                 "alice-pubkey")))
+
 (provide 'nostr-ui-card-test)
 ;;; nostr-ui-card-test.el ends here
