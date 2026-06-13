@@ -145,23 +145,34 @@ binary DATA.  ERROR receives a human-readable message.")
 
 (defun nostr-media--rendered-string (url file)
   "Return rendered media string for URL cached at FILE."
-  (let ((start (propertize "\n"
-                           'nostr-media-rendered t
-                           'nostr-media-url url
-                           'rear-nonsticky t))
-        (image (propertize (nostr-media--image-string url file)
-                           'nostr-media-rendered t
-                           'nostr-media-url url
-                           'rear-nonsticky t)))
-    (concat start image)))
+  (let ((text (concat "\n" (nostr-media--image-string url file))))
+    (add-text-properties 0 (length text)
+                         `(nostr-media-rendered t
+                           nostr-media-url ,url
+                           rear-nonsticky t)
+                         text)
+    (add-text-properties 0 1
+                         '(nostr-media-render-start t)
+                         text)
+    (add-text-properties (1- (length text)) (length text)
+                         '(nostr-media-render-end t)
+                         text)
+    text))
+
+(defun nostr-media--rendered-block-end (pos limit)
+  "Return end position for rendered preview block starting at POS before LIMIT."
+  (let ((end (text-property-any pos limit 'nostr-media-render-end t)))
+    (if end
+        (1+ end)
+      (next-single-property-change pos 'nostr-media-rendered nil limit))))
 
 (defun nostr-media-remove-rendered-in-region (start end)
   "Remove rendered media previews between START and END.
 Return the number of removed preview blocks."
   (let ((count 0)
         pos)
-    (while (setq pos (text-property-any start end 'nostr-media-rendered t))
-      (let ((next (next-single-property-change pos 'nostr-media-rendered nil end)))
+    (while (setq pos (text-property-any start end 'nostr-media-render-start t))
+      (let ((next (nostr-media--rendered-block-end pos end)))
         (let ((inhibit-read-only t))
           (delete-region pos next)
           (setq end (- end (- next pos)))
@@ -180,8 +191,8 @@ Return the number of removed preview blocks."
 (defun nostr-media-remove-rendered-url-in-region (url start end)
   "Remove rendered preview for URL between START and END."
   (let (pos)
-    (while (setq pos (text-property-any start end 'nostr-media-rendered t))
-      (let ((next (next-single-property-change pos 'nostr-media-rendered nil end)))
+    (while (setq pos (text-property-any start end 'nostr-media-render-start t))
+      (let ((next (nostr-media--rendered-block-end pos end)))
         (if (equal (get-text-property pos 'nostr-media-url) url)
             (let ((inhibit-read-only t))
               (delete-region pos next)

@@ -181,6 +181,10 @@
           (nostr-ui-toggle-note-media)
           (should-not (text-property-any (point-min) (point-max)
                                          'nostr-media-rendered t))
+          (should (= (how-many "\\[image loaded:" (point-min) (point-max)) 0))
+          (should (= (how-many "\\[image: https://example.test/photo.png\\]"
+                               (point-min) (point-max))
+                     1))
           (should (string-match-p "\\[image: https://example.test/photo.png\\]"
                                   (buffer-substring-no-properties
                                    (point-min) (point-max)))))
