@@ -55,6 +55,14 @@ number of `nostr-el-backend verify-event' subprocesses."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-sync-timeout-seconds 12
+  "Maximum seconds to treat the client as still doing its initial sync.
+While syncing, UI refreshes are throttled (see `nostr--schedule-refresh').
+A relay that never sends EOSE cannot wedge the UI in throttled mode: the
+syncing state is force-cleared after this many seconds."
+  :type 'number
+  :group 'nostr)
+
 (defcustom nostr-relay-connect-interval 0.05
   "Seconds between deferred relay connection attempts."
   :type 'number
@@ -86,6 +94,17 @@ connection attempts are suppressed before the websocket exists.")
 
 (defvar nostr-relay--subscriptions (make-hash-table :test #'equal)
   "Active subscription IDs.")
+
+(defvar nostr-relay--syncing-subs (make-hash-table :test #'equal)
+  "Set of pending initial-sync feed subscriptions awaiting EOSE.
+Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
+\"syncing\" (see `nostr-relay-syncing-p') while this is non-empty.")
+
+(defvar nostr-relay--sync-timeout-timer nil
+  "Safety timer that force-clears the syncing state if EOSE never arrives.")
+
+(defvar nostr-relay-sync-finished-hook nil
+  "Hook run with no arguments when the initial-sync EOSE burst completes.")
 
 (defvar nostr-relay--verify-inflight 0
   "Number of event-signature verifications currently in flight.")
@@ -447,29 +466,74 @@ filters or kind-0 metadata will never match."
              `("since" . ,since))
           ("limit" . ,nostr-default-feed-limit))))
 
+(defun nostr-relay-syncing-p ()
+  "Return non-nil while the initial-sync feed subscriptions await EOSE."
+  (> (hash-table-count nostr-relay--syncing-subs) 0))
+
+(defun nostr-relay--feed-sub-p (sub-id)
+  "Return non-nil when SUB-ID is an initial-sync feed subscription."
+  (and (stringp sub-id)
+       (or (string-prefix-p "personal-" sub-id)
+           (string-prefix-p "follows-" sub-id))))
+
+(defun nostr-relay--clear-syncing ()
+  "Force the syncing state to finished and run the finished hook.
+Runs `nostr-relay-sync-finished-hook' when a sync session was in progress (the
+last EOSE empties the subscription set but leaves the safety timer set, so the
+timer also marks an in-progress session)."
+  (let ((was-syncing (or (> (hash-table-count nostr-relay--syncing-subs) 0)
+                         (timerp nostr-relay--sync-timeout-timer))))
+    (when (timerp nostr-relay--sync-timeout-timer)
+      (cancel-timer nostr-relay--sync-timeout-timer))
+    (setq nostr-relay--sync-timeout-timer nil)
+    (clrhash nostr-relay--syncing-subs)
+    (when was-syncing
+      (run-hooks 'nostr-relay-sync-finished-hook))))
+
+(defun nostr-relay--note-feed-subscription (url sub-id)
+  "Record that feed SUB-ID was sent to URL and is awaiting EOSE."
+  (when (nostr-relay--feed-sub-p sub-id)
+    (puthash (concat url "\0" sub-id) t nostr-relay--syncing-subs)
+    (unless (timerp nostr-relay--sync-timeout-timer)
+      (setq nostr-relay--sync-timeout-timer
+            (run-at-time nostr-relay-sync-timeout-seconds nil
+                         #'nostr-relay--clear-syncing)))))
+
+(defun nostr-relay--note-feed-eose (url sub-id)
+  "Record EOSE for feed SUB-ID from URL, clearing syncing when none remain."
+  (when (nostr-relay--feed-sub-p sub-id)
+    (remhash (concat url "\0" sub-id) nostr-relay--syncing-subs)
+    (unless (nostr-relay-syncing-p)
+      (nostr-relay--clear-syncing))))
+
 (defun nostr-relay-subscribe-personal (url pubkey)
   "Subscribe URL to personal events for PUBKEY."
-  (nostr-relay-subscribe
-   url
-   (nostr-relay--sub-id "personal" pubkey)
-   (append (nostr-relay--personal-filters pubkey)
-           (list (nostr-relay--contacts-filter pubkey)))))
+  (let ((sub-id (nostr-relay--sub-id "personal" pubkey)))
+    (nostr-relay--note-feed-subscription url sub-id)
+    (nostr-relay-subscribe
+     url
+     sub-id
+     (append (nostr-relay--personal-filters pubkey)
+             (list (nostr-relay--contacts-filter pubkey))))))
 
 (defun nostr-relay-subscribe-follows-feed (url pubkey)
   "Subscribe URL to cached follows feed for PUBKEY."
   (let ((follows (nostr-db-select-follows pubkey)))
     (when follows
-      (nostr-relay-subscribe
-       url
-       (nostr-relay--sub-id "follows" pubkey follows)
-       (list (nostr-relay--feed-filter follows))))))
+      (let ((sub-id (nostr-relay--sub-id "follows" pubkey follows)))
+        (nostr-relay--note-feed-subscription url sub-id)
+        (nostr-relay-subscribe
+         url
+         sub-id
+         (list (nostr-relay--feed-filter follows)))))))
 
 (defun nostr-relay--handle-eose (url sub-id)
   "Handle EOSE for SUB-ID on URL."
   (when (and (boundp 'nostr-current-pubkey)
              nostr-current-pubkey
              (string-prefix-p "personal-" sub-id))
-    (nostr-relay-subscribe-follows-feed url nostr-current-pubkey)))
+    (nostr-relay-subscribe-follows-feed url nostr-current-pubkey))
+  (nostr-relay--note-feed-eose url sub-id))
 
 (defun nostr-relay--ws-endpoint (url)
   "Return (HOST . PORT) for websocket URL.
@@ -652,6 +716,12 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
     (clrhash nostr-relay--connecting)
     (dolist (probe probes)
       (when (process-live-p probe) (delete-process probe))))
+  ;; Reset syncing state without running the finished hook (this is a teardown,
+  ;; not a completed sync).
+  (when (timerp nostr-relay--sync-timeout-timer)
+    (cancel-timer nostr-relay--sync-timeout-timer))
+  (setq nostr-relay--sync-timeout-timer nil)
+  (clrhash nostr-relay--syncing-subs)
   (maphash (lambda (_url ws)
              (when (websocket-openp ws)
                (websocket-close ws)))

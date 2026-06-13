@@ -60,6 +60,13 @@
 (defvar nostr--refresh-timer nil
   "Pending debounced refresh timer.")
 
+(defvar nostr--refresh-pending-since nil
+  "`float-time' when the currently pending refresh was first scheduled.")
+
+(defvar-local nostr--refresh-dirty nil
+  "Non-nil when this buffer skipped a refresh because it was not visible.
+The buffer is repainted the next time it becomes visible.")
+
 (defvar nostr--opening-account nil
   "Non-nil while `nostr-open' is deriving the account asynchronously.")
 
@@ -71,33 +78,94 @@
   :type 'number
   :group 'nostr)
 
+(defcustom nostr-refresh-max-wait-seconds 1.5
+  "Maximum seconds a pending UI refresh may be deferred by a steady event stream.
+Once a refresh has been pending this long, the next event lets it fire instead
+of pushing it out again, so a continuous stream cannot starve the refresh."
+  :type 'number
+  :group 'nostr)
+
+(defcustom nostr-sync-refresh-interval 2.0
+  "Seconds between UI refreshes while the client is doing its initial sync.
+During the EOSE burst of `nostr-open', hundreds of events arrive; refreshing on
+each one re-renders the whole buffer repeatedly.  Instead the buffer is
+refreshed at most once per this interval until `nostr-relay-syncing-p' clears,
+at which point a final refresh runs."
+  :type 'number
+  :group 'nostr)
+
 (defun nostr-debug-message (fmt &rest args)
   "Emit debug message FMT with ARGS when logging is enabled."
   (when nostr-debug-logging
     (apply #'message (concat "[nostr] " fmt) args)))
 
+(defun nostr--syncing-p ()
+  "Return non-nil while relays are still delivering the initial sync burst."
+  (and (fboundp 'nostr-relay-syncing-p) (nostr-relay-syncing-p)))
+
 (defun nostr--schedule-refresh (&rest _ignored)
-  "Debounce refresh of visible Nostr buffers."
-  (when (timerp nostr--refresh-timer)
-    (cancel-timer nostr--refresh-timer))
-  (setq nostr--refresh-timer
-        (run-at-time nostr-refresh-debounce-seconds nil #'nostr-refresh-visible-buffers)))
+  "Schedule a refresh of visible Nostr buffers, throttled during initial sync.
+While syncing, refresh at most once per `nostr-sync-refresh-interval'.  In
+steady state, debounce by `nostr-refresh-debounce-seconds' but never defer a
+pending refresh longer than `nostr-refresh-max-wait-seconds'."
+  (if (nostr--syncing-p)
+      ;; Initial-sync burst: leave any pending timer alone so it fires once per
+      ;; interval; only arm a new one when none is pending.
+      (unless (timerp nostr--refresh-timer)
+        (setq nostr--refresh-pending-since (float-time))
+        (setq nostr--refresh-timer
+              (run-at-time nostr-sync-refresh-interval nil
+                           #'nostr-refresh-visible-buffers)))
+    ;; Steady state: debounce, but coalesce so a steady stream still refreshes.
+    (let ((now (float-time)))
+      (unless (timerp nostr--refresh-timer)
+        (setq nostr--refresh-pending-since now))
+      (unless (and nostr--refresh-pending-since
+                   (>= (- now nostr--refresh-pending-since)
+                       nostr-refresh-max-wait-seconds))
+        (when (timerp nostr--refresh-timer)
+          (cancel-timer nostr--refresh-timer))
+        (setq nostr--refresh-timer
+              (run-at-time nostr-refresh-debounce-seconds nil
+                           #'nostr-refresh-visible-buffers))))))
+
+(defun nostr--buffer-refresh-function ()
+  "Return the refresh command for the current buffer's Nostr mode, or nil."
+  (pcase major-mode
+    ('nostr-timeline-mode #'nostr-timeline-refresh)
+    ('nostr-thread-mode (and (fboundp 'nostr-thread-refresh) #'nostr-thread-refresh))
+    ('nostr-profile-mode #'nostr-profile-refresh)
+    ('nostr-search-mode #'nostr-search-refresh)
+    ('nostr-notifications-mode #'nostr-notifications-refresh)
+    ('nostr-relays-mode #'nostr-relays-refresh)))
 
 (defun nostr-refresh-visible-buffers ()
-  "Refresh live Nostr buffers."
-  (setq nostr--refresh-timer nil)
+  "Refresh Nostr buffers shown in a visible window.
+Buffers with no visible window are marked dirty and repainted the next time
+they become visible (see `nostr--refresh-on-window-change'), so off-screen
+buffers do no rendering work during a sync burst."
+  (setq nostr--refresh-timer nil
+        nostr--refresh-pending-since nil)
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (pcase major-mode
-          ('nostr-timeline-mode (nostr-timeline-refresh))
-          ('nostr-thread-mode
-           (when (fboundp 'nostr-thread-refresh)
-             (nostr-thread-refresh)))
-          ('nostr-profile-mode (nostr-profile-refresh))
-          ('nostr-search-mode (nostr-search-refresh))
-          ('nostr-notifications-mode (nostr-notifications-refresh))
-          ('nostr-relays-mode (nostr-relays-refresh)))))))
+        (when-let* ((refresh (nostr--buffer-refresh-function)))
+          (if (get-buffer-window buffer 'visible)
+              (progn
+                (setq nostr--refresh-dirty nil)
+                (funcall refresh))
+            (setq nostr--refresh-dirty t)))))))
+
+(defun nostr--refresh-on-window-change (&rest _ignored)
+  "Repaint any visible Nostr buffer that skipped a refresh while hidden."
+  (dolist (window (window-list nil 'no-minibuf))
+    (let ((buffer (window-buffer window)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when-let* (((bound-and-true-p nostr--refresh-dirty))
+                      (refresh (nostr--buffer-refresh-function)))
+            (setq nostr--refresh-dirty nil)
+            (funcall refresh)))))))
 
 (defun nostr--render-opening-buffer (buffer detail)
   "Render BUFFER as the main Nostr opening screen with DETAIL."
@@ -152,6 +220,10 @@
     (nostr-db-open nostr-db-path))
   (cl-incf nostr--open-generation)
   (add-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  ;; Repaint on EOSE (a final render once the sync burst settles) and when a
+  ;; previously-hidden Nostr buffer becomes visible again.
+  (add-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
+  (add-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
   (let ((buffer (get-buffer-create nostr-buffer-name)))
     (if nostr-current-pubkey
         (with-current-buffer buffer
@@ -171,8 +243,11 @@
   (when (timerp nostr--refresh-timer)
     (cancel-timer nostr--refresh-timer)
     (setq nostr--refresh-timer nil))
-  (setq nostr--opening-account nil)
+  (setq nostr--opening-account nil
+        nostr--refresh-pending-since nil)
   (remove-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  (remove-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
+  (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
   (cl-incf nostr--open-generation)
   (nostr-relay-disconnect-all)
   (nostr-db-close))
