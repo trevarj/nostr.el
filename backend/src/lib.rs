@@ -210,6 +210,19 @@ fn nip19_decode(input: &str) -> Result<Value, ProtocolError> {
     let request: Nip19DecodeRequest = parse_request(input)?;
     let value = request.value.as_str();
 
+    if let Ok(Nip19::Event(event)) = Nip19::from_bech32(value) {
+        return Ok(json!({
+            "entity": "nevent",
+            "event_id": event.event_id.to_hex(),
+            "pubkey": event.author.map(|author| author.to_hex()),
+            "kind": event.kind.map(|kind| kind.as_u16()),
+            "relays": event.relays
+                .iter()
+                .map(|relay| relay.to_string())
+                .collect::<Vec<String>>()
+        }));
+    }
+
     if let Ok(public_key) = PublicKey::from_bech32(value) {
         return Ok(json!({
             "entity": "npub",
@@ -451,6 +464,27 @@ mod tests {
             decoded["pubkey"],
             "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
         );
+    }
+
+    #[test]
+    fn nip19_decodes_nevent_entities() {
+        let decoded = response(
+            "nip19-decode",
+            json!({
+                "value": "nevent1qvzqqqqqqypzp978pfzrv6n9xhq5tvenl9e74pklmskh4xw6vxxyp3j8qkke3cezqqsz30njcd6vfl7stvtprak57rqdd36795dr0j25jxvc838qhmqgexgttt6m4"
+            }),
+        );
+        assert_eq!(decoded["ok"], true);
+        assert_eq!(decoded["entity"], "nevent");
+        assert_eq!(
+            decoded["event_id"],
+            "28be72c374c4ffd05b1611f6d4f0c0d6c75e2d1a37c954919983c4e0bec08c99"
+        );
+        assert_eq!(
+            decoded["pubkey"],
+            "97c70a44366a6535c145b333f973ea86dfdc2d7a99da618c40c64705ad98e322"
+        );
+        assert_eq!(decoded["kind"], 1);
     }
 
     #[test]

@@ -146,6 +146,14 @@
   (nostr-relay-fetch-event-metadata
    (mapcar (lambda (event) (alist-get 'id event)) events)))
 
+(defun nostr-timeline--backfill-missing-reposts ()
+  "Request reposted notes that are referenced by followed accounts."
+  (when (memq nostr-timeline-feed-kind '(feed home media))
+    (nostr-relay-fetch-events-by-id
+     (nostr-db-select-missing-repost-targets
+      nostr-timeline-current-pubkey
+      nostr-timeline-limit))))
+
 (defun nostr-timeline-refresh ()
   "Refresh the current timeline buffer."
   (interactive)
@@ -162,6 +170,7 @@
                                    ('replies 'conversations)
                                    (kind kind)))
     (let ((events (nostr-timeline--select-events)))
+      (nostr-timeline--backfill-missing-reposts)
       (nostr-timeline--backfill-visible-metadata events)
       (if events
           (dolist (event events)

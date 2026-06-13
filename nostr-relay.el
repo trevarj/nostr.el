@@ -409,7 +409,7 @@ at the cap are queued (never dropped) and dispatched as verifications finish."
 
 (defun nostr-relay--since-for-pubkeys (pubkeys)
   "Return a since timestamp for PUBKEYS with overlap."
-  (when-let* ((latest (nostr-db-latest-event-time pubkeys)))
+  (when-let* ((latest (nostr-db-oldest-latest-event-time pubkeys)))
     (max 0 (- latest nostr-relay-since-overlap-seconds))))
 
 (defun nostr-relay--personal-filters (pubkey)

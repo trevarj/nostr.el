@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; User-facing dispatcher for npub/note/hex identifiers.
+;; User-facing dispatcher for npub/note/nevent/hex identifiers.
 
 ;;; Code:
 
@@ -36,7 +36,7 @@
   (let ((entity (alist-get 'entity decoded nil nil #'equal)))
     (pcase entity
       ("npub" (nostr-profile-open (alist-get 'pubkey decoded)))
-      ("note"
+      ((or "note" "nevent")
        (if-let* ((event (nostr-dispatch--event-by-id (alist-get 'event_id decoded))))
            (nostr-thread-open event)
          (nostr-search-open (alist-get 'event_id decoded))))
@@ -45,7 +45,7 @@
 ;;;###autoload
 (defun nostr-open-identifier (value)
   "Open Nostr identifier VALUE.
-VALUE may be a hex pubkey/event id, npub, or note."
+VALUE may be a hex pubkey/event id, npub, note, or nevent."
   (interactive "sNostr identifier: ")
   (let ((value (string-trim value)))
     (cond
@@ -54,7 +54,8 @@ VALUE may be a hex pubkey/event id, npub, or note."
      ((string-match-p nostr-dispatch-hex-pubkey-regexp value)
       (nostr-dispatch-open-hex value))
      ((or (string-prefix-p "npub1" value)
-          (string-prefix-p "note1" value))
+          (string-prefix-p "note1" value)
+          (string-prefix-p "nevent1" value))
       (nostr-dispatch-open-decoded (nostr-nip19-decode-sync value)))
      (t
       (nostr-search-open value)))))

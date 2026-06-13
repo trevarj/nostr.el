@@ -284,6 +284,35 @@
       (should (= (alist-get 'reposted-at (car feed)) 120))
       (should (equal (alist-get 'reposted-by-name (car feed)) "Alice")))))
 
+(ert-deftest nostr-db-selects-missing-repost-targets ()
+  "Missing followed-account repost targets are available for relay backfill."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "contacts")
+       (pubkey . "me")
+       (created_at . 90)
+       (kind . 3)
+       (tags . (("p" "alice")))))
+    (nostr-test-store-text-note "cached-target" "carol" 100 "cached")
+    (nostr-db-store-event
+     '((id . "cached-repost")
+       (pubkey . "alice")
+       (created_at . 120)
+       (kind . 6)
+       (tags . (("e" "cached-target")))
+       (content . "")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "missing-repost")
+       (pubkey . "alice")
+       (created_at . 121)
+       (kind . 6)
+       (tags . (("e" "missing-target")))
+       (content . "")
+       (sig . "sig")))
+    (should (equal (nostr-db-select-missing-repost-targets "me" 10)
+                   '("missing-target")))))
+
 (ert-deftest nostr-db-init-migrates-existing-cache-schema ()
   "Opening an older cache adds columns used by current queries."
   (let ((nostr-db--connection (emacsql-sqlite-open nil)))
@@ -540,6 +569,39 @@
       (should-not (string-match-p "\\[M Media\\]" media))
       (should (string-match-p "media https://example.test/pic.jpg" media))
       (should-not (string-match-p "home root" media)))))
+
+(ert-deftest nostr-timeline-feed-refresh-backfills-missing-repost-targets ()
+  "Feed refresh requests original notes referenced only by cached reposts."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "contacts")
+       (pubkey . "me")
+       (created_at . 90)
+       (kind . 3)
+       (tags . (("p" "alice")))))
+    (nostr-db-store-event
+     '((id . "missing-repost")
+       (pubkey . "alice")
+       (created_at . 121)
+       (kind . 6)
+       (tags . (("e" "missing-target")))
+       (content . "")
+       (sig . "sig")))
+    (let (requested)
+      (cl-letf (((symbol-function 'nostr-relay-fetch-events-by-id)
+                 (lambda (event-ids &optional _limit)
+                   (setq requested event-ids)
+                   1))
+                ((symbol-function 'nostr-relay-fetch-event-metadata)
+                 (lambda (&rest _args) 0))
+                ((symbol-function 'nostr-relay-fetch-profile)
+                 (lambda (&rest _args) 0)))
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey "me")
+          (setq-local nostr-timeline-feed-kind 'feed)
+          (nostr-timeline-refresh))
+        (should (equal requested '("missing-target")))))))
 
 (ert-deftest nostr-timeline-tabs-are-interactive ()
   "Timeline feed tabs expose button actions."
@@ -1129,6 +1191,15 @@
         (should (member nostr-kind-zap-receipt
                         (alist-get "kinds" filter nil nil #'equal)))))))
 
+(ert-deftest nostr-relay-feed-since-uses-oldest-author-cache-point ()
+  "One active followed account must not hide older notes by another."
+  (nostr-test-with-db
+    (let ((nostr-relay-since-overlap-seconds 5))
+      (nostr-test-store-text-note "alice-old" "alice" 100 "old")
+      (nostr-test-store-text-note "bob-new" "bob" 1000 "new")
+      (let ((filter (nostr-relay--feed-filter '("alice" "bob"))))
+        (should (equal (alist-get "since" filter nil nil #'equal) 95))))))
+
 (ert-deftest nostr-relay-fetch-event-metadata-filters-and-dedupes ()
   "Visible note metadata fetches batch #e filters and suppress repeats."
   (let ((nostr-relay--connections (make-hash-table :test #'equal))
@@ -1177,6 +1248,27 @@
                          '("missing-root" "missing-parent"))))
         (should (= (nostr-relay-fetch-events-by-id '("missing-root")) 0))))))
 
+(ert-deftest nostr-relay-repost-ingestion-fetches-missing-target ()
+  "Kind 6 reposts request their original event when it is not cached."
+  (nostr-test-with-db
+    (let (requested)
+      (cl-letf (((symbol-function 'nostr-relay-fetch-events-by-id)
+                 (lambda (event-ids &optional _limit)
+                   (setq requested event-ids)
+                   1))
+                ((symbol-function 'nostr-relay-fetch-profile)
+                 (lambda (&rest _args) 0)))
+        (nostr-relay--store-verified-event
+         "wss://relay.example"
+         '((id . "repost-event")
+           (pubkey . "alice")
+           (created_at . 120)
+           (kind . 6)
+           (tags . (("e" "missing-original")))
+           (content . "")
+           (sig . "sig"))))
+        (should (equal requested '("missing-original"))))))
+
 (ert-deftest nostr-dispatch-opens-npub-note-and-search ()
   (let (opened)
     (cl-letf (((symbol-function 'nostr-profile-open)
@@ -1190,6 +1282,7 @@
                  (pcase value
                    ("npub1test" '((ok . t) (entity . "npub") (pubkey . "pubkey1")))
                    ("note1test" '((ok . t) (entity . "note") (event_id . "event1")))
+                   ("nevent1test" '((ok . t) (entity . "nevent") (event_id . "event2")))
                    (_ (error "unexpected value")))))
               ((symbol-function 'nostr-dispatch--event-by-id)
                (lambda (event-id)
@@ -1197,10 +1290,12 @@
                    `((id . ,event-id))))))
       (nostr-open-identifier "npub1test")
       (nostr-open-identifier "note1test")
+      (nostr-open-identifier "nevent1test")
       (nostr-open-identifier "anything else"))
     (should (equal (nreverse opened)
                    '((profile "pubkey1")
                      (thread "event1")
+                     (search "event2")
                      (search "anything else"))))))
 
 (ert-deftest nostr-timeline-open-author-opens-selected-pubkey ()

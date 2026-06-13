@@ -409,6 +409,20 @@ so new columns must be added explicitly."
     (caar (emacsql nostr-db--connection
                    [:select [(funcall max created_at)] :from events]))))
 
+(defun nostr-db-oldest-latest-event-time (pubkeys)
+  "Return the oldest per-author latest event timestamp for PUBKEYS."
+  (when pubkeys
+    (let ((latest-times
+           (mapcar #'cadr
+                   (emacsql nostr-db--connection
+                            [:select [pubkey (funcall max created_at)]
+                             :from events
+                             :where (in pubkey $v1)
+                             :group-by [pubkey]]
+                            (vconcat pubkeys)))))
+      (when latest-times
+        (seq-min latest-times)))))
+
 (defun nostr-db-event-counts (event-id)
   "Return cached interaction counts for EVENT-ID.
 Counts are intentionally loaded separately from feed queries so feeds do not
@@ -536,6 +550,20 @@ eagerly scan reaction/repost/reply tables for rows that may never be rendered."
                                  ,(if root-only '(is events:root_id nil) 'true))
                      :order-by [(desc reposts:created_at)]
                      :limit $s2]
+                   pubkey (or limit 100))))
+
+(defun nostr-db-select-missing-repost-targets (pubkey &optional limit)
+  "Return missing event ids reposted by contacts of PUBKEY."
+  (mapcar #'car
+          (emacsql nostr-db--connection
+                   [:select [reposts:event_id]
+                    :from reposts
+                    :inner-join follows :on (and (= reposts:pubkey follows:contact)
+                                                 (= follows:pubkey $s1))
+                    :left-join events :on (= reposts:event_id events:id)
+                    :where (is events:id nil)
+                    :order-by [(desc reposts:created_at)]
+                    :limit $s2]
                    pubkey (or limit 100))))
 
 (defun nostr-db-select-feed (pubkey &optional limit root-only include-self)
