@@ -111,6 +111,9 @@ Reset each render and primed once per feed so the per-note author lookups
 (defvar-local nostr-ui--open-media-notes nil
   "Hash table of note ids whose media previews are open in this buffer.")
 
+(defvar-local nostr-ui--folded-sections nil
+  "Hash table of section keys folded in this buffer.")
+
 (defvar nostr-ui--npub-cache (make-hash-table :test #'equal)
   "Cache of hex pubkeys to encoded npub strings.")
 
@@ -204,6 +207,36 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   (let ((inhibit-read-only t))
     (erase-buffer)))
 
+(defun nostr-ui--section-key (section)
+  "Return stable fold-state key for SECTION."
+  (list (nostr-ui-section-type section)
+        (nostr-ui-section-id section)))
+
+(defun nostr-ui--folded-sections ()
+  "Return the buffer-local folded section state table."
+  (unless (hash-table-p nostr-ui--folded-sections)
+    (setq nostr-ui--folded-sections (make-hash-table :test #'equal)))
+  nostr-ui--folded-sections)
+
+(defun nostr-ui--set-section-glyph (section folded)
+  "Set SECTION heading glyph according to FOLDED."
+  (save-excursion
+    (goto-char (nostr-ui-section-start section))
+    (when (re-search-forward "[▾▸]" (line-end-position) t)
+      (let ((inhibit-read-only t))
+        (delete-char -1)
+        (insert (if folded "▸" "▾"))))))
+
+(defun nostr-ui--apply-section-fold-state (section)
+  "Apply remembered fold state to SECTION."
+  (let ((folded (gethash (nostr-ui--section-key section)
+                         (nostr-ui--folded-sections))))
+    (when folded
+      (setf (nostr-ui-section-folded section) t)
+      (when-let* ((overlay (nostr-ui-section-overlay section)))
+        (overlay-put overlay 'invisible t))
+      (nostr-ui--set-section-glyph section t))))
+
 (defmacro nostr-ui-with-section (type id data title &rest body)
   "Insert a custom section of TYPE, ID, DATA and TITLE around BODY.
 TITLE may be a string or a function called with the new section."
@@ -227,6 +260,7 @@ TITLE may be a string or a function called with the new section."
                              (nostr-ui-section-end section))))
        (overlay-put ov 'nostr-ui-section t)
        (setf (nostr-ui-section-overlay section) ov))
+     (nostr-ui--apply-section-fold-state section)
      (push section nostr-ui--sections)
      section))
 
@@ -277,16 +311,13 @@ TITLE may be a string or a function called with the new section."
               (overlay (nostr-ui-section-overlay section)))
     (setf (nostr-ui-section-folded section)
           (not (nostr-ui-section-folded section)))
+    (if (nostr-ui-section-folded section)
+        (puthash (nostr-ui--section-key section) t
+                 (nostr-ui--folded-sections))
+      (remhash (nostr-ui--section-key section)
+               (nostr-ui--folded-sections)))
     (overlay-put overlay 'invisible (nostr-ui-section-folded section))
-    (save-excursion
-      (goto-char (nostr-ui-section-start section))
-      ;; The fold glyph is not necessarily the first character at
-      ;; section-start: note headings capture `start' before inserting
-      ;; indentation, so search the heading line for the actual glyph.
-      (when (re-search-forward "[▾▸]" (line-end-position) t)
-        (let ((inhibit-read-only t))
-          (delete-char -1)
-          (insert (if (nostr-ui-section-folded section) "▸" "▾")))))
+    (nostr-ui--set-section-glyph section (nostr-ui-section-folded section))
     (nostr-ui-update-selection)))
 
 (defun nostr-ui-next-section ()
