@@ -260,6 +260,37 @@
       (search-forward "searchable nostr note")
       (should (equal (alist-get 'id (nostr-ui-selected-data)) "note-2")))))
 
+(ert-deftest nostr-search-renders-profile-results ()
+  "Search buffers show profile-only matches and open them from RET."
+  (nostr-ui-buffers-test-with-db
+    (nostr-ui-buffers-test-store-event
+     '((id . "profile-event")
+       (pubkey . "alice-pubkey")
+       (created_at . 100)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"name\":\"alice\",\"display_name\":\"Alice Example\",\"about\":\"Builds clients\",\"nip05\":\"alice@example.test\"}")
+       (sig . "sig")))
+    (let (opened)
+      (cl-letf (((symbol-function 'nostr-profile-open)
+                 (lambda (pubkey) (setq opened pubkey))))
+        (with-temp-buffer
+          (nostr-search-mode)
+          (setq-local nostr-search-query "Alice")
+          (nostr-search-refresh)
+          (let ((text (buffer-string)))
+            (should (string-match-p "1 cached result" text))
+            (should (string-match-p "1 profile" text))
+            (should (string-match-p "0 notes" text))
+            (should (string-match-p "Profile: Alice Example" text))
+            (should (string-match-p "alice@example.test" text)))
+          (goto-char (point-min))
+          (search-forward "Profile: Alice Example")
+          (should (equal (alist-get 'pubkey (nostr-ui-selected-data))
+                         "alice-pubkey"))
+          (nostr-search-open-at-point)
+          (should (equal opened "alice-pubkey")))))))
+
 (ert-deftest nostr-ui-note-renders-publish-receipts ()
   "Note rendering shows cached per-relay publish receipt status."
   (nostr-ui-buffers-test-with-db

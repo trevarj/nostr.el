@@ -15,6 +15,7 @@
 (require 'subr-x)
 (require 'nostr-db)
 (require 'nostr-nip)
+(require 'nostr-profile)
 (require 'nostr-relay)
 (require 'nostr-share)
 (require 'nostr-thread)
@@ -61,7 +62,7 @@
     ("g" "Refresh local results" nostr-search-refresh)
     ("s" "Search relays" nostr-search-relay)]
    ["Result"
-    ("RET" "Open thread" nostr-search-open-at-point)
+    ("RET" "Open result" nostr-search-open-at-point)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
     ("n" "Next result" nostr-ui-next-section)
     ("p" "Previous result" nostr-ui-prev-section)
@@ -121,31 +122,105 @@
                      query
                      pubkey
                      (nostr-search--like-pattern profile-query)
+                      (or limit nostr-search-limit)))))
+
+(defun nostr-search--profile-row-to-alist (row)
+  "Convert profile ROW into an alist."
+  (pcase row
+    (`(,pubkey ,name ,display-name ,about ,picture ,nip05 ,lud16 ,updated-at)
+     `((pubkey . ,pubkey)
+       (name . ,(and (stringp name) name))
+       (display-name . ,(and (stringp display-name) display-name))
+       (about . ,(and (stringp about) about))
+       (picture . ,(and (stringp picture) picture))
+       (nip05 . ,(and (stringp nip05) nip05))
+       (lud16 . ,(and (stringp lud16) lud16))
+       (updated-at . ,updated-at)))))
+
+(defun nostr-search--profile-display-name (profile)
+  "Return display name for PROFILE."
+  (or (alist-get 'display-name profile)
+      (alist-get 'name profile)
+      (alist-get 'nip05 profile)
+      (alist-get 'pubkey profile)))
+
+(defun nostr-search--select-profiles (query &optional limit)
+  "Return cached profile results matching QUERY."
+  (let* ((pubkey (nostr-search--query-pubkey query))
+         (profile-query (nostr-search--profile-query query))
+         (pattern (nostr-search--like-pattern profile-query)))
+    (mapcar #'nostr-search--profile-row-to-alist
+            (emacsql nostr-db--connection
+                     [:select [pubkey name display_name about picture nip05 lud16 updated_at]
+                              :from profiles
+                              :where (or (= pubkey $s1)
+                                         (= pubkey $s2)
+                                         (like name $s3)
+                                         (like display_name $s3)
+                                         (like nip05 $s3))
+                              :order-by [(desc updated_at)
+                                         (asc display_name)
+                                         (asc name)
+                                         (asc nip05)]
+                              :limit $s4]
+                     query
+                     pubkey
+                     pattern
                      (or limit nostr-search-limit)))))
+
+(defun nostr-search--insert-profile (profile)
+  "Insert PROFILE as a compact search result row."
+  (let ((pubkey (alist-get 'pubkey profile))
+        (name (nostr-search--profile-display-name profile)))
+    (nostr-ui-with-section 'profile pubkey profile
+        (format "Profile: %s" name)
+      (nostr-ui-insert-avatar (alist-get 'picture profile) nostr-ui-avatar-size)
+      (insert "\n")
+      (when-let* ((nip05 (alist-get 'nip05 profile)))
+        (insert (propertize "  NIP-05 " 'face 'nostr-ui-meta))
+        (insert (nostr-ui-format-nip05 nip05 pubkey))
+        (insert "\n"))
+      (when-let* ((about (alist-get 'about profile)))
+        (insert (propertize "  About  " 'face 'nostr-ui-meta))
+        (insert (truncate-string-to-width
+                 (replace-regexp-in-string "[\n\r]+" " " about)
+                 120 nil nil t))
+        (insert "\n"))
+      (insert (propertize "  Pubkey " 'face 'nostr-ui-meta))
+      (insert (format "%s\n\n" pubkey)))))
 
 (defun nostr-search-refresh ()
   "Refresh the current search buffer."
   (interactive)
   (unless nostr-search-query
     (user-error "No search query is associated with this buffer"))
-  (let ((inhibit-read-only t)
-        (position-state (nostr-ui-capture-position))
-        (results (nostr-search--select-local nostr-search-query)))
+  (let* ((inhibit-read-only t)
+         (position-state (nostr-ui-capture-position))
+         (profiles (nostr-search--select-profiles nostr-search-query))
+         (results (nostr-search--select-local nostr-search-query))
+         (total (+ (length profiles) (length results))))
     (nostr-relay-fetch-event-metadata
      (mapcar (lambda (event) (alist-get 'id event)) results))
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      "Search"
      nostr-search-query
-     (format "%d local cached result%s"
+     (format "%d cached result%s (%d profile%s, %d note%s)"
+             total
+             (if (= total 1) "" "s")
+             (length profiles)
+             (if (= (length profiles) 1) "" "s")
              (length results)
              (if (= (length results) 1) "" "s")))
-    (if results
-        (dolist (event results)
-          (nostr-ui-insert-note event))
+    (if (> total 0)
+        (progn
+          (dolist (profile profiles)
+            (nostr-search--insert-profile profile))
+          (dolist (event results)
+            (nostr-ui-insert-note event)))
       (nostr-ui-insert-empty-state
        "No cached search results."
-       "Use s to query connected NIP-50 relays."))
+       "Use s to query connected relays."))
     (nostr-ui-insert-footer
      '("g refresh" "s relay search" "RET open" "w copy" "b browse" "? actions"))
     (nostr-ui-finish-refresh position-state)))
@@ -153,8 +228,11 @@
 (defun nostr-search-open-at-point ()
   "Open the selected search result."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-thread-open event)))
+  (when-let* ((section (nostr-ui-section-at-point))
+              (data (nostr-ui-section-data section)))
+    (pcase (nostr-ui-section-type section)
+      ('profile (nostr-profile-open (alist-get 'pubkey data)))
+      ('note (nostr-thread-open data)))))
 
 (defun nostr-search-refresh-visible-buffers ()
   "Refresh visible search buffers after relay-backed results arrive."
