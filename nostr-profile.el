@@ -248,19 +248,31 @@
       ('note (nostr-thread-open (nostr-ui-section-data section)))
       ('profile (message "Profile %s" (alist-get 'pubkey (nostr-ui-section-data section)))))))
 
+(defun nostr-profile--refresh-buffer-after-action (buffer)
+  "Return callback that refreshes profile BUFFER after an action succeeds."
+  (lambda (_event)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (derived-mode-p 'nostr-profile-mode)
+          (nostr-profile-refresh))))))
+
 (defun nostr-profile-follow ()
   "Follow the profile shown by this buffer."
   (interactive)
   (unless nostr-profile-pubkey
     (user-error "No profile pubkey is associated with this buffer"))
-  (nostr-actions-follow nostr-profile-pubkey))
+  (nostr-actions-follow
+   nostr-profile-pubkey
+   (nostr-profile--refresh-buffer-after-action (current-buffer))))
 
 (defun nostr-profile-unfollow ()
   "Unfollow the profile shown by this buffer."
   (interactive)
   (unless nostr-profile-pubkey
     (user-error "No profile pubkey is associated with this buffer"))
-  (nostr-actions-unfollow nostr-profile-pubkey))
+  (nostr-actions-unfollow
+   nostr-profile-pubkey
+   (nostr-profile--refresh-buffer-after-action (current-buffer))))
 
 (defun nostr-profile-mute ()
   "Mute the profile shown by this buffer."

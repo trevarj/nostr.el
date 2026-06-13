@@ -204,6 +204,31 @@
                      '((mute "alice-pubkey")
                        (unmute "alice-pubkey")))))))
 
+(ert-deftest nostr-profile-follow-and-unfollow-use-profile-pubkey ()
+  "Profile follow commands publish updates for the displayed account."
+  (nostr-ui-buffers-test-with-db
+    (let ((refreshed 0)
+          actions)
+      (cl-letf (((symbol-function 'nostr-actions-follow)
+                 (lambda (pubkey &optional after-send)
+                   (push (list 'follow pubkey) actions)
+                   (when after-send (funcall after-send '((kind . 3))))))
+                ((symbol-function 'nostr-actions-unfollow)
+                 (lambda (pubkey &optional after-send)
+                   (push (list 'unfollow pubkey) actions)
+                   (when after-send (funcall after-send '((kind . 3))))))
+                ((symbol-function 'nostr-profile-refresh)
+                 (lambda () (cl-incf refreshed))))
+        (with-temp-buffer
+          (nostr-profile-mode)
+          (setq-local nostr-profile-pubkey "alice-pubkey")
+          (nostr-profile-follow)
+          (nostr-profile-unfollow)))
+      (should (equal (nreverse actions)
+                     '((follow "alice-pubkey")
+                       (unfollow "alice-pubkey"))))
+      (should (= refreshed 2)))))
+
 (ert-deftest nostr-profile-verify-nip05-uses-cached-profile ()
   "Profile verification command uses cached NIP-05 metadata."
   (nostr-ui-buffers-test-with-db

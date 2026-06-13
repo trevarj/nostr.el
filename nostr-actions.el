@@ -192,7 +192,7 @@ non-nil."
       (push `("p" ,pubkey-to-add) tags))
     (nreverse tags)))
 
-(defun nostr-actions-follow (pubkey)
+(defun nostr-actions-follow (pubkey &optional after-send)
   "Follow PUBKEY by publishing an updated kind 3 contact list."
   (interactive "sFollow pubkey: ")
   (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
@@ -201,9 +201,10 @@ non-nil."
    nostr-kind-contacts
    (nostr-actions-current-follow-tags pubkey nil)
    ""
-   "Nostr follow list published"))
+   "Nostr follow list published"
+   after-send))
 
-(defun nostr-actions-unfollow (pubkey)
+(defun nostr-actions-unfollow (pubkey &optional after-send)
   "Unfollow PUBKEY by publishing an updated kind 3 contact list."
   (interactive "sUnfollow pubkey: ")
   (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
@@ -212,7 +213,8 @@ non-nil."
    nostr-kind-contacts
    (nostr-actions-current-follow-tags nil pubkey)
    ""
-   "Nostr follow list published"))
+   "Nostr follow list published"
+   after-send))
 
 (defun nostr-actions-mute (pubkey)
   "Mute PUBKEY by publishing an updated NIP-51 kind 10000 mute list."
