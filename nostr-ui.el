@@ -20,6 +20,9 @@
 (require 'nostr-media)
 (require 'nostr-nip)
 
+;; Defined in nostr-setup.el / set by the account derivation flow.
+(defvar nostr-current-pubkey)
+
 (defface nostr-ui-author
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for note authors."
@@ -97,6 +100,11 @@
 (defvar-local nostr-ui--event-counts-cache nil
   "Buffer-local memoization of `nostr-db-event-counts' keyed by event id.")
 
+(defvar-local nostr-ui--profile-cache nil
+  "Buffer-local memoization of `nostr-db-select-profile' keyed by pubkey.
+Reset each render and primed once per feed so the per-note author lookups
+(name, nip05, picture) share a single batched query instead of one per note.")
+
 (defvar-local nostr-ui--selection-overlay nil
   "Overlay highlighting the current section heading.")
 
@@ -149,7 +157,8 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   "Clear current buffer UI state."
   (setq nostr-ui--sections nil
         nostr-ui--current-parent nil
-        nostr-ui--event-counts-cache nil)
+        nostr-ui--event-counts-cache nil
+        nostr-ui--profile-cache nil)
   (remove-overlays (point-min) (point-max) 'nostr-ui-section t)
   (when (overlayp nostr-ui--selection-overlay)
     (delete-overlay nostr-ui--selection-overlay))
@@ -485,19 +494,30 @@ relative dates; thread/detail style uses exact dates."
                    (not (string-empty-p value))))
             values))
 
+(defun nostr-ui--cached-profile (pubkey)
+  "Return the stored profile row for PUBKEY, memoized per buffer for this render.
+Populated in one batch by `nostr-ui-prime-caches'; falls back to a single query
+on a miss so callers work without priming."
+  (when (and nostr-db--connection (stringp pubkey))
+    (unless nostr-ui--profile-cache
+      (setq nostr-ui--profile-cache (make-hash-table :test #'equal)))
+    (let ((cached (gethash pubkey nostr-ui--profile-cache 'missing)))
+      (if (not (eq cached 'missing))
+          cached
+        (puthash pubkey (nostr-db-select-profile pubkey)
+                 nostr-ui--profile-cache)))))
+
 (defun nostr-ui--event-nip05 (event)
   "Return EVENT's cached NIP-05 identifier, when present."
   (nostr-ui--string-value
    (alist-get 'nip05 event)
    (alist-get 'author-nip05 event)
    (alist-get 'profile-nip05 event)
-   (when (and nostr-db--connection (alist-get 'pubkey event))
-     (nth 5 (nostr-db-select-profile (alist-get 'pubkey event))))))
+   (nth 5 (nostr-ui--cached-profile (alist-get 'pubkey event)))))
 
 (defun nostr-ui--event-profile-name (event)
   "Return cached author profile name for EVENT, when available."
-  (let ((profile (when (and nostr-db--connection (alist-get 'pubkey event))
-                   (nostr-db-select-profile (alist-get 'pubkey event)))))
+  (let ((profile (nostr-ui--cached-profile (alist-get 'pubkey event))))
     (nostr-ui--string-value
      (alist-get 'author event)
      (alist-get 'display-name event)
@@ -511,8 +531,7 @@ relative dates; thread/detail style uses exact dates."
   (nostr-ui--string-value
    (alist-get 'picture event)
    (alist-get 'profile-picture event)
-   (when (and nostr-db--connection (alist-get 'pubkey event))
-     (nth 4 (nostr-db-select-profile (alist-get 'pubkey event))))))
+   (nth 4 (nostr-ui--cached-profile (alist-get 'pubkey event)))))
 
 (defun nostr-ui--image-display-props (size)
   "Return display image props constrained to SIZE pixels."
@@ -691,11 +710,36 @@ shared media cache and replaces itself in-place."
          "  ")))))
 
 (defun nostr-ui--insert-publish-receipts (event indent)
-  "Insert publish receipts for EVENT using INDENT."
-  (when-let* ((event-id (alist-get 'id event))
-              (summary (nostr-ui--publish-receipt-summary event-id)))
-    (insert indent)
-    (insert (propertize (format "Publish  %s\n" summary) 'face 'nostr-ui-meta))))
+  "Insert publish receipts for EVENT using INDENT.
+Publish receipts only exist for the local account's own published notes, so
+skip the per-note query for other authors once the current pubkey is known."
+  (when (or (not (bound-and-true-p nostr-current-pubkey))
+            (equal (alist-get 'pubkey event) nostr-current-pubkey))
+    (when-let* ((event-id (alist-get 'id event))
+                (summary (nostr-ui--publish-receipt-summary event-id)))
+      (insert indent)
+      (insert (propertize (format "Publish  %s\n" summary) 'face 'nostr-ui-meta)))))
+
+(defun nostr-ui-prime-caches (events)
+  "Warm the per-render interaction-count and profile caches for EVENTS.
+Loads counts and profiles in a fixed number of batched queries so rendering a
+feed of N notes does not run O(N) per-note queries.  Call after `nostr-ui-clear'
+and before inserting notes."
+  (when nostr-db--connection
+    (unless nostr-ui--event-counts-cache
+      (setq nostr-ui--event-counts-cache (make-hash-table :test #'equal)))
+    (unless nostr-ui--profile-cache
+      (setq nostr-ui--profile-cache (make-hash-table :test #'equal)))
+    (let ((ids (delq nil (mapcar (lambda (event) (alist-get 'id event)) events)))
+          (pubkeys (delq nil (mapcar (lambda (event) (alist-get 'pubkey event))
+                                     events))))
+      (dolist (pair (nostr-db-event-counts-batch ids))
+        (puthash (car pair) (cdr pair) nostr-ui--event-counts-cache))
+      (let ((profiles (nostr-db-select-profiles-batch pubkeys)))
+        ;; Store nil for pubkeys with no profile so a miss is not re-queried.
+        (dolist (pubkey (delete-dups (seq-filter #'stringp pubkeys)))
+          (puthash pubkey (cdr (assoc pubkey profiles))
+                   nostr-ui--profile-cache))))))
 
 (defun nostr-ui--event-counts (event)
   "Return the full interaction counts alist for EVENT, memoized per buffer.

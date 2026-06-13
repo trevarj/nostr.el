@@ -170,6 +170,7 @@
                                    ('replies 'conversations)
                                    (kind kind)))
     (let ((events (nostr-timeline--select-events)))
+      (nostr-ui-prime-caches events)
       (nostr-timeline--backfill-missing-reposts)
       (nostr-timeline--backfill-visible-metadata events)
       (if events

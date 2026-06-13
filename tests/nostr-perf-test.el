@@ -169,5 +169,103 @@
           (should (= refreshed 1))
           (should-not nostr--refresh-dirty))))))
 
+;;; Stage 2 --- batched database loads
+
+(defmacro nostr-perf-test--with-db (&rest body)
+  "Run BODY with an isolated in-memory Nostr database."
+  (declare (indent 0))
+  `(let ((nostr-db--connection (emacsql-sqlite-open nil)))
+     (unwind-protect
+         (progn (nostr-db-init) ,@body)
+       (emacsql-close nostr-db--connection))))
+
+(defun nostr-perf-test--insert-event (id pubkey &optional root-id reply-id)
+  "Insert a minimal kind-1 event ID by PUBKEY with ROOT-ID/REPLY-ID."
+  (emacsql nostr-db--connection
+           [:insert-or-replace :into events
+            [id pubkey created_at kind tags content sig relay root_id reply_id quote_id]
+            :values [$s1 $s2 100 1 nil "" "sig" nil $s3 $s4 nil]]
+           id pubkey root-id reply-id))
+
+(ert-deftest nostr-db-event-counts-batch-counts-each-interaction ()
+  "Batch counts match the seeded reactions/reposts/zaps/replies per id."
+  (nostr-perf-test--with-db
+    (nostr-perf-test--insert-event "n1" "author")
+    (nostr-perf-test--insert-event "n2" "author")
+    ;; n1: 2 reactions, 1 repost, 3 zaps (100+200+300 msats), 2 replies
+    (dolist (r '(("react-1" "n1" "p" "+" 10) ("react-2" "n1" "q" "+" 11)))
+      (emacsql nostr-db--connection [:insert :into reactions :values $v1] (vconcat r)))
+    (emacsql nostr-db--connection [:insert :into reposts :values $v1]
+             (vector "rp-1" "n1" "p" 12))
+    (dolist (z '(("z1" "n1" "p" 100 13) ("z2" "n1" "q" 200 14) ("z3" "n1" "r" 300 15)))
+      (emacsql nostr-db--connection [:insert :into zaps :values $v1] (vconcat z)))
+    ;; two replies to n1 (one direct reply sets root_id = reply_id = n1)
+    (nostr-perf-test--insert-event "reply-a" "x" "n1" "n1")
+    (nostr-perf-test--insert-event "reply-b" "y" "n1" "other")
+    (let* ((batch (nostr-db-event-counts-batch '("n1" "n2" "missing")))
+           (n1 (cdr (assoc "n1" batch)))
+           (n2 (cdr (assoc "n2" batch)))
+           (missing (cdr (assoc "missing" batch))))
+      (should (= 2 (alist-get 'reactions n1)))
+      (should (= 1 (alist-get 'reposts n1)))
+      (should (= 3 (alist-get 'zaps n1)))
+      (should (= 600 (alist-get 'zap-msats n1)))
+      (should (= 2 (alist-get 'replies n1)))
+      ;; n2 and a missing id are all zeroes
+      (dolist (key '(reactions reposts replies zaps zap-msats))
+        (should (= 0 (alist-get key n2)))
+        (should (= 0 (alist-get key missing)))))))
+
+(ert-deftest nostr-db-event-counts-delegates-to-batch ()
+  "The single-id function matches the batch result for the same id."
+  (nostr-perf-test--with-db
+    (nostr-perf-test--insert-event "n1" "author")
+    (emacsql nostr-db--connection [:insert :into reactions :values $v1]
+             (vector "react-1" "n1" "p" "+" 10))
+    (should (equal (nostr-db-event-counts "n1")
+                   (cdr (car (nostr-db-event-counts-batch '("n1"))))))
+    (should (= 1 (alist-get 'reactions (nostr-db-event-counts "n1"))))))
+
+(ert-deftest nostr-db-select-profiles-batch-matches-single ()
+  "Batch profile load returns the same rows as per-pubkey selection."
+  (nostr-perf-test--with-db
+    (nostr-db-store-profile-event
+     '((id . "m1") (pubkey . "alice") (kind . 0)
+       (content . "{\"name\":\"Alice\",\"nip05\":\"alice@example.test\"}")
+       (created_at . 100)))
+    (nostr-db-store-profile-event
+     '((id . "m2") (pubkey . "bob") (kind . 0)
+       (content . "{\"name\":\"Bob\"}") (created_at . 100)))
+    (let ((batch (nostr-db-select-profiles-batch '("alice" "bob" "missing"))))
+      (should (equal (cdr (assoc "alice" batch)) (nostr-db-select-profile "alice")))
+      (should (equal (cdr (assoc "bob" batch)) (nostr-db-select-profile "bob")))
+      (should-not (assoc "missing" batch)))))
+
+(ert-deftest nostr-ui-prime-caches-avoids-per-note-queries ()
+  "After priming, per-note count and profile lookups hit the cache, not the DB."
+  (nostr-perf-test--with-db
+    (nostr-perf-test--insert-event "n1" "alice")
+    (emacsql nostr-db--connection [:insert :into reactions :values $v1]
+             (vector "r1" "n1" "p" "+" 10))
+    (nostr-db-store-profile-event
+     '((id . "m1") (pubkey . "alice") (kind . 0)
+       (content . "{\"name\":\"Alice\",\"nip05\":\"alice@example.test\"}")
+       (created_at . 100)))
+    (with-temp-buffer
+      (let ((event '((id . "n1") (pubkey . "alice")))
+            (count-calls 0)
+            (profile-calls 0))
+        (nostr-ui-prime-caches (list event))
+        (cl-letf (((symbol-function 'nostr-db-event-counts)
+                   (lambda (&rest _) (cl-incf count-calls) (nostr-db--zero-counts)))
+                  ((symbol-function 'nostr-db-select-profile)
+                   (lambda (&rest _) (cl-incf profile-calls) nil)))
+          ;; Values resolve from the primed caches...
+          (should (= 1 (nostr-ui--event-count event 'reactions)))
+          (should (equal "alice@example.test" (nostr-ui--event-nip05 event)))
+          ;; ...without any per-note database query.
+          (should (= 0 count-calls))
+          (should (= 0 profile-calls)))))))
+
 (provide 'nostr-perf-test)
 ;;; nostr-perf-test.el ends here

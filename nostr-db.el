@@ -423,41 +423,90 @@ so new columns must be added explicitly."
       (when latest-times
         (seq-min latest-times)))))
 
+(defun nostr-db--zero-counts ()
+  "Return a fresh zeroed interaction-counts alist."
+  (list (cons 'reactions 0)
+        (cons 'reposts 0)
+        (cons 'replies 0)
+        (cons 'zaps 0)
+        (cons 'zap-msats 0)))
+
+(defun nostr-db-event-counts-batch (event-ids)
+  "Return an alist mapping each of EVENT-IDS to its interaction counts.
+Each value has the same shape as `nostr-db-event-counts'.  Ids with no
+interactions get zeroed counts.  This runs a fixed number of grouped queries
+for the whole batch instead of five queries per id, so rendering a feed of N
+notes costs O(1) round-trips rather than O(N).
+
+Counts are loaded separately from feed queries so feeds do not eagerly scan the
+reaction/repost/reply tables for rows that may never be rendered."
+  (let ((ids (delete-dups (seq-filter #'stringp event-ids)))
+        (result (make-hash-table :test #'equal)))
+    (dolist (id ids)
+      (puthash id (nostr-db--zero-counts) result))
+    (when ids
+      (let ((vids (vconcat ids)))
+        (pcase-dolist (`(,id ,n)
+                       (emacsql nostr-db--connection
+                                [:select [event_id (funcall count *)]
+                                         :from reactions
+                                         :where (in event_id $v1)
+                                         :group-by event_id]
+                                vids))
+          (when-let* ((row (gethash id result)))
+            (setf (alist-get 'reactions row) (or n 0))))
+        (pcase-dolist (`(,id ,n)
+                       (emacsql nostr-db--connection
+                                [:select [event_id (funcall count *)]
+                                         :from reposts
+                                         :where (in event_id $v1)
+                                         :group-by event_id]
+                                vids))
+          (when-let* ((row (gethash id result)))
+            (setf (alist-get 'reposts row) (or n 0))))
+        (pcase-dolist (`(,id ,n ,sum)
+                       (emacsql nostr-db--connection
+                                [:select [event_id (funcall count *) (funcall sum amount_msats)]
+                                         :from zaps
+                                         :where (in event_id $v1)
+                                         :group-by event_id]
+                                vids))
+          (when-let* ((row (gethash id result)))
+            (setf (alist-get 'zaps row) (or n 0))
+            (setf (alist-get 'zap-msats row) (or sum 0))))
+        ;; Replies: any event referencing a target via reply_id OR root_id,
+        ;; deduped per target so an event whose reply_id and root_id are the same
+        ;; target (a common NIP-10 direct reply) is counted once -- matching the
+        ;; single-id query's `(or (= reply_id ..) (= root_id ..))'.
+        (let ((reply-sets (make-hash-table :test #'equal)))
+          (pcase-dolist (`(,eid ,reply-id ,root-id)
+                         (emacsql nostr-db--connection
+                                  [:select [id reply_id root_id]
+                                           :from events
+                                           :where (or (in reply_id $v1)
+                                                      (in root_id $v1))]
+                                  vids))
+            (dolist (target (delete-dups (delq nil (list reply-id root-id))))
+              (when (gethash target result)
+                (let ((set (or (gethash target reply-sets)
+                               (puthash target (make-hash-table :test #'equal)
+                                        reply-sets))))
+                  (puthash eid t set)))))
+          (maphash (lambda (target set)
+                     (when-let* ((row (gethash target result)))
+                       (setf (alist-get 'replies row) (hash-table-count set))))
+                   reply-sets))))
+    (let (out)
+      (dolist (id ids)
+        (push (cons id (gethash id result)) out))
+      (nreverse out))))
+
 (defun nostr-db-event-counts (event-id)
   "Return cached interaction counts for EVENT-ID.
-Counts are intentionally loaded separately from feed queries so feeds do not
-eagerly scan reaction/repost/reply tables for rows that may never be rendered."
-  `((reactions . ,(or (caar (emacsql nostr-db--connection
-                                      [:select [(funcall count *)]
-                                               :from reactions
-                                               :where (= event_id $s1)]
-                                      event-id))
-                      0))
-	    (reposts . ,(or (caar (emacsql nostr-db--connection
-	                                   [:select [(funcall count *)]
-	                                            :from reposts
-	                                            :where (= event_id $s1)]
-	                                   event-id))
-	                   0))
-	    (replies . ,(or (caar (emacsql nostr-db--connection
-	                                   [:select [(funcall count *)]
-	                                            :from events
-	                                            :where (or (= reply_id $s1)
-	                                                       (= root_id $s1))]
-	                                   event-id))
-	                   0))
-	    (zaps . ,(or (caar (emacsql nostr-db--connection
-	                                [:select [(funcall count *)]
-	                                         :from zaps
-	                                         :where (= event_id $s1)]
-	                                event-id))
-	                0))
-	    (zap-msats . ,(or (caar (emacsql nostr-db--connection
-	                                     [:select [(funcall sum amount_msats)]
-	                                              :from zaps
-	                                              :where (= event_id $s1)]
-	                                     event-id))
-	                     0))))
+Shape: an alist of `reactions', `reposts', `replies', `zaps' and `zap-msats'.
+Delegates to `nostr-db-event-counts-batch' so there is a single query path."
+  (or (cdr (car (nostr-db-event-counts-batch (list event-id))))
+      (nostr-db--zero-counts)))
 
 (defun nostr-db--event-row-to-alist (row)
   "Convert joined event ROW to an alist."
@@ -692,6 +741,19 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
                          :from profiles
                          :where (= pubkey $s1)]
                 pubkey)))
+
+(defun nostr-db-select-profiles-batch (pubkeys)
+  "Return an alist mapping each present PUBKEY to its profile row.
+Each value matches the row shape of `nostr-db-select-profile'.  Pubkeys with no
+stored profile are absent from the result.  Runs one query for the whole batch."
+  (let ((ids (delete-dups (seq-filter #'stringp pubkeys))))
+    (when ids
+      (mapcar (lambda (row) (cons (car row) row))
+              (emacsql nostr-db--connection
+                       [:select [pubkey name display_name about picture nip05 lud16 updated_at]
+                                :from profiles
+                                :where (in pubkey $v1)]
+                       (vconcat ids))))))
 
 (defun nostr-db-select-relays ()
   "Return stored relay status rows."
