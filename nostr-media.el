@@ -51,6 +51,26 @@ commands still operate on every supported media URL in the selected note."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-media-inline-image-max-width 720
+  "Maximum pixel width for inline media images."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-media-inline-image-max-height 480
+  "Maximum pixel height for inline media images."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-media-video-player-command "mpv"
+  "External command used to play video media URLs."
+  :type 'string
+  :group 'nostr)
+
+(defcustom nostr-media-video-player-args '("--force-window=yes")
+  "Arguments passed to `nostr-media-video-player-command' before the video URL."
+  :type '(repeat string)
+  :group 'nostr)
+
 (defvar nostr-media-fetch-function nil
   "Optional test hook used to fetch media.
 The function receives URL, SUCCESS and ERROR.  SUCCESS receives HEADERS and
@@ -186,13 +206,28 @@ binary DATA.  ERROR receives a human-readable message.")
       (when-let* ((button (button-at (point))))
         (button-get button 'nostr-media-type))))
 
+(defun nostr-media--available-image-width ()
+  "Return a reasonable inline image width for the current window."
+  (let ((window-width (when (fboundp 'window-pixel-width)
+                        (ignore-errors (window-pixel-width)))))
+    (if (and (integerp window-width) (> window-width 0))
+        (min nostr-media-inline-image-max-width
+             (max 160 (- window-width 64)))
+      nostr-media-inline-image-max-width)))
+
+(defun nostr-media--image-display-props ()
+  "Return display props for constrained inline media images."
+  (list :max-width (nostr-media--available-image-width)
+        :max-height nostr-media-inline-image-max-height))
+
 (defun nostr-media--image-string (url file)
   "Return display string for URL cached at FILE."
   (let ((label (format "[image loaded: %s]" url)))
     (if (and (display-images-p)
              (image-supported-file-p file))
         (propertize label
-                    'display (create-image file)
+                    'display (apply #'create-image file nil nil
+                                    (nostr-media--image-display-props))
                     'nostr-media-url url
                     'nostr-media-cache-file file)
       (propertize label
@@ -216,8 +251,8 @@ binary DATA.  ERROR receives a human-readable message.")
     text))
 
 (defun nostr-media--video-string (url)
-  "Return a rendered external video placeholder for URL."
-  (let ((text (concat "\n[video: " url "]")))
+  "Return the rendered video row text for URL."
+  (let ((text (concat "\n[play video: " url "]")))
     (add-text-properties 0 (length text)
                          `(nostr-media-rendered t
                            nostr-media-type video
@@ -232,8 +267,29 @@ binary DATA.  ERROR receives a human-readable message.")
                          text)
     text))
 
+(defun nostr-media-play-video-at-point (&optional button)
+  "Play the video URL represented at point or BUTTON with the configured player."
+  (interactive)
+  (let ((url (or (and button (button-get button 'nostr-media-url))
+                 (nostr-media-url-at-point)
+                 (user-error "No Nostr video URL at point"))))
+    (if-let* ((command (and (stringp nostr-media-video-player-command)
+                            (not (string-empty-p nostr-media-video-player-command))
+                            (executable-find nostr-media-video-player-command))))
+        (let ((process (apply #'start-process
+                              "nostr-media-video"
+                              nil
+                              command
+                              (append nostr-media-video-player-args
+                                      (list url)))))
+          (set-process-query-on-exit-flag process nil)
+          (message "Playing video with %s" nostr-media-video-player-command))
+      (browse-url url)
+      (message "Video player not found; opened video in browser"))
+    url))
+
 (defun nostr-media-render-video-at-point (url &optional position)
-  "Render a video placeholder for URL at POSITION or point."
+  "Render a video play button for URL at POSITION or point."
   (let* ((marker (copy-marker (or position (point))))
          (buffer (marker-buffer marker)))
     (when (buffer-live-p buffer)
@@ -248,7 +304,19 @@ binary DATA.  ERROR receives a human-readable message.")
              (forward-line 2)
              (point)))
           (let ((inhibit-read-only t))
-            (insert (nostr-media--video-string url))))))
+            (let ((start (point)))
+              (insert-text-button
+               (nostr-media--video-string url)
+               'follow-link t
+               'nostr-media-url url
+               'nostr-media-type 'video
+               'help-echo "Play this video"
+               'action (lambda (button) (nostr-media-play-video-at-point button)))
+              (add-text-properties start (point)
+                                   `(nostr-media-rendered t
+                                     nostr-media-type video
+                                     nostr-media-url ,url
+                                     rear-nonsticky t)))))))
     url))
 
 (defun nostr-media--rendered-block-end (pos limit)

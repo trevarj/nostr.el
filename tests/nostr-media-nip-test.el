@@ -35,6 +35,25 @@
                          (nostr-media-cache-file url))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-media-image-rendering-is-size-constrained ()
+  "Inline image rendering passes max dimensions to `create-image'."
+  (let ((url "https://example.com/picture.png")
+        (file "/tmp/picture.png")
+        captured-args)
+    (cl-letf (((symbol-function 'display-images-p) (lambda () t))
+              ((symbol-function 'image-supported-file-p) (lambda (_file) t))
+              ((symbol-function 'nostr-media--available-image-width) (lambda () 321))
+              ((symbol-function 'create-image)
+               (lambda (&rest args)
+                 (setq captured-args args)
+                 'image-descriptor)))
+      (let ((nostr-media-inline-image-max-height 222))
+        (let ((string (nostr-media--image-string url file)))
+          (should (equal (get-text-property 0 'display string)
+                         'image-descriptor))
+          (should (equal captured-args
+                         `(,file nil nil :max-width 321 :max-height 222))))))))
+
 (ert-deftest nostr-media-rejects-oversized-downloads ()
   "Media downloads over the size guard are not cached or rendered."
   (let* ((dir (make-temp-file "nostr-media-test" t))
@@ -77,8 +96,8 @@
           (should-not (string-match-p "\\[image loaded:" (buffer-string))))
       (delete-directory dir t))))
 
-(ert-deftest nostr-media-video-renders-without-fetching ()
-  "Video media renders as an external placeholder without a download."
+(ert-deftest nostr-media-video-renders-play-button-without-fetching ()
+  "Video media renders as a play button without a download."
   (let ((url "https://example.com/movie.mp4")
         (nostr-media-fetch-function
          (lambda (&rest _)
@@ -92,8 +111,61 @@
       (should (equal (nostr-media-load-at-point) url))
       (should (text-property-any (point-min) (point-max)
                                  'nostr-media-rendered t))
-      (should (string-match-p "\\[video: https://example.com/movie.mp4\\]"
-                              (buffer-string))))))
+      (should (string-match-p "\\[play video: https://example.com/movie.mp4\\]"
+                              (buffer-string)))
+      (search-forward "[play video:")
+      (should (button-at (point))))))
+
+(ert-deftest nostr-media-video-play-launches-configured-player ()
+  "Video play buttons launch the configured external player."
+  (let ((url "https://example.com/movie.mp4")
+        captured-command
+        captured-args)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (command)
+                 (and (equal command "mpv") "/gnu/store/test/bin/mpv")))
+              ((symbol-function 'start-process)
+               (lambda (_name _buffer command &rest args)
+                 (setq captured-command command)
+                 (setq captured-args args)
+                 'process))
+              ((symbol-function 'set-process-query-on-exit-flag)
+               (lambda (_process _flag) nil))
+              ((symbol-function 'browse-url)
+               (lambda (_url)
+                 (ert-fail "browse-url should not be used when player exists"))))
+      (let ((nostr-media-video-player-command "mpv")
+            (nostr-media-video-player-args '("--force-window=yes" "--pause")))
+        (with-temp-buffer
+          (insert-text-button "[play video]"
+                              'nostr-media-url url
+                              'nostr-media-type 'video
+                              'follow-link t)
+          (goto-char (point-min))
+          (should (equal (nostr-media-play-video-at-point) url)))))
+    (should (equal captured-command "/gnu/store/test/bin/mpv"))
+    (should (equal captured-args
+                   '("--force-window=yes" "--pause"
+                     "https://example.com/movie.mp4")))))
+
+(ert-deftest nostr-media-video-play-falls-back-to-browser ()
+  "Video playback uses `browse-url' when the configured player is missing."
+  (let ((url "https://example.com/movie.mp4")
+        opened-url)
+    (cl-letf (((symbol-function 'executable-find) (lambda (_command) nil))
+              ((symbol-function 'start-process)
+               (lambda (&rest _)
+                 (ert-fail "start-process should not be used without player")))
+              ((symbol-function 'browse-url)
+               (lambda (url) (setq opened-url url))))
+      (with-temp-buffer
+        (insert-text-button "[play video]"
+                            'nostr-media-url url
+                            'nostr-media-type 'video
+                            'follow-link t)
+        (goto-char (point-min))
+        (should (equal (nostr-media-play-video-at-point) url))))
+    (should (equal opened-url url))))
 
 (ert-deftest nostr-nip05-verifies-matching-pubkey ()
   "NIP-05 verification succeeds when the names map contains the pubkey."
