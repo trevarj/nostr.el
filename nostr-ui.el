@@ -178,7 +178,7 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   :type 'file
   :group 'nostr)
 
-(defcustom nostr-ui-logo-size 42
+(defcustom nostr-ui-logo-size 48
   "Maximum pixel size for the header logo image."
   :type 'integer
   :group 'nostr)
@@ -1038,31 +1038,31 @@ exact dates."
     (insert (propertize "────────────────────────────────────────\n"
                         'face 'nostr-ui-card-border))
     (nostr-ui-with-section 'note (alist-get 'id event) event
-        (lambda (section)
-          (nostr-ui--insert-note-heading section indent picture author))
-      (nostr-ui-insert-badge-line (nostr-ui--note-badges event style)
-                                  (concat indent "  "))
-      (when-let* ((reposter (nostr-ui-format-reposter event)))
-        (insert indent)
-        (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
-                            'face 'nostr-ui-meta)))
-      (nostr-ui--insert-filled-content content indent)
-      (nostr-ui--insert-publish-receipts event indent)
-      (dolist (url (nostr-event-media-urls (alist-get 'content event)))
-        (insert indent)
-        (insert (propertize "  " 'face 'nostr-ui-card-border))
-        (insert-text-button
-         (format "[image: %s]" url)
-         'follow-link t
-         'nostr-media-url url
-         'help-echo "Load this image inline"
-         'action (lambda (_button) (nostr-media-load-at-point)))
-        (insert "\n"))
-      (nostr-ui--restore-note-media section)
-      (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
-                                  (concat indent "  "))
-      (insert "\n")
-      (insert "\n"))))
+			   (lambda (section)
+			     (nostr-ui--insert-note-heading section indent picture author))
+			   (nostr-ui-insert-badge-line (nostr-ui--note-badges event style)
+						       (concat indent "  "))
+			   (when-let* ((reposter (nostr-ui-format-reposter event)))
+			     (insert indent)
+			     (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
+						 'face 'nostr-ui-meta)))
+			   (nostr-ui--insert-filled-content content indent)
+			   (nostr-ui--insert-publish-receipts event indent)
+			   (dolist (url (nostr-event-media-urls (alist-get 'content event)))
+			     (insert indent)
+			     (insert (propertize "  " 'face 'nostr-ui-card-border))
+			     (insert-text-button
+			      (format "[image: %s]" url)
+			      'follow-link t
+			      'nostr-media-url url
+			      'help-echo "Load this image inline"
+			      'action (lambda (_button) (nostr-media-load-at-point)))
+			     (insert "\n"))
+			   (nostr-ui--restore-note-media section)
+			   (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
+						       (concat indent "  "))
+			   (insert "\n")
+			   (insert "\n"))))
 
 (provide 'nostr-ui)
 ;;; nostr-ui.el ends here
