@@ -267,5 +267,25 @@
           (should (= 0 count-calls))
           (should (= 0 profile-calls)))))))
 
+;;; Stage 3 --- avatar image descriptor cache
+
+(ert-deftest nostr-ui-cached-image-decodes-once ()
+  "An avatar image is decoded once and reused for repeated renders/sizes."
+  (let ((nostr-ui--image-cache (make-hash-table :test #'equal))
+        (decodes 0)
+        (file (make-temp-file "nostr-img" nil ".png")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'create-image)
+                   (lambda (&rest _) (cl-incf decodes) (list 'image))))
+          (let ((first (nostr-ui--cached-image file 32)))
+            (should (= 1 decodes))
+            ;; Same file + size reuses the cached descriptor (no new decode).
+            (should (eq first (nostr-ui--cached-image file 32)))
+            (should (= 1 decodes))
+            ;; A different size is a distinct entry.
+            (nostr-ui--cached-image file 64)
+            (should (= 2 decodes))))
+      (delete-file file))))
+
 (provide 'nostr-perf-test)
 ;;; nostr-perf-test.el ends here

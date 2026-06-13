@@ -111,6 +111,10 @@ Reset each render and primed once per feed so the per-note author lookups
 (defvar nostr-ui--npub-cache (make-hash-table :test #'equal)
   "Cache of hex pubkeys to encoded npub strings.")
 
+(defvar nostr-ui--image-cache (make-hash-table :test #'equal)
+  "Cache of decoded image descriptors keyed by (FILE SIZE MTIME).
+Persists across renders so a repeated avatar is decoded once, not per note.")
+
 (defcustom nostr-ui-show-avatars t
   "Whether note cards and profile headers show profile picture placeholders."
   :type 'boolean
@@ -537,6 +541,19 @@ on a miss so callers work without priming."
   "Return display image props constrained to SIZE pixels."
   (list :max-width size :max-height size :ascent nostr-ui-avatar-ascent))
 
+(defun nostr-ui--cached-image (file size)
+  "Return a `create-image' descriptor for FILE at SIZE, decoded at most once.
+Avatars repeat across notes and refreshes; caching the descriptor avoids
+re-decoding the same image on every render.  Re-decodes only when FILE's
+modification time changes."
+  (let* ((mtime (file-attribute-modification-time (file-attributes file)))
+         (key (list file size mtime)))
+    (or (gethash key nostr-ui--image-cache)
+        (puthash key
+                 (apply #'create-image file nil nil
+                        (nostr-ui--image-display-props size))
+                 nostr-ui--image-cache))))
+
 (defun nostr-ui--display-image-string (file label size &optional url)
   "Return display string for FILE with LABEL constrained to SIZE.
 When URL is non-nil, add media properties for the source URL."
@@ -545,9 +562,7 @@ When URL is non-nil, add media properties for the source URL."
            (display-images-p)
            (image-supported-file-p file))
       (propertize " "
-                  'display (apply #'create-image
-                                  file nil nil
-                                  (nostr-ui--image-display-props size))
+                  'display (nostr-ui--cached-image file size)
                   'nostr-media-url url
                   'nostr-media-cache-file file)
     (propertize label
@@ -569,9 +584,7 @@ When URL is non-nil, add media properties for the source URL."
            (display-images-p)
            (image-supported-file-p file))
       (propertize " "
-                  'display (apply #'create-image
-                                  file nil nil
-                                  (nostr-ui--image-display-props size))
+                  'display (nostr-ui--cached-image file size)
                   'nostr-media-url url
                   'nostr-media-cache-file file))
      (url
