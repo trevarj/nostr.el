@@ -27,6 +27,9 @@
 (defvar nostr-search-limit 100
   "Maximum number of local search results displayed.")
 
+(defvar nostr-search--refresh-timer nil
+  "Pending timer for visible search-result refreshes.")
+
 (defcustom nostr-search-auto-relay t
   "Whether opening a search buffer immediately queries connected relays."
   :type 'boolean
@@ -153,11 +156,32 @@
   (when-let* ((event (nostr-ui-selected-data)))
     (nostr-thread-open event)))
 
+(defun nostr-search-refresh-visible-buffers ()
+  "Refresh visible search buffers after relay-backed results arrive."
+  (setq nostr-search--refresh-timer nil)
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (and (eq major-mode 'nostr-search-mode)
+                   (get-buffer-window buffer 'visible))
+          (nostr-search-refresh))))))
+
+(defun nostr-search--schedule-refresh (&rest _ignored)
+  "Schedule a debounced refresh for visible search buffers."
+  (unless (timerp nostr-search--refresh-timer)
+    (setq nostr-search--refresh-timer
+          (run-at-time 0.4 nil #'nostr-search-refresh-visible-buffers))))
+
+(defun nostr-search--ensure-refresh-hook ()
+  "Ensure relay ingestion refreshes visible search buffers."
+  (add-hook 'nostr-relay-event-hook #'nostr-search--schedule-refresh))
+
 (defun nostr-search-relay ()
   "Start relay-backed search for the current query."
   (interactive)
   (unless nostr-search-query
     (user-error "No search query is associated with this buffer"))
+  (nostr-search--ensure-refresh-hook)
   (if-let* ((pubkey (nostr-search--query-pubkey nostr-search-query)))
       (let ((sub-id (nostr-relay-fetch-author pubkey nostr-search-limit)))
         (message "Nostr author lookup started: %s" sub-id))

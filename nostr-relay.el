@@ -191,6 +191,12 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--pending-subscriptions (make-hash-table :test #'equal)
   "Relay URL to pending subscriptions as (SUB-ID FILTERS) lists.")
 
+(defvar nostr-relay--search-request-counts (make-hash-table :test #'equal)
+  "Search subscription ids to pending relay response counts.")
+
+(defvar nostr-relay--search-author-request-counts (make-hash-table :test #'equal)
+  "Author subscription ids started by profile search to pending relay counts.")
+
 (defvar nostr-relay--global-last-request-time nil
   "Last `float-time' when Global requested relay events.")
 
@@ -222,13 +228,21 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
   "Return number of profile metadata requests still waiting for relay results."
   (hash-table-count nostr-relay--profile-requests))
 
+(defun nostr-relay--pending-search-count ()
+  "Return number of relay-backed search requests still waiting for EOSE/CLOSED."
+  (+ (hash-table-count nostr-relay--search-request-counts)
+     (hash-table-count nostr-relay--search-author-request-counts)))
+
 (defun nostr-relay--update-mode-line ()
   "Refresh the Nostr relay activity mode-line segment state."
   (nostr-relay--ensure-mode-line)
   (let ((profiles (nostr-relay--pending-profile-count))
+        (searches (nostr-relay--pending-search-count))
         (connecting (length nostr-relay--connect-queue)))
     (setq nostr-relay--mode-line-string
           (cond
+           ((> searches 0)
+            (format " Nostr:searching %d" searches))
            ((and (> nostr-relay--ingested-event-count 0)
                  (> profiles 0))
             (format " Nostr:loading %d events/%d profiles"
@@ -292,6 +306,32 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
       (if (> remaining 0)
           (puthash pubkey remaining nostr-relay--profile-request-counts)
         (nostr-relay--complete-profile-request pubkey)))))
+
+(defun nostr-relay--track-search-request (sub-id sent)
+  "Track search SUB-ID sent to SENT relays."
+  (when (> sent 0)
+    (puthash sub-id sent nostr-relay--search-request-counts)
+    (nostr-relay--update-mode-line)))
+
+(defun nostr-relay--track-search-author-request (sub-id sent)
+  "Track search-triggered author SUB-ID sent to SENT relays."
+  (when (> sent 0)
+    (puthash sub-id sent nostr-relay--search-author-request-counts)
+    (nostr-relay--update-mode-line)))
+
+(defun nostr-relay--note-counted-eose (sub-id table)
+  "Decrement SUB-ID in TABLE and return non-nil when it was tracked."
+  (when-let* ((remaining (gethash sub-id table)))
+    (if (> remaining 1)
+        (puthash sub-id (1- remaining) table)
+      (remhash sub-id table))
+    (nostr-relay--update-mode-line)
+    t))
+
+(defun nostr-relay--note-search-eose (sub-id)
+  "Record an EOSE/CLOSED for search SUB-ID."
+  (or (nostr-relay--note-counted-eose sub-id nostr-relay--search-request-counts)
+      (nostr-relay--note-counted-eose sub-id nostr-relay--search-author-request-counts)))
 
 (defun nostr-relay--preference-urls (pubkey capability)
   "Return PUBKEY relay preference URLs matching CAPABILITY.
@@ -514,13 +554,20 @@ queued event) when the verification resolves."
             (nostr-relay-fetch-author-from-urls
              pubkey nostr-default-feed-limit nostr-relay-search-author-urls)))))))
 
+(defun nostr-relay--primal-profile-search-event-p (url sub-id event)
+  "Return non-nil when EVENT is a Primal cache profile-search result."
+  (and (nostr-relay--primal-cache-url-p url)
+       (gethash sub-id nostr-relay--search-profile-queries)
+       (equal (alist-get 'kind event) nostr-kind-metadata)))
+
 (defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
 When `nostr-relay-verify-events' is non-nil, verification subprocesses are
 bounded by `nostr-relay-max-concurrent-verifications'; events arriving while
 at the cap are queued (never dropped) and dispatched as verifications finish."
   (nostr-relay--maybe-fetch-profile-search-author sub-id event)
-  (if (not nostr-relay-verify-events)
+  (if (or (not nostr-relay-verify-events)
+          (nostr-relay--primal-profile-search-event-p url sub-id event))
       (nostr-relay--store-verified-event url event)
     (if (>= nostr-relay--verify-inflight
             nostr-relay-max-concurrent-verifications)
@@ -575,12 +622,14 @@ at the cap are queued (never dropped) and dispatched as verifications finish."
     (`("EOSE" ,sub-id)
      (nostr-db-store-relay-status url "eose" sub-id)
      (nostr-relay--note-profile-eose sub-id)
+     (nostr-relay--note-search-eose sub-id)
      (nostr-relay--handle-eose url sub-id))
     (`("NOTICE" . ,rest)
      (nostr-db-store-relay-status url "notice" (car rest)))
     (`("CLOSED" ,sub-id . ,rest)
      (remhash sub-id nostr-relay--subscriptions)
      (nostr-relay--note-profile-eose sub-id)
+     (nostr-relay--note-search-eose sub-id)
      (remhash sub-id nostr-relay--search-profile-queries)
      (nostr-db-store-relay-status url "closed" (car rest)))
     (`("OK" ,event-id ,accepted . ,rest)
@@ -955,6 +1004,11 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
 	  (clrhash nostr-relay--profile-request-subscriptions)
 	  (clrhash nostr-relay--event-metadata-requests)
 	  (clrhash nostr-relay--event-id-requests)
+	  (clrhash nostr-relay--search-profile-queries)
+	  (clrhash nostr-relay--search-profile-author-requests)
+	  (clrhash nostr-relay--pending-subscriptions)
+	  (clrhash nostr-relay--search-request-counts)
+	  (clrhash nostr-relay--search-author-request-counts)
   (when (timerp nostr-relay--activity-timer)
     (cancel-timer nostr-relay--activity-timer))
   (when (timerp nostr-relay--mode-line-timer)
@@ -1094,16 +1148,19 @@ open relays.  Otherwise publish to every open relay."
   "Request relay-backed note and profile search QUERY."
   (let* ((profile-query (nostr-relay--search-profile-query-key query))
          (sub-id (format "search-%s" (md5 query)))
-         (limit (or limit 50)))
+         (limit (or limit 50))
+         (sent 0))
     (puthash sub-id query nostr-relay--search-profile-queries)
     (dolist (url (nostr-relay--search-target-urls))
       (when-let* ((filters (nostr-relay--search-filters-for-url
                             url query profile-query limit)))
+        (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
             (nostr-relay-subscribe url sub-id filters)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
+    (nostr-relay--track-search-request sub-id sent)
     sub-id))
 
 (defun nostr-relay--author-filters (pubkey limit)
@@ -1131,14 +1188,17 @@ open relays.  Otherwise publish to every open relay."
   "Request public activity for author PUBKEY from URLS.
 Missing URLs are opened lazily and the author subscription is queued."
   (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
-        (filters (nostr-relay--author-filters pubkey (or limit 50))))
+        (filters (nostr-relay--author-filters pubkey (or limit 50)))
+        (sent 0))
     (dolist (url urls)
       (when (and (stringp url) (not (string-empty-p url)))
+        (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
             (nostr-relay-subscribe url sub-id filters)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
+    (nostr-relay--track-search-author-request sub-id sent)
     sub-id))
 
 (defun nostr-relay-fetch-profile (pubkey &optional url)

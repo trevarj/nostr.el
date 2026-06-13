@@ -1309,6 +1309,70 @@
                          '("user_search" (("query" . "odell")
                                           ("limit" . 25))))))))))
 
+(ert-deftest nostr-search-relay-installs-search-refresh-hook ()
+  "Relay-backed search refreshes visible search buffers as results arrive."
+  (let ((nostr-search--refresh-timer nil)
+        (nostr-relay-event-hook nil)
+        (refreshes 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'nostr-relay-search)
+                   (lambda (&rest _) "search-sub"))
+                  ((symbol-function 'nostr-search-refresh-visible-buffers)
+                   (lambda () (setq nostr-search--refresh-timer nil)
+                     (cl-incf refreshes))))
+          (let ((nostr-search-query "ODELL"))
+            (nostr-search-relay)
+            (should (memq #'nostr-search--schedule-refresh nostr-relay-event-hook))
+            (run-hook-with-args 'nostr-relay-event-hook nil)
+            (should (timerp nostr-search--refresh-timer))
+            (cancel-timer nostr-search--refresh-timer)
+            (setq nostr-search--refresh-timer nil)
+            (nostr-search-refresh-visible-buffers)
+            (should (= refreshes 1))))
+      (when (timerp nostr-search--refresh-timer)
+        (cancel-timer nostr-search--refresh-timer)))))
+
+(ert-deftest nostr-search-primal-cache-profile-hints-bypass-verification ()
+  "Primal cache profile search hints are stored even when relay verification is on."
+  (nostr-test-with-db
+    (let ((nostr-relay-verify-events t)
+          (nostr-relay--search-profile-queries (make-hash-table :test #'equal)))
+      (puthash "search-odell" "ODELL" nostr-relay--search-profile-queries)
+      (nostr-relay--handle-event
+       "wss://cache2.primal.net/v1"
+       "search-odell"
+       '((id . "profile-odell")
+         (pubkey . "odell-pubkey")
+         (created_at . 100)
+         (kind . 0)
+         (tags . nil)
+         (content . "{\"name\":\"ODELL\",\"display_name\":\"ODELL\"}")
+         (sig . "cache-sig")))
+      (should (nostr-db-select-profile "odell-pubkey")))))
+
+(ert-deftest nostr-search-progress-appears-in-mode-line ()
+  "Relay-backed search requests show and clear mode-line progress."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--search-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--profile-requests (make-hash-table :test #'equal))
+        (nostr-relay--profile-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--profile-request-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--mode-line-string nil)
+        (nostr-relay--ingested-event-count 0)
+        (nostr-relay--connect-queue nil)
+        (nostr-relay-search-urls nil))
+    (puthash "wss://relay.example" t nostr-relay--connections)
+    (cl-letf (((symbol-function 'nostr-relay-subscribe)
+               (lambda (&rest _) nil)))
+      (let ((sub-id (nostr-relay-search "ODELL" 25)))
+        (should (string-match-p "Nostr:searching 1"
+                                nostr-relay--mode-line-string))
+        (nostr-relay--note-search-eose sub-id)
+        (should-not nostr-relay--mode-line-string)))))
+
 (ert-deftest nostr-search-relay-fetches-authors-from-profile-hits ()
   "Matching profile search events trigger bounded author activity fetches."
   (let ((nostr-relay--search-profile-queries (make-hash-table :test #'equal))
