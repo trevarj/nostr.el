@@ -22,6 +22,8 @@
 
 ;; Defined in nostr-setup.el / set by the account derivation flow.
 (defvar nostr-current-pubkey)
+(defvar nostr-relay-publish-pending-stale-seconds)
+(declare-function nostr-relay-retry-publish "nostr-relay" (event))
 
 (defface nostr-ui-author
   '((t :inherit font-lock-function-name-face :weight bold))
@@ -827,22 +829,41 @@ only when IDENTIFIER is known verified for PUBKEY."
           (format "%s · %s" name identifier)
         identifier))))
 
-(defun nostr-ui--publish-receipt-summary (event-id)
-  "Return a compact publish receipt summary for EVENT-ID, when available."
+(defun nostr-ui--publish-receipt-counts (receipts)
+  "Return state counts for publish RECEIPTS."
+  (let (counts)
+    (dolist (receipt receipts)
+      (let ((state (alist-get 'state receipt)))
+        (setf (alist-get state counts nil nil #'equal)
+              (1+ (or (alist-get state counts nil nil #'equal) 0)))))
+    counts))
+
+(defun nostr-ui--stale-pending-receipts-p (receipts)
+  "Return non-nil when RECEIPTS include stale pending publish state."
+  (let ((now (truncate (float-time))))
+    (seq-some (lambda (receipt)
+                (and (equal (alist-get 'state receipt) "pending")
+                     (> (- now (or (alist-get 'updated-at receipt) 0))
+                        (or (and (boundp 'nostr-relay-publish-pending-stale-seconds)
+                                 nostr-relay-publish-pending-stale-seconds)
+                            60))))
+              receipts)))
+
+(defun nostr-ui--publish-receipt-chips (event-id)
+  "Return compact publish receipt chips for EVENT-ID, when available."
   (when (and (boundp 'nostr-db--connection) nostr-db--connection event-id)
-    (let ((counts nil))
-      (dolist (receipt (nostr-db-select-publish-receipts event-id))
-        (let ((state (alist-get 'state receipt)))
-          (setf (alist-get state counts nil nil #'equal)
-                (1+ (or (alist-get state counts nil nil #'equal) 0)))))
-      (when counts
-        (string-join
-         (delq nil
-               (mapcar (lambda (state)
-                         (when-let* ((count (alist-get state counts nil nil #'equal)))
-                           (format "%s:%d" state count)))
-                       '("pending" "accepted" "rejected")))
-         "  ")))))
+    (let* ((receipts (nostr-db-select-publish-receipts event-id))
+           (counts (nostr-ui--publish-receipt-counts receipts))
+           (accepted (alist-get "accepted" counts nil nil #'equal))
+           (rejected (alist-get "rejected" counts nil nil #'equal))
+           (pending (alist-get "pending" counts nil nil #'equal))
+           (stale-pending (nostr-ui--stale-pending-receipts-p receipts)))
+      (when receipts
+        (delq nil
+              (list (when accepted (format "✓ %d" accepted))
+                    (when rejected (format "! %d" rejected))
+                    (when (and pending (or (not accepted) stale-pending))
+                      (format "… %d" pending))))))))
 
 (defun nostr-ui--insert-publish-receipts (event indent)
   "Insert publish receipts for EVENT using INDENT.
@@ -851,9 +872,67 @@ skip the per-note query for other authors once the current pubkey is known."
   (when (or (not (bound-and-true-p nostr-current-pubkey))
             (equal (alist-get 'pubkey event) nostr-current-pubkey))
     (when-let* ((event-id (alist-get 'id event))
-                (summary (nostr-ui--publish-receipt-summary event-id)))
+                (chips (nostr-ui--publish-receipt-chips event-id)))
       (insert indent)
-      (insert (propertize (format "Publish  %s\n" summary) 'face 'nostr-ui-meta)))))
+      (insert (propertize "  Publish  " 'face 'nostr-ui-meta))
+      (nostr-ui-insert-badge-line chips ""))))
+
+(defun nostr-ui--publish-details-text (event receipts)
+  "Return details text for EVENT publish RECEIPTS."
+  (let ((event-id (alist-get 'id event)))
+    (concat
+     (format "Publish details for %s\n\n" event-id)
+     (if receipts
+         (string-join
+          (mapcar (lambda (receipt)
+                    (format "%-8s %s  %s%s"
+                            (alist-get 'state receipt)
+                            (format-time-string
+                             "%Y-%m-%d %H:%M:%S"
+                             (seconds-to-time (or (alist-get 'updated-at receipt) 0)))
+                            (alist-get 'url receipt)
+                            (if-let* ((message (alist-get 'message receipt)))
+                                (format "\n         %s" message)
+                              "")))
+                  receipts)
+          "\n")
+       "No publish receipts for this note")
+     "\n")))
+
+(defun nostr-ui-retry-publish (event)
+  "Retry publishing EVENT to failed or stale relay targets."
+  (interactive (list (or (nostr-ui-selected-data)
+                         (user-error "No note selected"))))
+  (require 'nostr-relay)
+  (let ((sent (nostr-relay-retry-publish event)))
+    (message "Re-published to %d relay%s"
+             sent
+             (if (= sent 1) "" "s"))))
+
+(defun nostr-ui-show-publish-details ()
+  "Show publish receipt details for the selected note."
+  (interactive)
+  (let* ((event (or (nostr-ui-selected-data)
+                    (user-error "No note selected")))
+         (event-id (or (alist-get 'id event)
+                       (user-error "Selected note has no event id")))
+         (receipts (and nostr-db--connection
+                        (nostr-db-select-publish-receipts event-id)))
+         (buffer (get-buffer-create "*Nostr Publish Details*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (special-mode)
+        (insert (nostr-ui--publish-details-text event receipts))
+        (when (equal (alist-get 'pubkey event) nostr-current-pubkey)
+          (insert "\n")
+          (insert-text-button
+           "[Retry failed/stale relays]"
+           'follow-link t
+           'help-echo "Re-publish this event to failed or stale relays"
+           'action (lambda (_button)
+                     (nostr-ui-retry-publish event))))))
+    (display-buffer buffer)))
 
 (defun nostr-ui-prime-caches (events)
   "Warm the per-render interaction-count and profile caches for EVENTS.

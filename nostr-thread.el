@@ -42,6 +42,7 @@
     (define-key map (kbd "r") #'nostr-thread-reply)
     (define-key map (kbd "l") #'nostr-thread-like)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
+    (define-key map (kbd "D") #'nostr-ui-show-publish-details)
     (define-key map (kbd "R") #'nostr-thread-repost)
     (define-key map (kbd "Q") #'nostr-thread-quote)
     (define-key map (kbd "w") #'nostr-share-copy)
@@ -63,6 +64,7 @@
    ["Thread"
     ("g" "Refresh" nostr-thread-refresh)
     ("o" "Open embedded" nostr-thread-open-embedded-nevent)
+    ("D" "Publish details" nostr-ui-show-publish-details)
     ("n" "Next note" nostr-ui-next-section)
     ("p" "Previous note" nostr-ui-prev-section)
     ("TAB" "Toggle note" nostr-ui-toggle-section)]

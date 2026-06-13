@@ -187,8 +187,44 @@
          (created-at . 120)
          (content . "published locally")))
       (let ((text (buffer-string)))
-        (should (string-match-p "Publish  accepted:1  rejected:1" text))
-        (should-not (string-match-p "pending:0" text))))))
+        (should (string-match-p "Publish.*✓ 1.*! 1" text))
+        (should-not (string-match-p "accepted:1" text))
+        (should-not (string-match-p "pending" text))))))
+
+(ert-deftest nostr-ui-note-hides-publish-receipts-for-other-authors ()
+  "Publish receipts are only rendered for the current account's own notes."
+  (nostr-ui-buffers-test-with-db
+    (let ((nostr-current-pubkey "me"))
+      (nostr-ui-buffers-test-store-event
+       '((id . "other-note")
+         (pubkey . "other")
+         (created_at . 120)
+         (kind . 1)
+         (tags . nil)
+         (content . "not mine")
+         (sig . "sig")))
+      (nostr-db-store-publish-receipt
+       "other-note" "wss://relay-a.example" "accepted" "stored")
+      (with-temp-buffer
+        (nostr-ui-insert-note
+         '((id . "other-note")
+           (pubkey . "other")
+           (created-at . 120)
+           (content . "not mine")))
+        (should-not (string-match-p "Publish" (buffer-string)))))))
+
+(ert-deftest nostr-ui-publish-details-renders-relay-messages ()
+  "Publish details include relay URLs, states, and messages."
+  (let ((text (nostr-ui--publish-details-text
+               '((id . "published-note") (pubkey . "me"))
+               '(((url . "wss://relay-a.example")
+                  (state . "rejected")
+                  (message . "blocked")
+                  (updated-at . 120))))))
+    (should (string-match-p "Publish details for published-note" text))
+    (should (string-match-p "rejected" text))
+    (should (string-match-p "wss://relay-a.example" text))
+    (should (string-match-p "blocked" text))))
 
 (provide 'nostr-ui-buffers-test)
 ;;; nostr-ui-buffers-test.el ends here

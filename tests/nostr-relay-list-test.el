@@ -203,5 +203,80 @@
             (should (equal sent '(:write))))
         (setq nostr-current-pubkey old-pubkey)))))
 
+(ert-deftest nostr-relay-retry-publish-targets-failed-stale-and-missing ()
+  "Retry publishing skips accepted and fresh pending relays."
+  (nostr-relay-list-test-with-db
+    (let ((old-pubkey (and (boundp 'nostr-current-pubkey) nostr-current-pubkey))
+          (nostr-relay--connections (make-hash-table :test #'equal))
+          (nostr-relay-publish-pending-stale-seconds 60)
+          sent)
+      (unwind-protect
+          (progn
+            (setq nostr-current-pubkey "alice")
+            (nostr-db-store-event
+             '((id . "relay-list")
+               (pubkey . "alice")
+               (created_at . 100)
+               (kind . 10002)
+               (tags . (("r" "wss://accepted.example" "write")
+                        ("r" "wss://rejected.example" "write")
+                        ("r" "wss://fresh.example" "write")
+                        ("r" "wss://stale.example" "write")
+                        ("r" "wss://missing.example" "write")))
+               (content . "")
+               (sig . "sig")))
+            (dolist (url '("wss://accepted.example"
+                           "wss://rejected.example"
+                           "wss://fresh.example"
+                           "wss://stale.example"
+                           "wss://missing.example"))
+              (puthash url url nostr-relay--connections))
+            (nostr-db-store-publish-receipt "note-1" "wss://accepted.example" "accepted")
+            (nostr-db-store-publish-receipt "note-1" "wss://rejected.example" "rejected")
+            (nostr-db-store-publish-receipt "note-1" "wss://fresh.example" "pending")
+            (nostr-db-store-publish-receipt "note-1" "wss://stale.example" "pending")
+            (emacsql nostr-db--connection
+                     [:update publish_receipts
+                              :set (= updated_at 1)
+                              :where (and (= event_id "note-1")
+                                          (= url "wss://stale.example"))])
+            (cl-letf (((symbol-function 'websocket-openp) (lambda (_ws) t))
+                      ((symbol-function 'websocket-send-text)
+                       (lambda (ws _message) (push ws sent))))
+              (should
+               (= 3
+                  (nostr-relay-retry-publish
+                   '((id . "note-1")
+                     (pubkey . "alice")
+                     (created-at . 120)
+                     (kind . 1)
+                     (tags . nil)
+                     (content . "hello")
+                     (sig . "sig"))))))
+            (should (equal (sort sent #'string<)
+                           '("wss://missing.example"
+                             "wss://rejected.example"
+                             "wss://stale.example"))))
+        (setq nostr-current-pubkey old-pubkey)))))
+
+(ert-deftest nostr-relay-retry-publish-rejects-other-authors ()
+  "Retry publishing is restricted to the current account's own notes."
+  (nostr-relay-list-test-with-db
+    (let ((old-pubkey (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)))
+      (unwind-protect
+          (progn
+            (setq nostr-current-pubkey "alice")
+            (should-error
+             (nostr-relay-retry-publish
+              '((id . "note-1")
+                (pubkey . "bob")
+                (created-at . 120)
+                (kind . 1)
+                (tags . nil)
+                (content . "hello")
+                (sig . "sig")))
+             :type 'user-error))
+        (setq nostr-current-pubkey old-pubkey)))))
+
 (provide 'nostr-relay-list-test)
 ;;; nostr-relay-list-test.el ends here

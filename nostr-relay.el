@@ -67,6 +67,11 @@
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-publish-pending-stale-seconds 60
+  "Seconds after which a pending publish receipt is retryable."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-relay-since-overlap-seconds (* 60 10)
   "Seconds of overlap to use when resubscribing for cached feeds."
   :type 'integer
@@ -876,24 +881,91 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
         nostr-relay--verify-queue nil)
   (nostr-relay--update-mode-line))
 
+(defun nostr-relay-publish-target-urls ()
+  "Return open relay URLs eligible for publishing.
+When the current account has cached NIP-65 write relays, return only those
+open relays.  Otherwise return every open relay."
+  (let ((write-urls (and (boundp 'nostr-current-pubkey)
+                         nostr-current-pubkey
+                         (nostr-relay--preference-urls nostr-current-pubkey 'write)))
+        urls)
+    (maphash (lambda (url ws)
+               (when (and (websocket-openp ws)
+                          (or (not write-urls) (member url write-urls)))
+                 (push url urls)))
+             nostr-relay--connections)
+    (nreverse urls)))
+
+(defun nostr-relay-send-client-message-to-urls (client-message urls)
+  "Send relay-ready CLIENT-MESSAGE string to open relay URLS.
+Return the number of relays that received the message."
+  (let ((event-id (nostr-relay--client-message-event-id client-message))
+        (sent 0))
+    (dolist (url urls)
+      (when-let* ((ws (gethash url nostr-relay--connections)))
+        (when (websocket-openp ws)
+                 (when event-id
+                   (nostr-db-store-publish-receipt event-id url "pending"))
+                 (websocket-send-text ws client-message)
+          (setq sent (1+ sent)))))
+    sent))
+
 (defun nostr-relay-send-client-message (client-message)
   "Broadcast relay-ready CLIENT-MESSAGE string to selected open relays.
 When the current account has cached NIP-65 write relays, publish only to those
 open relays.  Otherwise publish to every open relay."
-  (let ((write-urls (and (boundp 'nostr-current-pubkey)
-                         nostr-current-pubkey
-                         (nostr-relay--preference-urls nostr-current-pubkey 'write)))
-        (event-id (nostr-relay--client-message-event-id client-message))
-        (sent 0))
-    (maphash (lambda (url ws)
-               (when (and (websocket-openp ws)
-                          (or (not write-urls) (member url write-urls)))
-                 (when event-id
-                   (nostr-db-store-publish-receipt event-id url "pending"))
-                 (websocket-send-text ws client-message)
-                 (setq sent (1+ sent))))
-             nostr-relay--connections)
-    sent))
+  (nostr-relay-send-client-message-to-urls
+   client-message
+   (nostr-relay-publish-target-urls)))
+
+(defun nostr-relay--event-envelope (event)
+  "Return a relay EVENT envelope for cached EVENT."
+  (json-encode
+   (vector
+    "EVENT"
+    (list
+     (cons 'id (alist-get 'id event))
+     (cons 'pubkey (alist-get 'pubkey event))
+     (cons 'created_at (or (alist-get 'created_at event)
+                           (alist-get 'created-at event)))
+     (cons 'kind (alist-get 'kind event))
+     (cons 'tags (or (alist-get 'tags event) []))
+     (cons 'content (or (alist-get 'content event) ""))
+     (cons 'sig (alist-get 'sig event))))))
+
+(defun nostr-relay--retryable-publish-urls (event-id)
+  "Return connected publish target URLs that should retry EVENT-ID."
+  (let* ((now (truncate (float-time)))
+         (receipts (nostr-db-select-publish-receipts event-id))
+         (targets (nostr-relay-publish-target-urls))
+         urls)
+    (dolist (url targets)
+      (let* ((receipt (seq-find (lambda (item)
+                                  (equal (alist-get 'url item) url))
+                                receipts))
+             (state (alist-get 'state receipt))
+             (updated-at (or (alist-get 'updated-at receipt) 0)))
+        (when (or (not receipt)
+                  (equal state "rejected")
+                  (and (equal state "pending")
+                       (> (- now updated-at)
+                          nostr-relay-publish-pending-stale-seconds)))
+          (push url urls))))
+    (nreverse urls)))
+
+(defun nostr-relay-retry-publish (event)
+  "Retry publishing cached signed EVENT to failed or stale relay targets."
+  (let* ((event-id (alist-get 'id event))
+         (urls (and event-id (nostr-relay--retryable-publish-urls event-id))))
+    (unless event-id
+      (user-error "Selected note has no event id"))
+    (unless (equal (alist-get 'pubkey event) nostr-current-pubkey)
+      (user-error "Only your own notes can be re-published"))
+    (unless urls
+      (user-error "No failed or stale publish targets to retry"))
+    (nostr-relay-send-client-message-to-urls
+     (nostr-relay--event-envelope event)
+     urls)))
 
 (defun nostr-relay-search (query &optional limit)
   "Request NIP-50 text search QUERY from connected relays."

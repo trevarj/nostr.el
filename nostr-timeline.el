@@ -66,6 +66,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (define-key map (kbd "r") #'nostr-timeline-reply)
     (define-key map (kbd "l") #'nostr-timeline-like)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
+    (define-key map (kbd "D") #'nostr-ui-show-publish-details)
     (define-key map (kbd "R") #'nostr-timeline-repost)
     (define-key map (kbd "Q") #'nostr-timeline-quote)
     (define-key map (kbd "w") #'nostr-share-copy)
@@ -103,6 +104,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
    ["Social"
     ("l" "React" nostr-timeline-like)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
+    ("D" "Publish details" nostr-ui-show-publish-details)
     ("R" "Repost" nostr-timeline-repost)
     ("Q" "Quote" nostr-timeline-quote)]
    ["Share"
