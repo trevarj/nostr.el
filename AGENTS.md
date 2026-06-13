@@ -65,7 +65,6 @@ Run the full ERT suite:
 
 ```sh
 guix shell -m manifest.scm -- emacs --batch -Q -L . -L tests \
-  -l bech32-test.el \
   -l nostr-test.el \
   -l tests/nostr-ui-buffers-test.el \
   -l tests/nostr-operational-buffers-test.el \
