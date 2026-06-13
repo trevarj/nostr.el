@@ -115,6 +115,27 @@
       (should (equal (button-get button 'nostr-media-url)
                      "https://example.test/alice.png")))))
 
+(ert-deftest nostr-ui-note-card-renders-repost-attribution ()
+  "Cards show who reposted a feed item."
+  (with-temp-buffer
+    (let ((inhibit-read-only t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-note
+       '((id . "reposted-note")
+         (pubkey . "carol-pubkey")
+         (author . "Carol")
+         (created-at . 1736776800)
+         (content . "worth reading")
+         (reposted-by . "alice-pubkey")
+         (reposted-by-name . "Alice")
+         (reposted-by-nip05 . "alice@example.test")
+         (replies . 0)
+         (reactions . 0)
+         (reposts . 1))))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "Carol" text))
+      (should (string-match-p "↻ Reposted by Alice · alice@example.test" text)))))
+
 (ert-deftest nostr-ui-avatar-load-replaces-placeholder-in-place ()
   "Loading an avatar replaces its button instead of appending repeated images."
   (let* ((dir (make-temp-file "nostr-avatar-test" t))

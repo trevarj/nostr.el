@@ -482,31 +482,93 @@ eagerly scan reaction/repost/reply tables for rows that may never be rendered."
        (picture . ,picture)
        (reactions . ,reactions)
        (reposts . ,reposts)
-       (replies . ,replies)))))
+       (replies . ,replies)))
+    (`(,id ,pubkey ,created-at ,kind ,tags ,content ,sig ,relay ,root-id ,reply-id
+          ,quote-id ,name ,display-name ,picture ,reposted-by ,reposted-at
+          ,reposter-name ,reposter-display-name ,reposter-nip05)
+     `((id . ,id)
+       (pubkey . ,pubkey)
+       (created-at . ,created-at)
+       (created_at . ,created-at)
+       (kind . ,kind)
+       (tags . ,tags)
+       (content . ,content)
+       (sig . ,sig)
+       (relay . ,relay)
+       (root-id . ,root-id)
+       (reply-id . ,reply-id)
+       (quote-id . ,quote-id)
+       (author . ,(or display-name name pubkey))
+       (picture . ,picture)
+       (reposted-by . ,reposted-by)
+       (reposted-at . ,reposted-at)
+       (reposted-by-name . ,(or reposter-display-name reposter-name))
+       (reposted-by-nip05 . ,reposter-nip05)))))
+
+(defun nostr-db--feed-sort-time (event)
+  "Return the timestamp used to position EVENT in a feed."
+  (or (alist-get 'reposted-at event)
+      (alist-get 'created-at event)
+      (alist-get 'created_at event)
+      0))
+
+(defun nostr-db--take (items limit)
+  "Return at most LIMIT ITEMS."
+  (seq-take items (or limit 100)))
+
+(defun nostr-db--select-reposted-feed (pubkey limit root-only)
+  "Return notes reposted by contacts of PUBKEY."
+  (mapcar #'nostr-db--event-row-to-alist
+          (emacsql nostr-db--connection
+                   `[:select
+                     [events:id events:pubkey events:created_at events:kind events:tags
+                                events:content events:sig events:relay events:root_id events:reply_id
+                                events:quote_id profiles:name profiles:display_name profiles:picture
+                                reposts:pubkey reposts:created_at
+                                reposter:name reposter:display_name reposter:nip05]
+                     :from reposts
+                     :inner-join follows :on (and (= reposts:pubkey follows:contact)
+                                                  (= follows:pubkey $s1))
+                     :inner-join events :on (= reposts:event_id events:id)
+                     :left-join profiles :on (= events:pubkey profiles:pubkey)
+                     :left-join profiles :as reposter :on (= reposts:pubkey reposter:pubkey)
+                     :where (and (= events:kind 1)
+                                 ,(if root-only '(is events:root_id nil) 'true))
+                     :order-by [(desc reposts:created_at)]
+                     :limit $s2]
+                   pubkey (or limit 100))))
 
 (defun nostr-db-select-feed (pubkey &optional limit root-only include-self)
   "Return feed events from contacts of PUBKEY.
 LIMIT defaults to 100.  If ROOT-ONLY is non-nil, exclude replies.  When
 INCLUDE-SELF may be `exclude-self' to omit PUBKEY's own notes; other values
 preserve the historical behavior of including PUBKEY."
-  (let ((include-own (not (eq include-self 'exclude-self))))
-    (mapcar #'nostr-db--event-row-to-alist
-            (emacsql nostr-db--connection
-                     `[:select
-                       [events:id events:pubkey events:created_at events:kind events:tags
-                                  events:content events:sig events:relay events:root_id events:reply_id
-                                  events:quote_id profiles:name profiles:display_name profiles:picture]
-                       :from events
-                       :left-join follows :on (and (= events:pubkey follows:contact)
-                                                   (= follows:pubkey $s1))
-                       :left-join profiles :on (= events:pubkey profiles:pubkey)
-                       :where (and (= events:kind 1)
-                                   (or ,(if include-own '(= events:pubkey $s1) 'false)
-                                       (is-not follows:contact nil))
-                                   ,(if root-only '(is events:root_id nil) 'true))
-                       :order-by [(desc events:created_at)]
-                       :limit $s2]
-                     pubkey (or limit 100)))))
+  (let* ((limit (or limit 100))
+         (include-own (not (eq include-self 'exclude-self)))
+         (notes (mapcar #'nostr-db--event-row-to-alist
+                        (emacsql nostr-db--connection
+                                 `[:select
+                                   [events:id events:pubkey events:created_at events:kind events:tags
+                                              events:content events:sig events:relay events:root_id events:reply_id
+                                              events:quote_id profiles:name profiles:display_name profiles:picture]
+                                   :from events
+                                   :left-join follows :on (and (= events:pubkey follows:contact)
+                                                               (= follows:pubkey $s1))
+                                   :left-join profiles :on (= events:pubkey profiles:pubkey)
+                                   :where (and (= events:kind 1)
+                                               (or ,(if include-own '(= events:pubkey $s1) 'false)
+                                                   (is-not follows:contact nil))
+                                               ,(if root-only '(is events:root_id nil) 'true))
+                                   :order-by [(desc events:created_at)]
+                                   :limit $s2]
+                                 pubkey limit)))
+         (reposts (nostr-db--select-reposted-feed pubkey limit root-only)))
+    (nostr-db--take
+     (sort (append notes reposts)
+           (lambda (left right)
+             (> (nostr-db--feed-sort-time left)
+                (nostr-db--feed-sort-time right))))
+     limit)))
 
 (defun nostr-db-select-account-feed (pubkey &optional limit)
   "Return root feed notes from accounts followed by PUBKEY."

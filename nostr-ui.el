@@ -660,6 +660,19 @@ shared media cache and replaces itself in-place."
         (format "%s · %s" name identifier)
       identifier)))
 
+(defun nostr-ui-format-reposter (event)
+  "Return formatted repost attribution for EVENT, when present."
+  (when-let* ((pubkey (alist-get 'reposted-by event)))
+    (let* ((name (nostr-ui--string-value (alist-get 'reposted-by-name event)))
+           (nip05 (nostr-ui--string-value (alist-get 'reposted-by-nip05 event)))
+           (identifier (or nip05
+                           (when-let* ((npub (nostr-ui--cached-npub pubkey)))
+                             (nostr-ui--shorten-identifier npub))
+                           (nostr-ui--shorten-identifier pubkey))))
+      (if (and name (not (equal name pubkey)))
+          (format "%s · %s" name identifier)
+        identifier))))
+
 (defun nostr-ui--publish-receipt-summary (event-id)
   "Return a compact publish receipt summary for EVENT-ID, when available."
   (when (and (boundp 'nostr-db--connection) nostr-db--connection event-id)
@@ -873,6 +886,10 @@ exact dates."
           (nostr-ui--insert-note-heading section indent picture author))
       (nostr-ui-insert-badge-line (nostr-ui--note-badges event style)
                                   (concat indent "  "))
+      (when-let* ((reposter (nostr-ui-format-reposter event)))
+        (insert indent)
+        (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
+                            'face 'nostr-ui-meta)))
       (nostr-ui--insert-filled-content content indent)
       (nostr-ui--insert-publish-receipts event indent)
       (dolist (url (nostr-event-media-urls (alist-get 'content event)))

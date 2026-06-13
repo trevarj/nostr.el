@@ -253,6 +253,37 @@
       (should (= (length feed) 1))
       (should (equal (alist-get 'id (car feed)) "own")))))
 
+(ert-deftest nostr-db-feed-includes-reposts-by-followed-accounts ()
+  "Followed-account reposts insert the reposted root note into the feed."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "contacts")
+       (pubkey . "me")
+       (created_at . 90)
+       (kind . 3)
+       (tags . (("p" "alice")))))
+    (nostr-db-store-event
+     '((id . "alice-profile")
+       (pubkey . "alice")
+       (created_at . 91)
+       (kind . 0)
+       (content . "{\"display_name\":\"Alice\"}")))
+    (nostr-test-store-text-note "reposted-root" "carol" 100 "carol note")
+    (nostr-db-store-event
+     '((id . "alice-repost")
+       (pubkey . "alice")
+       (created_at . 120)
+       (kind . 6)
+       (tags . (("e" "reposted-root")))
+       (content . "")
+       (sig . "sig")))
+    (let ((feed (nostr-db-select-account-feed "me" 10)))
+      (should (= (length feed) 1))
+      (should (equal (alist-get 'id (car feed)) "reposted-root"))
+      (should (equal (alist-get 'reposted-by (car feed)) "alice"))
+      (should (= (alist-get 'reposted-at (car feed)) 120))
+      (should (equal (alist-get 'reposted-by-name (car feed)) "Alice")))))
+
 (ert-deftest nostr-db-init-migrates-existing-cache-schema ()
   "Opening an older cache adds columns used by current queries."
   (let ((nostr-db--connection (emacsql-sqlite-open nil)))
