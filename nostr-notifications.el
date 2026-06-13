@@ -312,7 +312,7 @@
                   (alist-get 'content notification)))
          (content (string-trim (if (stringp raw) raw ""))))
     (if (string-empty-p content)
-        "(no cached event content)"
+        ""
       (truncate-string-to-width content 76 nil nil t))))
 
 (defun nostr-notifications--unread-count (notifications)

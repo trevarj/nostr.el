@@ -140,6 +140,23 @@
       (should (string-match-p "notification" (buffer-string)))
       (should (string-match-p "legacy notification target" (buffer-string))))))
 
+(ert-deftest nostr-notifications-hide-missing-event-content-placeholder ()
+  "Notifications with uncached events do not render a missing-content placeholder."
+  (nostr-operational-test--with-db
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 10)
+       (content . "{\"display_name\":\"Alice\"}")))
+    (emacsql nostr-db--connection
+             [:insert :into notifications :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
+             "notif-missing" "mention" "missing-note" "alice" "me" 31 0)
+    (with-temp-buffer
+      (nostr-notifications-mode)
+      (nostr-notifications-refresh)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Alice mentioned you" text))
+        (should-not (string-match-p "(no cached event content)" text))))))
+
 (ert-deftest nostr-notifications-mark-seen-updates-db-and-buffer ()
   "Notifications can be marked seen from the buffer."
   (nostr-operational-test--with-db
