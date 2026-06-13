@@ -125,6 +125,11 @@ startup feed subscriptions unless also present in `nostr-relay-urls'."
   :type '(repeat string)
   :group 'nostr)
 
+(defcustom nostr-relay-search-timeout-seconds 12
+  "Seconds before relay-backed search progress is cleared without EOSE/CLOSED."
+  :type 'number
+  :group 'nostr)
+
 (defcustom nostr-relay-activity-idle-delay 1.5
   "Seconds to keep the mode-line ingestion indicator visible after events arrive."
   :type 'number
@@ -196,6 +201,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 
 (defvar nostr-relay--search-author-request-counts (make-hash-table :test #'equal)
   "Author subscription ids started by profile search to pending relay counts.")
+
+(defvar nostr-relay--search-timeout-timers (make-hash-table :test #'equal)
+  "Search subscription ids to timeout timers.")
 
 (defvar nostr-relay--global-last-request-time nil
   "Last `float-time' when Global requested relay events.")
@@ -311,20 +319,51 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
   "Track search SUB-ID sent to SENT relays."
   (when (> sent 0)
     (puthash sub-id sent nostr-relay--search-request-counts)
+    (nostr-relay--arm-search-timeout sub-id)
     (nostr-relay--update-mode-line)))
 
 (defun nostr-relay--track-search-author-request (sub-id sent)
   "Track search-triggered author SUB-ID sent to SENT relays."
   (when (> sent 0)
     (puthash sub-id sent nostr-relay--search-author-request-counts)
+    (nostr-relay--arm-search-timeout sub-id)
     (nostr-relay--update-mode-line)))
+
+(defun nostr-relay--clear-search-progress (sub-id)
+  "Clear tracked search progress for SUB-ID."
+  (remhash sub-id nostr-relay--search-request-counts)
+  (remhash sub-id nostr-relay--search-author-request-counts)
+  (when-let* ((timer (gethash sub-id nostr-relay--search-timeout-timers)))
+    (when (timerp timer)
+      (cancel-timer timer))
+    (remhash sub-id nostr-relay--search-timeout-timers))
+  (nostr-relay--update-mode-line))
+
+(defun nostr-relay--arm-search-timeout (sub-id)
+  "Clear search progress for SUB-ID if a relay never sends EOSE/CLOSED."
+  (when-let* ((timer (gethash sub-id nostr-relay--search-timeout-timers)))
+    (when (timerp timer)
+      (cancel-timer timer)))
+  (puthash sub-id
+           (run-at-time nostr-relay-search-timeout-seconds
+                        nil
+                        #'nostr-relay--clear-search-progress
+                        sub-id)
+           nostr-relay--search-timeout-timers))
 
 (defun nostr-relay--note-counted-eose (sub-id table)
   "Decrement SUB-ID in TABLE and return non-nil when it was tracked."
   (when-let* ((remaining (gethash sub-id table)))
     (if (> remaining 1)
         (puthash sub-id (1- remaining) table)
-      (remhash sub-id table))
+      (progn
+        (remhash sub-id table)
+        (unless (or (gethash sub-id nostr-relay--search-request-counts)
+                    (gethash sub-id nostr-relay--search-author-request-counts))
+          (when-let* ((timer (gethash sub-id nostr-relay--search-timeout-timers)))
+            (when (timerp timer)
+              (cancel-timer timer))
+            (remhash sub-id nostr-relay--search-timeout-timers)))))
     (nostr-relay--update-mode-line)
     t))
 
@@ -552,7 +591,7 @@ queued event) when the verification resolves."
             (puthash request-key t nostr-relay--search-profile-author-requests)
             (nostr-relay-fetch-author pubkey nostr-default-feed-limit)
             (nostr-relay-fetch-author-from-urls
-             pubkey nostr-default-feed-limit nostr-relay-search-author-urls)))))))
+             pubkey nostr-default-feed-limit nostr-relay-search-author-urls t)))))))
 
 (defun nostr-relay--primal-profile-search-event-p (url sub-id event)
   "Return non-nil when EVENT is a Primal cache profile-search result."
@@ -1009,6 +1048,11 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
 	  (clrhash nostr-relay--pending-subscriptions)
 	  (clrhash nostr-relay--search-request-counts)
 	  (clrhash nostr-relay--search-author-request-counts)
+  (maphash (lambda (_sub-id timer)
+             (when (timerp timer)
+               (cancel-timer timer)))
+           nostr-relay--search-timeout-timers)
+	  (clrhash nostr-relay--search-timeout-timers)
   (when (timerp nostr-relay--activity-timer)
     (cancel-timer nostr-relay--activity-timer))
   (when (timerp nostr-relay--mode-line-timer)
@@ -1184,9 +1228,10 @@ open relays.  Otherwise publish to every open relay."
              nostr-relay--connections)
     sub-id))
 
-(defun nostr-relay-fetch-author-from-urls (pubkey &optional limit urls)
+(defun nostr-relay-fetch-author-from-urls (pubkey &optional limit urls track-progress)
   "Request public activity for author PUBKEY from URLS.
-Missing URLs are opened lazily and the author subscription is queued."
+Missing URLs are opened lazily and the author subscription is queued.
+When TRACK-PROGRESS is non-nil, show the request as search progress."
   (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
         (filters (nostr-relay--author-filters pubkey (or limit 50)))
         (sent 0))
@@ -1198,7 +1243,8 @@ Missing URLs are opened lazily and the author subscription is queued."
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
-    (nostr-relay--track-search-author-request sub-id sent)
+    (when track-progress
+      (nostr-relay--track-search-author-request sub-id sent))
     sub-id))
 
 (defun nostr-relay-fetch-profile (pubkey &optional url)

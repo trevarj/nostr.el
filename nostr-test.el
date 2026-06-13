@@ -1355,6 +1355,7 @@
   (let ((nostr-relay--connections (make-hash-table :test #'equal))
         (nostr-relay--search-request-counts (make-hash-table :test #'equal))
         (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--search-timeout-timers (make-hash-table :test #'equal))
         (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
         (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
         (nostr-relay--profile-requests (make-hash-table :test #'equal))
@@ -1370,8 +1371,36 @@
       (let ((sub-id (nostr-relay-search "ODELL" 25)))
         (should (string-match-p "Nostr:searching 1"
                                 nostr-relay--mode-line-string))
+        (should (timerp (gethash sub-id nostr-relay--search-timeout-timers)))
         (nostr-relay--note-search-eose sub-id)
+        (should-not (gethash sub-id nostr-relay--search-timeout-timers))
         (should-not nostr-relay--mode-line-string)))))
+
+(ert-deftest nostr-search-progress-times-out ()
+  "Search progress clears even when a relay never sends EOSE/CLOSED."
+  (let ((nostr-relay--search-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+        (nostr-relay--search-timeout-timers (make-hash-table :test #'equal))
+        (nostr-relay--profile-requests (make-hash-table :test #'equal))
+        (nostr-relay--mode-line-string nil)
+        (nostr-relay--ingested-event-count 0)
+        (nostr-relay--connect-queue nil)
+        (nostr-relay-search-timeout-seconds 30))
+    (unwind-protect
+        (progn
+          (nostr-relay--track-search-request "search-timeout" 1)
+          (should (string-match-p "Nostr:searching 1"
+                                  nostr-relay--mode-line-string))
+          (should (timerp (gethash "search-timeout"
+                                   nostr-relay--search-timeout-timers)))
+          (nostr-relay--clear-search-progress "search-timeout")
+          (should-not (gethash "search-timeout" nostr-relay--search-request-counts))
+          (should-not (gethash "search-timeout" nostr-relay--search-timeout-timers))
+          (should-not nostr-relay--mode-line-string))
+      (maphash (lambda (_sub-id timer)
+                 (when (timerp timer)
+                   (cancel-timer timer)))
+               nostr-relay--search-timeout-timers))))
 
 (ert-deftest nostr-search-relay-fetches-authors-from-profile-hits ()
   "Matching profile search events trigger bounded author activity fetches."
