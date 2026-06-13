@@ -600,6 +600,36 @@ so new columns must be added explicitly."
                      pubkey))
       0))
 
+(defun nostr-db-select-following-profiles (pubkey &optional limit)
+  "Return cached profile rows for accounts PUBKEY follows."
+  (emacsql nostr-db--connection
+           [:select [follows:contact profiles:name profiles:display_name
+                     profiles:about profiles:picture profiles:nip05
+                     profiles:lud16 profiles:updated_at]
+                    :from follows
+                    :left-join profiles :on (= follows:contact profiles:pubkey)
+                    :where (= follows:pubkey $s1)
+                    :order-by [(asc profiles:display_name)
+                               (asc profiles:name)
+                               (asc follows:contact)]
+                    :limit $s2]
+           pubkey (or limit 200)))
+
+(defun nostr-db-select-follower-profiles (pubkey &optional limit)
+  "Return cached profile rows for accounts that follow PUBKEY."
+  (emacsql nostr-db--connection
+           [:select [follows:pubkey profiles:name profiles:display_name
+                     profiles:about profiles:picture profiles:nip05
+                     profiles:lud16 profiles:updated_at]
+                    :from follows
+                    :left-join profiles :on (= follows:pubkey profiles:pubkey)
+                    :where (= follows:contact $s1)
+                    :order-by [(asc profiles:display_name)
+                               (asc profiles:name)
+                               (asc follows:pubkey)]
+                    :limit $s2]
+           pubkey (or limit 200)))
+
 (defun nostr-db-latest-event-time (&optional pubkeys)
   "Return newest cached event timestamp, optionally limited to PUBKEYS."
   (if pubkeys

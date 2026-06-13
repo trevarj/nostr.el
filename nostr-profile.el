@@ -30,6 +30,15 @@
 (defvar nostr-profile-note-limit 50
   "Maximum number of recent notes displayed in a profile buffer.")
 
+(defvar nostr-profile-list-limit 200
+  "Maximum number of cached follow profiles displayed in a profile list buffer.")
+
+(defvar-local nostr-profile-list-owner-pubkey nil
+  "Pubkey whose social list is displayed in the current buffer.")
+
+(defvar-local nostr-profile-list-kind nil
+  "Social list kind displayed in the current buffer: `followers' or `following'.")
+
 (defvar nostr-profile-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'nostr-profile-refresh)
@@ -50,8 +59,22 @@
     map)
   "Keymap for `nostr-profile-mode'.")
 
+(defvar nostr-profile-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'nostr-profile-list-refresh)
+    (define-key map (kbd "n") #'nostr-ui-next-section)
+    (define-key map (kbd "p") #'nostr-ui-prev-section)
+    (define-key map (kbd "RET") #'nostr-profile-list-open-at-point)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `nostr-profile-list-mode'.")
+
 (define-derived-mode nostr-profile-mode special-mode "Nostr-Profile"
   "Mode for Nostr profile buffers."
+  (setq-local truncate-lines nil))
+
+(define-derived-mode nostr-profile-list-mode special-mode "Nostr-Profile-List"
+  "Mode for cached Nostr profile relationship lists."
   (setq-local truncate-lines nil))
 
 (transient-define-prefix nostr-profile-actions ()
@@ -110,19 +133,35 @@
         "none cached"
       (format "%d read  %d write  %d both" read write both))))
 
-(defun nostr-profile--social-lines (profile)
-  "Return social context lines for PROFILE."
+(defun nostr-profile--insert-social-count-button (profile label count kind)
+  "Insert clickable social COUNT for PROFILE with LABEL and KIND."
+  (insert-text-button
+   (number-to-string count)
+   'follow-link t
+   'help-echo (format "Open cached %s" label)
+   'action (lambda (_button)
+             (nostr-profile-open-list (alist-get 'pubkey profile) kind))))
+
+(defun nostr-profile--insert-social-lines (profile)
+  "Insert social context rows for PROFILE."
   (let* ((pubkey (alist-get 'pubkey profile))
          (current (and (boundp 'nostr-current-pubkey) nostr-current-pubkey))
          (following (nostr-db-following-count pubkey))
          (followers (nostr-db-follower-count pubkey))
          (you-follow (and current (nostr-db-follows-p current pubkey)))
          (you-muted (and current (nostr-db-muted-p current pubkey))))
-    `(("You follow" . ,(if you-follow "yes" "no"))
-      ("Muted" . ,(if you-muted "yes" "no"))
-      ("Followers" . ,(number-to-string followers))
-      ("Following" . ,(number-to-string following))
-      ("Relays" . ,(nostr-profile--relay-summary pubkey)))))
+    (dolist (line `(("You follow" . ,(if you-follow "yes" "no"))
+                    ("Muted" . ,(if you-muted "yes" "no"))))
+      (insert (propertize (format "%-10s " (car line)) 'face 'nostr-ui-meta))
+      (insert (format "%s\n" (cdr line))))
+    (insert (propertize (format "%-10s " "Followers") 'face 'nostr-ui-meta))
+    (nostr-profile--insert-social-count-button profile "followers" followers 'followers)
+    (insert "\n")
+    (insert (propertize (format "%-10s " "Following") 'face 'nostr-ui-meta))
+    (nostr-profile--insert-social-count-button profile "following" following 'following)
+    (insert "\n")
+    (insert (propertize (format "%-10s " "Relays") 'face 'nostr-ui-meta))
+    (insert (format "%s\n" (nostr-profile--relay-summary pubkey)))))
 
 (defun nostr-profile--select-notes (pubkey &optional limit)
   "Return recent note events authored by PUBKEY."
@@ -153,9 +192,7 @@
      (alist-get 'picture profile)
      nostr-ui-profile-avatar-size)
     (insert "\n\n")
-    (dolist (line (nostr-profile--social-lines profile))
-      (insert (propertize (format "%-10s " (car line)) 'face 'nostr-ui-meta))
-      (insert (format "%s\n" (cdr line))))
+    (nostr-profile--insert-social-lines profile)
     (insert "\n")
     (dolist (field '((pubkey . "Pubkey")
                      (name . "Name")
@@ -273,6 +310,93 @@
       (nostr-profile-mode)
       (setq-local nostr-profile-pubkey pubkey)
       (nostr-profile-refresh))
+    (pop-to-buffer buffer)))
+
+(defun nostr-profile-list--title ()
+  "Return the title for the current profile list."
+  (pcase nostr-profile-list-kind
+    ('followers "Followers")
+    ('following "Following")
+    (_ "Profiles")))
+
+(defun nostr-profile-list--select ()
+  "Return cached profile rows for the current profile list buffer."
+  (pcase nostr-profile-list-kind
+    ('followers
+     (nostr-db-select-follower-profiles
+      nostr-profile-list-owner-pubkey nostr-profile-list-limit))
+    ('following
+     (nostr-db-select-following-profiles
+      nostr-profile-list-owner-pubkey nostr-profile-list-limit))
+    (_ nil)))
+
+(defun nostr-profile-list--insert-profile (profile)
+  "Insert one PROFILE row in a profile list buffer."
+  (let ((pubkey (alist-get 'pubkey profile)))
+    (nostr-ui-with-section 'profile pubkey profile
+        (format "%s" (nostr-profile--display-name profile))
+      (when-let* ((nip05 (alist-get 'nip05 profile)))
+        (insert (propertize "NIP-05     " 'face 'nostr-ui-meta))
+        (insert (nostr-ui-format-nip05 nip05 pubkey))
+        (insert "\n"))
+      (insert (propertize "Pubkey     " 'face 'nostr-ui-meta))
+      (insert (format "%s\n\n" pubkey)))))
+
+(defun nostr-profile-list-refresh ()
+  "Refresh the current profile relationship list buffer."
+  (interactive)
+  (unless (and nostr-profile-list-owner-pubkey nostr-profile-list-kind)
+    (user-error "No profile list is associated with this buffer"))
+  (let* ((inhibit-read-only t)
+         (position-state (nostr-ui-capture-position))
+         (owner (nostr-profile--row-to-alist
+                 (nostr-db-select-profile nostr-profile-list-owner-pubkey)
+                 nostr-profile-list-owner-pubkey))
+         (profiles (mapcar (lambda (row)
+                             (nostr-profile--row-to-alist row (car row)))
+                           (nostr-profile-list--select))))
+    (dolist (profile profiles)
+      (nostr-relay-fetch-profile (alist-get 'pubkey profile)))
+    (nostr-ui-clear)
+    (nostr-ui-insert-status-header
+     (nostr-profile-list--title)
+     (nostr-profile--display-name owner)
+     (format "%d cached profile%s"
+             (length profiles)
+             (if (= (length profiles) 1) "" "s")))
+    (if profiles
+        (dolist (profile profiles)
+          (nostr-profile-list--insert-profile profile))
+      (nostr-ui-insert-empty-state
+       "No cached profiles for this list."
+       "Refresh relays or open more profiles to grow the local cache."))
+    (nostr-ui-insert-footer
+     '("g refresh" "RET open profile" "n next" "p prev" "q quit"))
+    (nostr-ui-finish-refresh position-state)))
+
+(defun nostr-profile-list-open-at-point ()
+  "Open the selected profile list row."
+  (interactive)
+  (when-let* ((section (nostr-ui-section-at-point))
+              ((eq (nostr-ui-section-type section) 'profile))
+              (pubkey (alist-get 'pubkey (nostr-ui-section-data section))))
+    (nostr-profile-open pubkey)))
+
+(defun nostr-profile-open-list (pubkey kind)
+  "Open cached social list KIND for profile PUBKEY."
+  (let* ((title (pcase kind
+                  ('followers "Followers")
+                  ('following "Following")
+                  (_ "Profiles")))
+         (buffer (get-buffer-create
+                  (format "*Nostr %s %s*"
+                          title
+                          (truncate-string-to-width pubkey 12)))))
+    (with-current-buffer buffer
+      (nostr-profile-list-mode)
+      (setq-local nostr-profile-list-owner-pubkey pubkey)
+      (setq-local nostr-profile-list-kind kind)
+      (nostr-profile-list-refresh))
     (pop-to-buffer buffer)))
 
 (provide 'nostr-profile)

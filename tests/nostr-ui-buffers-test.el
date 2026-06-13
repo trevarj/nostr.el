@@ -116,6 +116,77 @@
                 (should (string-match-p "Relays     1 read  1 write  1 both" text)))))
         (setq nostr-current-pubkey old-pubkey)))))
 
+(ert-deftest nostr-profile-social-count-buttons-open-lists ()
+  "Follower and following counts open cached profile relationship lists."
+  (nostr-ui-buffers-test-with-db
+    (nostr-db-store-event
+     '((id . "alice-follows")
+       (pubkey . "alice-pubkey")
+       (created_at . 100)
+       (kind . 3)
+       (tags . (("p" "bob-pubkey")))))
+    (nostr-db-store-event
+     '((id . "bob-follows")
+       (pubkey . "bob-pubkey")
+       (created_at . 101)
+       (kind . 3)
+       (tags . (("p" "alice-pubkey")))))
+    (let (opened)
+      (cl-letf (((symbol-function 'nostr-profile-open-list)
+                 (lambda (pubkey kind) (push (list pubkey kind) opened))))
+        (with-temp-buffer
+          (nostr-profile-mode)
+          (setq-local nostr-profile-pubkey "alice-pubkey")
+          (nostr-profile-refresh)
+          (goto-char (point-min))
+          (search-forward "Followers")
+          (search-forward "1")
+          (button-activate (or (button-at (point))
+                               (button-at (1- (point)))))
+          (goto-char (point-min))
+          (search-forward "Following")
+          (search-forward "1")
+          (button-activate (or (button-at (point))
+                               (button-at (1- (point)))))))
+      (should (equal (nreverse opened)
+                     '(("alice-pubkey" followers)
+                       ("alice-pubkey" following)))))))
+
+(ert-deftest nostr-profile-list-renders-and-opens-selected-profile ()
+  "Profile list buffers render cached relations and open selected rows."
+  (nostr-ui-buffers-test-with-db
+    (nostr-ui-buffers-test-store-event
+     '((id . "bob-profile")
+       (pubkey . "bob-pubkey")
+       (created_at . 90)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"display_name\":\"Bob\",\"nip05\":\"bob@example.test\"}")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "alice-follows")
+       (pubkey . "alice-pubkey")
+       (created_at . 100)
+       (kind . 3)
+       (tags . (("p" "bob-pubkey")))))
+    (let (opened)
+      (cl-letf (((symbol-function 'nostr-relay-fetch-profile) (lambda (&rest _) nil))
+                ((symbol-function 'nostr-profile-open)
+                 (lambda (pubkey) (setq opened pubkey))))
+        (with-temp-buffer
+          (nostr-profile-list-mode)
+          (setq-local nostr-profile-list-owner-pubkey "alice-pubkey")
+          (setq-local nostr-profile-list-kind 'following)
+          (nostr-profile-list-refresh)
+          (let ((text (buffer-string)))
+            (should (string-match-p "\\[Nostr\\]  Following" text))
+            (should (string-match-p "Bob" text))
+            (should (string-match-p "bob@example.test" text)))
+          (goto-char (point-min))
+          (search-forward "Bob")
+          (nostr-profile-list-open-at-point)))
+      (should (equal opened "bob-pubkey")))))
+
 (ert-deftest nostr-profile-mute-and-unmute-use-profile-pubkey ()
   "Profile mute commands publish updates for the displayed account."
   (nostr-ui-buffers-test-with-db
