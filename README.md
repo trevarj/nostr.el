@@ -11,6 +11,18 @@ composition, reactions, reposts, relay management, notifications, search, and
 opt-in inline media previews. A small Rust CLI shim handles signing,
 verification, key generation, and NIP-19 helpers through `nostr-sdk`.
 
+## Screenshots
+
+![nostr.el feed](screenshots/nostr-feed.png)
+
+- [Conversations](screenshots/nostr-conversations.png)
+- [Global](screenshots/nostr-global.png)
+- [My Posts](screenshots/nostr-my-posts.png)
+- [Notifications](screenshots/nostr-notifications.png)
+- [Thread](screenshots/nostr-thread.png)
+- [Profile](screenshots/nostr-profile.png)
+- [Relays](screenshots/nostr-relays.png)
+
 ## Status
 
 This repository is usable for local testing, but not packaged for general
