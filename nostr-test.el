@@ -614,8 +614,10 @@
   "Timeline feed modes render distinct cached event sets."
   (nostr-test-with-db
     (nostr-test-seed-timeline-feeds)
+    (nostr-db-store-discover-result "primal" "global" "trending" "global-root" 1 10 110)
     (let ((home (nostr-test-render-timeline-feed 'feed))
           (replies (nostr-test-render-timeline-feed 'conversations))
+          (discover (nostr-test-render-timeline-feed 'discover))
           (global (nostr-test-render-timeline-feed 'global))
           (posts (nostr-test-render-timeline-feed 'my-posts))
           (media (nostr-test-render-timeline-feed 'media)))
@@ -629,8 +631,11 @@
       (should (string-match-p "home reply" replies))
       (should-not (string-match-p "own reply" replies))
       (should-not (string-match-p "home root" replies))
+      (should (string-match-p "\\[Nostr\\]  Discover" discover))
+      (should (string-match-p "\\[d Discover\\]" discover))
+      (should (string-match-p "global root" discover))
       (should (string-match-p "\\[Nostr\\]  Global" global))
-      (should (string-match-p "\\[G Global\\]" global))
+      (should-not (string-match-p "G Global" global))
       (should (string-match-p "global root" global))
       (should (string-match-p "home root" global))
       (should (string-match-p "home reply" global))
@@ -685,12 +690,96 @@
       (setq-local nostr-timeline-current-pubkey "me")
       (nostr-timeline-refresh)
       (goto-char (point-min))
-      (search-forward "G Global")
+      (search-forward "d Discover")
       (let ((button (button-at (point))))
         (should button)
-        (button-activate button))
-      (should (eq nostr-timeline-feed-kind 'global))
-      (should (string-match-p "\\[G Global\\]" (buffer-string))))))
+        (cl-letf (((symbol-function 'nostr-discover-refresh)
+                   (lambda (&optional _append) nil)))
+          (button-activate button)))
+      (should (eq nostr-timeline-feed-kind 'discover))
+      (should (string-match-p "\\[d Discover\\]" (buffer-string))))))
+
+(ert-deftest nostr-db-discover-feed-uses-provider-order-and-stats ()
+  "Discover selections preserve provider rank and provider stats."
+  (nostr-test-with-db
+    (nostr-test-store-text-note "older" "alice" 100 "older")
+    (nostr-test-store-text-note "newer" "bob" 200 "newer")
+    (nostr-db-store-discover-stats
+     '((event_id . "older") (likes . 9) (replies . 2) (reposts . 3)
+       (zaps . 1) (satszapped . 42) (score . 10) (score24h . 99)))
+    (nostr-db-store-discover-result "primal" "global" "trending" "older" 1 99 300)
+    (nostr-db-store-discover-result "primal" "global" "trending" "newer" 2 10 300)
+    (let ((events (nostr-db-select-discover-feed "primal" "global" "trending" 10)))
+      (should (equal (mapcar (lambda (event) (alist-get 'id event)) events)
+                     '("older" "newer")))
+      (should (= (alist-get 'reactions (car events)) 9))
+      (should (= (alist-get 'replies (car events)) 2))
+      (should (= (alist-get 'reposts (car events)) 3))
+      (should (= (alist-get 'zaps (car events)) 1))
+      (should (= (alist-get 'zap-sats (car events)) 42))
+      (should (= (nostr-db-discover-next-cursor "primal" "global" "trending") 10)))))
+
+(ert-deftest nostr-discover-primal-frames-store-ranked-page ()
+  "Primal cache EVENT/EOSE frames populate Discover cache rows."
+  (nostr-test-with-db
+    (let ((nostr-relay-verify-events nil)
+          (nostr-discover-provider 'primal)
+          (nostr-discover-scope "global")
+          (nostr-discover-timeframe "trending")
+          (state (list :events nil :order nil)))
+      (nostr-discover--handle-frame
+       "wss://cache.example"
+       (json-encode
+        `["EVENT" "sub"
+          ((id . "note-a")
+           (pubkey . "alice")
+           (created_at . 100)
+           (kind . 1)
+           (tags . [])
+           (content . "top")
+           (sig . "sig"))])
+       state nil)
+      (nostr-discover--handle-frame
+       "wss://cache.example"
+       (json-encode
+        `["EVENT" "sub"
+          ((id . "stats-a")
+           (pubkey . "cache")
+           (created_at . 101)
+           (kind . 10000100)
+           (tags . [])
+           (content . ,(json-encode
+                        '((event_id . "note-a")
+                          (likes . 4)
+                          (replies . 3)
+                          (reposts . 2)
+                          (zaps . 1)
+                          (satszapped . 21)
+                          (score . 8)
+                          (score24h . 7))))
+           (sig . "sig"))])
+       state nil)
+      (nostr-discover--handle-frame
+       "wss://cache.example"
+       (json-encode
+        `["EVENT" "sub"
+          ((id . "order")
+           (pubkey . "cache")
+           (created_at . 102)
+           (kind . 10000113)
+           (tags . [])
+           (content . ,(json-encode '((elements . ["note-a"]))))
+           (sig . "sig"))])
+       state nil)
+      (nostr-discover--handle-frame
+       "wss://cache.example"
+       (json-encode ["EOSE" "sub"])
+       state nil)
+      (let ((events (nostr-db-select-discover-feed "primal" "global" "trending" 10)))
+        (should (= (length events) 1))
+        (should (equal (alist-get 'id (car events)) "note-a"))
+        (should (= (alist-get 'reactions (car events)) 4))
+        (should (= (nostr-db-discover-next-cursor "primal" "global" "trending") 7))))))
 
 (ert-deftest nostr-timeline-refresh-backfills-visible-profile-metadata ()
   "Rendering a feed requests missing profile and note metadata."
@@ -1514,7 +1603,9 @@
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "h")) #'nostr-timeline-feed))
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "C")) #'nostr-timeline-conversations))
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "e")) #'nostr-timeline-conversations))
-  (should (eq (lookup-key nostr-timeline-mode-map (kbd "G")) #'nostr-timeline-global))
+  (should (eq (lookup-key nostr-timeline-mode-map (kbd "d")) #'nostr-timeline-discover))
+  (should (eq (lookup-key nostr-timeline-mode-map (kbd ">")) #'nostr-discover-load-more))
+  (should-not (lookup-key nostr-timeline-mode-map (kbd "G")))
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "P")) #'nostr-timeline-my-posts))
   (should-not (lookup-key nostr-timeline-mode-map (kbd "M"))))
 
@@ -1524,7 +1615,8 @@
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "h")) #'nostr-timeline-feed))
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "C")) #'nostr-timeline-conversations))
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "e")) #'nostr-timeline-conversations))
-  (should (eq (lookup-key nostr-notifications-mode-map (kbd "G")) #'nostr-timeline-global))
+  (should (eq (lookup-key nostr-notifications-mode-map (kbd "d")) #'nostr-timeline-discover))
+  (should-not (lookup-key nostr-notifications-mode-map (kbd "G")))
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "P")) #'nostr-timeline-my-posts)))
 
 (ert-deftest nostr-ui-pages-bind-question-mark-to-transients ()

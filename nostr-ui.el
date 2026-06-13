@@ -193,13 +193,26 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-ui-show-global nil
+  "Whether to show the old Global relay stream in primary navigation."
+  :type 'boolean
+  :group 'nostr)
+
 (defconst nostr-ui-primary-nav-items
   '((feed "f" "Feed" nostr-timeline-feed)
     (conversations "C" "Conversations" nostr-timeline-conversations)
+    (discover "d" "Discover" nostr-timeline-discover)
     (global "G" "Global" nostr-timeline-global)
     (my-posts "P" "My Posts" nostr-timeline-my-posts)
     (notifications "N" "Notifications" nostr-notifications-open))
   "Primary Nostr destinations as KIND, key, label, and command.")
+
+(defun nostr-ui--visible-primary-nav-items (items)
+  "Return ITEMS filtered for current navigation customization."
+  (seq-filter (lambda (item)
+                (or nostr-ui-show-global
+                    (not (eq (car item) 'global))))
+              items))
 
 (defun nostr-ui-clear ()
   "Clear current buffer UI state."
@@ -493,7 +506,7 @@ BADGES is a list of strings.  INDENT is inserted before the badge line."
   "Insert primary navigation ITEMS and mark ACTIVE.
 ITEMS is a list of (KIND KEY LABEL COMMAND)."
   (insert (propertize "Views  " 'face 'nostr-ui-meta))
-  (dolist (item items)
+  (dolist (item (nostr-ui--visible-primary-nav-items items))
     (pcase-let ((`(,kind ,key ,label ,command) item))
       (let* ((selected (eq kind active))
              (text (if selected

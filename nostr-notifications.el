@@ -23,6 +23,7 @@
 (declare-function nostr-search-open "nostr-search" (query))
 (declare-function nostr-thread-open "nostr-thread" (event))
 (declare-function nostr-timeline-conversations "nostr-timeline" ())
+(declare-function nostr-timeline-discover "nostr-timeline" ())
 (declare-function nostr-timeline-feed "nostr-timeline" ())
 (declare-function nostr-timeline-global "nostr-timeline" ())
 (declare-function nostr-timeline-my-posts "nostr-timeline" ())
@@ -64,7 +65,7 @@
     (define-key map (kbd "h") #'nostr-timeline-feed)
     (define-key map (kbd "C") #'nostr-timeline-conversations)
     (define-key map (kbd "e") #'nostr-timeline-conversations)
-    (define-key map (kbd "G") #'nostr-timeline-global)
+    (define-key map (kbd "d") #'nostr-timeline-discover)
     (define-key map (kbd "P") #'nostr-timeline-my-posts)
     (define-key map (kbd "N") #'nostr-notifications-open)
     map)
@@ -85,7 +86,7 @@
     ("g" "Refresh" nostr-notifications-refresh)
     ("f" "Feed" nostr-timeline-feed)
     ("C" "Conversations" nostr-timeline-conversations)
-    ("G" "Global" nostr-timeline-global)
+    ("d" "Discover" nostr-timeline-discover)
     ("P" "My posts" nostr-timeline-my-posts)
     ("n" "Next notification" nostr-ui-next-section)
     ("p" "Previous notification" nostr-ui-prev-section)
@@ -386,7 +387,7 @@
              "Mentions, replies, reactions, reposts, and follows will appear here.")))
       (insert (propertize "Database is not open.\n" 'face 'nostr-ui-meta)))
     (nostr-ui-insert-footer
-     '("g refresh" "f feed" "C conv" "G global" "P posts" "RET open" "? actions"))
+     '("g refresh" "f feed" "C conv" "d discover" "P posts" "RET open" "? actions"))
     (nostr-ui-finish-refresh position-state)))
 
 ;;;###autoload

@@ -27,6 +27,7 @@
 (require 'nostr-backend)
 (require 'nostr-actions)
 (require 'nostr-db)
+(require 'nostr-discover)
 (require 'nostr-dispatch)
 (require 'nostr-event)
 (require 'nostr-media)
@@ -241,6 +242,7 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
   ;; Repaint on EOSE (a final render once the sync burst settles) and when a
   ;; previously-hidden Nostr buffer becomes visible again.
   (add-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
+  (add-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (add-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
   (let ((buffer (get-buffer-create nostr-buffer-name)))
     (if nostr-current-pubkey
@@ -265,6 +267,7 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
         nostr--refresh-pending-since nil)
   (remove-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
   (remove-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
+  (remove-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
   (cl-incf nostr--open-generation)
   (nostr-relay-disconnect-all)

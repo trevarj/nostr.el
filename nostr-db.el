@@ -62,7 +62,35 @@ so new columns must be added explicitly."
   (nostr-db--ensure-column "follows" "relay")
   (nostr-db--ensure-column "follows" "petname")
   (nostr-db--ensure-column "notifications" "seen" "integer default 0")
+  (nostr-db--ensure-discover-tables)
   (nostr-db--ensure-event-relays-table))
+
+(defun nostr-db--ensure-discover-tables ()
+  "Ensure provider-ranked Discover cache tables exist."
+  (emacsql nostr-db--connection
+           [:create-table :if-not-exists discover_results
+                          ([provider
+                            scope
+                            timeframe
+                            event_id
+                            (rank integer)
+                            (cursor integer)
+                            (fetched_at integer)]
+                           (:unique [provider scope timeframe event_id]))])
+  (emacsql nostr-db--connection
+           [:create-index :if-not-exists idx_discover_results_feed
+                          :on discover_results ([provider scope timeframe rank])])
+  (emacsql nostr-db--connection
+           [:create-table :if-not-exists discover_stats
+                          ([(event_id :primary-key)
+                            (likes integer)
+                            (replies integer)
+                            (reposts integer)
+                            (zaps integer)
+                            (satszapped integer)
+                            (score integer)
+                            (score24h integer)
+                            (fetched_at integer)])]))
 
 (defun nostr-db--ensure-event-relays-table ()
   "Ensure inbound event relay presence exists and is backfilled."
@@ -193,6 +221,7 @@ so new columns must be added explicitly."
                             state
                             message
                             (updated_at integer)])])
+  (nostr-db--ensure-discover-tables)
   (nostr-db--migrate-existing-schema))
 
 (defun nostr-db-reset (path)
@@ -342,6 +371,105 @@ so new columns must be added explicitly."
 	    (7 (nostr-db-store-reaction-event event))
 	    (9735 (nostr-db-store-zap-event event))
 	    (10002 (nostr-db-store-relay-list-event event))))
+
+(defun nostr-db-clear-discover-results (provider scope timeframe)
+  "Clear cached Discover ordering for PROVIDER, SCOPE, and TIMEFRAME."
+  (emacsql nostr-db--connection
+           [:delete-from discover_results
+                         :where (and (= provider $s1)
+                                     (= scope $s2)
+                                     (= timeframe $s3))]
+           provider scope timeframe))
+
+(defun nostr-db-discover-max-rank (provider scope timeframe)
+  "Return the highest cached Discover rank for PROVIDER, SCOPE, TIMEFRAME."
+  (or (caar (emacsql nostr-db--connection
+                     [:select (funcall max rank)
+                              :from discover_results
+                              :where (and (= provider $s1)
+                                          (= scope $s2)
+                                          (= timeframe $s3))]
+                     provider scope timeframe))
+      0))
+
+(defun nostr-db-store-discover-result
+    (provider scope timeframe event-id rank cursor &optional fetched-at)
+  "Store one provider-ranked Discover EVENT-ID."
+  (emacsql nostr-db--connection
+           [:insert-or-replace :into discover_results
+                               :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
+           provider scope timeframe event-id rank cursor
+           (or fetched-at (truncate (float-time)))))
+
+(defun nostr-db-store-discover-stats (stats &optional fetched-at)
+  "Store Primal Discover STATS alist for one event."
+  (when-let* ((event-id (alist-get 'event_id stats)))
+    (emacsql nostr-db--connection
+             [:insert-or-replace :into discover_stats
+                                 :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9]]
+             event-id
+             (or (alist-get 'likes stats) 0)
+             (or (alist-get 'replies stats) 0)
+             (or (alist-get 'reposts stats) 0)
+             (or (alist-get 'zaps stats) 0)
+             (or (alist-get 'satszapped stats) 0)
+             (or (alist-get 'score stats) 0)
+             (or (alist-get 'score24h stats) 0)
+             (or fetched-at (truncate (float-time))))))
+
+(defun nostr-db--discover-row-to-alist (row)
+  "Convert Discover ROW to an event alist with provider stats."
+  (let ((event (nostr-db--event-row-to-alist (seq-take row 14))))
+    (pcase-let ((`(,_id ,_pubkey ,_created-at ,_kind ,_tags ,_content ,_sig
+                       ,_relay ,_root-id ,_reply-id ,_quote-id ,_name
+                       ,_display-name ,_picture ,likes ,reposts ,replies
+                       ,zaps ,satszapped ,score ,score24h)
+                 row))
+      (append event
+              `((reactions . ,(or likes 0))
+                (reposts . ,(or reposts 0))
+                (replies . ,(or replies 0))
+                (zaps . ,(or zaps 0))
+                (zap-sats . ,(or satszapped 0))
+                (discover-score . ,(or score 0))
+                (discover-score24h . ,(or score24h 0)))))))
+
+(defun nostr-db-select-discover-feed (provider scope timeframe &optional limit)
+  "Return cached Discover notes for PROVIDER, SCOPE, and TIMEFRAME."
+  (mapcar #'nostr-db--discover-row-to-alist
+          (emacsql nostr-db--connection
+                   [:select [events:id events:pubkey events:created_at events:kind
+                             events:tags events:content events:sig events:relay
+                             events:root_id events:reply_id events:quote_id
+                             profiles:name profiles:display_name profiles:picture
+                             discover_stats:likes discover_stats:reposts
+                             discover_stats:replies discover_stats:zaps
+                             discover_stats:satszapped discover_stats:score
+                             discover_stats:score24h]
+                            :from discover_results
+                            :inner :join events :on (= discover_results:event_id events:id)
+                            :left :join profiles :on (= events:pubkey profiles:pubkey)
+                            :left :join discover_stats :on (= events:id discover_stats:event_id)
+                            :where (and (= discover_results:provider $s1)
+                                        (= discover_results:scope $s2)
+                                        (= discover_results:timeframe $s3)
+                                        (= events:kind 1))
+                            :order-by [(asc discover_results:rank)]
+                            :limit $s4]
+                   provider scope timeframe (or limit 100))))
+
+(defun nostr-db-discover-next-cursor (provider scope timeframe)
+  "Return the next Primal Discover cursor for PROVIDER, SCOPE, TIMEFRAME."
+  (caar (emacsql nostr-db--connection
+                 [:select [discover_results:cursor]
+                          :from discover_results
+                          :where (and (= discover_results:provider $s1)
+                                      (= discover_results:scope $s2)
+                                      (= discover_results:timeframe $s3)
+                                      (is-not discover_results:cursor nil))
+                          :order-by [(desc discover_results:rank)]
+                          :limit 1]
+                 provider scope timeframe)))
 
 (defun nostr-db-store-relay-status (url state &optional message)
   "Store relay URL STATE and optional MESSAGE."

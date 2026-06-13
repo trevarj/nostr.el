@@ -16,6 +16,7 @@
 (require 'nostr-actions)
 (require 'nostr-compose)
 (require 'nostr-db)
+(require 'nostr-discover)
 (require 'nostr-dispatch)
 (require 'nostr-notifications)
 (require 'nostr-profile)
@@ -77,7 +78,8 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (define-key map (kbd "h") #'nostr-timeline-feed)
     (define-key map (kbd "C") #'nostr-timeline-conversations)
     (define-key map (kbd "e") #'nostr-timeline-conversations)
-    (define-key map (kbd "G") #'nostr-timeline-global)
+    (define-key map (kbd "d") #'nostr-timeline-discover)
+    (define-key map (kbd ">") #'nostr-discover-load-more)
     (define-key map (kbd "P") #'nostr-timeline-my-posts)
     map)
   "Keymap for `nostr-timeline-mode'.")
@@ -96,7 +98,8 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     ("g" "Refresh" nostr-timeline-refresh)
     ("f" "Feed" nostr-timeline-feed)
     ("C" "Conversations" nostr-timeline-conversations)
-    ("G" "Global" nostr-timeline-global)
+    ("d" "Discover" nostr-timeline-discover)
+    (">" "Load more" nostr-discover-load-more)
     ("P" "My posts" nostr-timeline-my-posts)
     ("c" "Compose" nostr-compose-open)
     ("/" "Search" nostr-search-open)
@@ -123,6 +126,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     ('home "Feed")
     ('conversations "Conversations")
     ('replies "Conversations")
+    ('discover "Discover")
     ('global "Global")
     ('my-posts "My Posts")
     ('media "Media")
@@ -133,6 +137,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
   (pcase nostr-timeline-feed-kind
     ((or 'feed 'home) "Notes from accounts you follow.")
     ((or 'conversations 'replies) "Replies by accounts you follow.")
+    ('discover (nostr-discover-status-line))
     ('global "Recent notes from current relays.")
     ('my-posts "Notes authored by the current account.")
     ('media "Followed-account notes that include media links.")
@@ -145,6 +150,11 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
      (nostr-db-select-account-feed nostr-timeline-current-pubkey nostr-timeline-limit))
     ((or 'conversations 'replies)
      (nostr-db-select-conversations-feed nostr-timeline-current-pubkey nostr-timeline-limit))
+    ('discover (nostr-db-select-discover-feed
+                (symbol-name nostr-discover-provider)
+                nostr-discover-scope
+                nostr-discover-timeframe
+                nostr-timeline-limit))
     ('global (nostr-db-select-global-feed nostr-timeline-limit))
     ('my-posts (nostr-db-select-author-feed nostr-timeline-current-pubkey nostr-timeline-limit))
     ('media (nostr-db-select-media-feed nostr-timeline-current-pubkey nostr-timeline-limit))
@@ -170,20 +180,31 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
       nostr-timeline-current-pubkey
       nostr-timeline-limit))))
 
-(defun nostr-timeline--sync-active-feed ()
-  "Start or stop relay work for the active timeline feed."
-  (if (eq nostr-timeline-feed-kind 'global)
-      (nostr-relay-subscribe-global)
-    (nostr-relay-close-global)))
+(defun nostr-timeline--sync-active-feed (&optional force)
+  "Start or stop relay work for the active timeline feed.
+When FORCE is non-nil, request a fresh provider/relay page."
+  (pcase nostr-timeline-feed-kind
+    ('global (nostr-relay-subscribe-global force))
+    ('discover
+     (nostr-relay-close-global)
+     (unless nostr-discover--loading
+       (pcase-let ((`(,provider ,scope ,timeframe)
+                    (list (symbol-name nostr-discover-provider)
+                          nostr-discover-scope
+                          nostr-discover-timeframe)))
+         (when (or force
+                   (not (nostr-db-select-discover-feed provider scope timeframe 1)))
+           (nostr-discover-refresh)))))
+    (_ (nostr-relay-close-global))))
 
-(defun nostr-timeline-refresh ()
+(defun nostr-timeline-refresh (&optional force)
   "Refresh the current timeline buffer."
-  (interactive)
+  (interactive (list t))
   (let ((inhibit-read-only t)
         (position-state (nostr-ui-capture-position))
         (start (and nostr-debug-logging (float-time)))
         (rendered 0))
-    (nostr-timeline--sync-active-feed)
+    (nostr-timeline--sync-active-feed force)
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      (nostr-timeline--feed-title)
@@ -203,10 +224,16 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
             (nostr-ui-insert-note event)
             (setq rendered (1+ rendered)))
         (nostr-ui-insert-empty-state
-         "No cached notes for this feed."
-         "Use g to refresh, / to search, or c to compose.")))
+         (if (eq nostr-timeline-feed-kind 'discover)
+             "No Discover notes cached yet."
+           "No cached notes for this feed.")
+         (if (eq nostr-timeline-feed-kind 'discover)
+             "Use g to refresh from Primal or > to load more after results arrive."
+           "Use g to refresh, / to search, or c to compose."))))
     (nostr-ui-insert-footer
-     '("g refresh" "c compose" "/ search" "L relays" "? actions"))
+     (if (eq nostr-timeline-feed-kind 'discover)
+         '("g refresh" "> more" "RET thread" "c compose" "? actions")
+       '("g refresh" "c compose" "/ search" "L relays" "? actions")))
     (nostr-ui-finish-refresh position-state)
     (when start
       (nostr-debug-message "timeline refresh: %d notes in %.1f ms"
@@ -249,6 +276,18 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
   "Show recent notes from connected relays."
   (interactive)
   (nostr-timeline-set-feed 'global))
+
+(defun nostr-timeline-discover ()
+  "Show provider-ranked top notes."
+  (interactive)
+  (nostr-timeline-set-feed 'discover))
+
+(defun nostr-discover-load-more ()
+  "Load the next page of Discover notes."
+  (interactive)
+  (unless (eq nostr-timeline-feed-kind 'discover)
+    (user-error "Load more is only available in Discover"))
+  (nostr-discover-refresh 'append))
 
 (defun nostr-timeline-my-posts ()
   "Show cached notes authored by the current account."
