@@ -38,7 +38,13 @@ guix shell -m manifest.scm
 From the repository root:
 
 ```sh
-guix shell -m manifest.scm -- env CC=gcc cargo build --release
+guix shell -m manifest.scm
+```
+
+Then build:
+
+```sh
+env CC=gcc cargo build --release
 ```
 
 The binary will be:
@@ -52,11 +58,10 @@ Either put that binary on `PATH`, or point Emacs at it with
 
 ## use-package
 
-For a local checkout:
-
 ```elisp
 (use-package nostr
-  :load-path "/home/trev/Workspace/nostr.el"
+  :vc (:url "https://github.com/trevarj/nostr.el"
+       :branch "master")
   :commands (nostr-open
              nostr-close
              nostr-create-note
@@ -65,8 +70,7 @@ For a local checkout:
              nostr-generate-private-key
              nostr-setup-import-private-key)
   :custom
-  (nostr-backend-command
-   "/home/trev/Workspace/nostr.el/target/release/nostr-el-backend")
+  (nostr-backend-command "nostr-el-backend")
   (nostr-private-key-path
    (expand-file-name "nostr-private.gpg" user-emacs-directory))
   (nostr-db-path
@@ -75,30 +79,8 @@ For a local checkout:
    '("wss://relay.primal.net" "wss://relay.damus.io")))
 ```
 
-With `straight.el`:
-
-```elisp
-(use-package nostr
-  :straight (:type git
-             :host github
-             :repo "tmarjeski/nostr.el"
-             :files ("*.el"))
-  :commands (nostr-open
-             nostr-close
-             nostr-create-note
-             nostr-check-backend
-             nostr-account-status
-             nostr-generate-private-key
-             nostr-setup-import-private-key)
-  :custom
-  (nostr-backend-command "/path/to/nostr-el-backend")
-  (nostr-private-key-path
-   (expand-file-name "nostr-private.gpg" user-emacs-directory))
-  (nostr-db-path
-   (expand-file-name "nostr-db.sqlite" user-emacs-directory)))
-```
-
-Replace `/path/to/nostr-el-backend` with a built or downloaded backend binary.
+Set `nostr-backend-command` to an absolute path if `nostr-el-backend` is not on
+`exec-path`.
 
 ## First Run
 
@@ -109,23 +91,8 @@ Replace `/path/to/nostr-el-backend` with a built or downloaded backend binary.
    existing secret with `M-x nostr-setup-import-private-key`.
 5. Run `M-x nostr-open`.
 
-Primary timeline keys:
-
-- `g`: refresh
-- `c`: compose
-- `RET`: open thread
-- `a`: open author
-- `r`: reply
-- `l`: like
-- `R`: repost
-- `Q`: quote
-- `/`: search
-- `N`: notifications
-- `L`: relays
-- `S`: account/setup status
-- `w`: copy NIP-19 identifier
-- `b`: open selected note/profile in a browser
-- `?`: transient command menu
+Most buffers expose their actions through `?`, which opens the buffer-local
+transient menu.
 
 Inline media is opt-in. Use `M-x nostr-media-load-at-point` on a media
 placeholder, or set `nostr-media-auto-preview` after reviewing the size and
@@ -149,11 +116,18 @@ release binary themselves and set `nostr-backend-command`.
 Run the offline suite:
 
 ```sh
-guix shell -m manifest.scm -- env CC=gcc cargo test
-guix shell -m manifest.scm -- env CC=gcc cargo fmt --check
-guix shell -m manifest.scm -- emacs --batch -Q -L . -L tests \
+guix shell -m manifest.scm
+```
+
+Then run:
+
+```sh
+env CC=gcc cargo test
+env CC=gcc cargo fmt --check
+emacs --batch -Q -L . -L tests \
   -l bech32-test.el \
   -l nostr-test.el \
+  -l tests/nostr-ui-card-test.el \
   -l tests/nostr-ui-buffers-test.el \
   -l tests/nostr-operational-buffers-test.el \
   -l tests/nostr-media-nip-test.el \
@@ -168,7 +142,13 @@ guix shell -m manifest.scm -- emacs --batch -Q -L . -L tests \
 Run the opt-in live relay receive smoke:
 
 ```sh
-NOSTR_LIVE_RELAY_TEST=1 guix shell -m manifest.scm -- emacs --batch -Q -L . -L tests \
+guix shell -m manifest.scm
+```
+
+Then run:
+
+```sh
+NOSTR_LIVE_RELAY_TEST=1 emacs --batch -Q -L . -L tests \
   -l tests/nostr-live-relay-smoke-test.el \
   --eval '(setq nostr-backend-command (expand-file-name "target/release/nostr-el-backend" default-directory))' \
   -f ert-run-tests-batch-and-exit
@@ -177,7 +157,13 @@ NOSTR_LIVE_RELAY_TEST=1 guix shell -m manifest.scm -- emacs --batch -Q -L . -L t
 Run the opt-in live relay publish smoke:
 
 ```sh
-NOSTR_LIVE_RELAY_PUBLISH_TEST=1 guix shell -m manifest.scm -- emacs --batch -Q -L . -L tests \
+guix shell -m manifest.scm
+```
+
+Then run:
+
+```sh
+NOSTR_LIVE_RELAY_PUBLISH_TEST=1 emacs --batch -Q -L . -L tests \
   -l tests/nostr-live-relay-smoke-test.el \
   --eval '(setq nostr-backend-command (expand-file-name "target/release/nostr-el-backend" default-directory))' \
   -f ert-run-tests-batch-and-exit
