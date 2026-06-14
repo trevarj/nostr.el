@@ -1204,6 +1204,20 @@
     (should (equal (nostr-actions--reaction-choice-label-4) "👀"))
     (should (equal (nostr-actions--reaction-choice-label-5) "💜"))))
 
+(ert-deftest nostr-actions-reaction-menu-does-not-echo-choice-list ()
+  "Opening the reaction transient does not also echo the choices."
+  (let ((event '((id . "note1")))
+        messages opened)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages)))
+              ((symbol-function 'nostr-actions-reaction-transient)
+               (lambda () (setq opened t))))
+      (nostr-actions-react-menu event))
+    (should opened)
+    (should (equal nostr-actions--reaction-event event))
+    (should-not messages)))
+
 (ert-deftest nostr-compose-extra-tags-are-sent ()
   (let (captured-kind captured-tags captured-content stored-event hook-event)
     (cl-letf (((symbol-function 'nostr-backend-sign-event)

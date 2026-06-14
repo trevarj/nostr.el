@@ -160,7 +160,6 @@
   "Open a transient reaction menu for EVENT."
   (interactive)
   (setq nostr-actions--reaction-event event)
-  (message "Reactions: %s" (string-join (seq-take nostr-reaction-choices 5) " "))
   (nostr-actions-reaction-transient))
 
 (defun nostr-actions-repost (event)
