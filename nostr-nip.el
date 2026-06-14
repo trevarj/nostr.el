@@ -27,6 +27,11 @@
   :type 'number
   :group 'nostr)
 
+(defcustom nostr-nip05-max-response-bytes (* 64 1024)
+  "Maximum NIP-05 JSON response size accepted for verification."
+  :type 'integer
+  :group 'nostr)
+
 (defvar nostr-nip05-fetch-function nil
   "Optional test hook for NIP-05 fetches.
 The function receives URL, SUCCESS and ERROR callbacks.  SUCCESS receives JSON
@@ -102,6 +107,13 @@ text.  ERROR receives a human-readable message.")
                        (string-equal-ignore-case (symbol-name key) name))
              return value)))
 
+(defun nostr-nip05--validate-response-size (identifier json-text)
+  "Signal if IDENTIFIER's NIP-05 JSON-TEXT exceeds the size limit."
+  (when (> (string-bytes json-text) nostr-nip05-max-response-bytes)
+    (error "NIP-05 response for %s exceeds %s bytes"
+           identifier
+           nostr-nip05-max-response-bytes)))
+
 (defun nostr-nip05-verify (identifier pubkey success error)
   "Verify IDENTIFIER resolves to PUBKEY.
 SUCCESS receives an alist with identifier, pubkey, verified, and url.  ERROR
@@ -111,7 +123,13 @@ receives a human-readable message."
      url
      (lambda (json-text)
        (condition-case err
-           (let ((resolved (nostr-nip05--response-pubkey identifier json-text)))
+           (let ((resolved (progn
+                             (nostr-nip05--validate-response-size
+                              identifier
+                              json-text)
+                             (nostr-nip05--response-pubkey
+                              identifier
+                              json-text))))
              (funcall success
                       `((identifier . ,identifier)
                         (pubkey . ,pubkey)

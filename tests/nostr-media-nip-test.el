@@ -35,6 +35,33 @@
                          (nostr-media-cache-file url))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-media-cache-write-replaces-symlink ()
+  "Media cache writes replace an existing symlink instead of following it."
+  (let* ((dir (make-temp-file "nostr-media-symlink-test" t))
+         (url "https://example.com/picture.png")
+         (nostr-media-cache-directory dir)
+         (cache-file (nostr-media-cache-file url))
+         (target-file (expand-file-name "target" dir)))
+    (unwind-protect
+        (progn
+          (write-region "keep me" nil target-file nil 'silent)
+          (make-symbolic-link target-file cache-file)
+          (should (file-symlink-p cache-file))
+          (should (equal (nostr-media--write-cache
+                          url
+                          '(("content-type" . "image/png")
+                            ("content-length" . "8"))
+                          "PNGDATA!")
+                         cache-file))
+          (should-not (file-symlink-p cache-file))
+          (with-temp-buffer
+            (insert-file-contents-literally target-file)
+            (should (equal (buffer-string) "keep me")))
+          (with-temp-buffer
+            (insert-file-contents-literally cache-file)
+            (should (equal (buffer-string) "PNGDATA!"))))
+      (delete-directory dir t))))
+
 (ert-deftest nostr-media-image-rendering-is-size-constrained ()
   "Inline image rendering passes max dimensions to `create-image'."
   (let ((url "https://example.com/picture.png")
@@ -245,6 +272,15 @@
     (let ((result (nostr-nip05-verify-sync "alice@example.com" "pubkey-1")))
       (should-not (alist-get 'verified result))
       (should (equal (alist-get 'resolved-pubkey result) "pubkey-2")))))
+
+(ert-deftest nostr-nip05-rejects-oversized-response ()
+  "NIP-05 verification refuses to parse oversized remote JSON."
+  (let ((nostr-nip05-max-response-bytes 8)
+        (nostr-nip05-fetch-function
+         (lambda (_url success _error)
+           (funcall success "{\"names\":{\"alice\":\"pubkey-1\"}}"))))
+    (should-error (nostr-nip05-verify-sync "alice@example.com" "pubkey-1")
+                  :type 'error)))
 
 (ert-deftest nostr-nip19-sync-wrappers-use-backend-protocol ()
   "NIP-19 sync helpers pass the expected command payloads to the backend."

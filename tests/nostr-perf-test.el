@@ -315,6 +315,66 @@
       (when (timerp nostr-relay--verify-drain-timer)
         (cancel-timer nostr-relay--verify-drain-timer)))))
 
+(ert-deftest nostr-verification-queue-is-bounded ()
+  "Relay event verification drops excess queued events before memory grows."
+  (let ((nostr-db--connection (emacsql-sqlite-open nil)))
+    (unwind-protect
+        (let ((nostr-relay-verify-events t)
+              (nostr-relay--verify-inflight 1)
+              (nostr-relay-max-concurrent-verifications 1)
+              (nostr-relay-max-queued-verifications 1)
+              (nostr-relay--verify-queue
+               (list (cons "wss://relay" '((id . "queued"))))))
+          (nostr-db-init)
+          (cl-letf (((symbol-function 'nostr-relay--start-verification)
+                     (lambda (&rest _)
+                       (ert-fail "full verification queue should not start more work"))))
+            (should (eq (nostr-relay--handle-event
+                         "wss://relay"
+                         "sub"
+                         '((id . "dropped")
+                           (pubkey . "alice")
+                           (created_at . 1)
+                           (kind . 1)
+                           (tags . [])
+                           (content . "hello")
+                           (sig . "sig")))
+                        'dropped-verification))
+            (should (= (length nostr-relay--verify-queue) 1))
+            (should (equal (emacsql nostr-db--connection
+                                    [:select [state message]
+                                             :from relay_status
+                                             :where (= url "wss://relay")])
+                           '(("dropped-event"
+                              "dropped verification queue full"))))))
+      (emacsql-close nostr-db--connection))))
+
+(ert-deftest nostr-close-subscription-all-tracks-relay-local-state ()
+  "A CLOSED from one relay does not hide the same sub-id on another relay."
+  (let ((nostr-db--connection (emacsql-sqlite-open nil))
+        (nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        sent)
+    (unwind-protect
+        (progn
+          (nostr-db-init)
+          (puthash "wss://one" t nostr-relay--connections)
+          (puthash "wss://two" t nostr-relay--connections)
+          (cl-letf (((symbol-function 'nostr-relay--send)
+                     (lambda (url message)
+                       (push (list url message) sent))))
+            (nostr-relay-subscribe "wss://one" "shared-sub" '((("kinds" . (1)))))
+            (nostr-relay-subscribe "wss://two" "shared-sub" '((("kinds" . (1)))))
+            (nostr-relay-handle-frame
+             "wss://one"
+             (json-encode '("CLOSED" "shared-sub" "closed by relay")))
+            (nostr-relay-close-subscription-all "shared-sub")
+            (should (member '("wss://two" ["CLOSE" "shared-sub"]) sent))
+            (should-not (member '("wss://one" ["CLOSE" "shared-sub"]) sent))
+            (should-not (nostr-relay--subscription-active-p
+                         "wss://two" "shared-sub"))))
+      (emacsql-close nostr-db--connection))))
+
 ;;; Stage 1 --- visibility gating
 
 (ert-deftest nostr-refresh-skips-invisible-buffers ()

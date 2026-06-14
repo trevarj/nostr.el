@@ -473,7 +473,7 @@
         (delete-file file)))))
 
 (ert-deftest nostr-compose-draft-files-are-owner-only ()
-  "Compose autosave and history files are written with owner-only modes."
+  "Compose autosave/history files and draft directories are owner-only."
   (let ((dir (make-temp-file "nostr-compose-draft-dir" t)))
     (unwind-protect
         (let ((nostr-compose-draft-directory dir)
@@ -486,10 +486,52 @@
             (should nostr-compose-draft-file)
             (should (= (logand (file-modes nostr-compose-draft-file) #o777)
                        #o600)))
+          (should (= (logand (file-modes dir) #o777) #o700))
           (nostr-compose--write-draft-history
            '(((content . "historical private draft"))))
           (should (= (logand (file-modes (nostr-compose--draft-history-path)) #o777)
                      #o600)))
+      (delete-directory dir t))))
+
+(ert-deftest nostr-compose-custom-draft-history-directory-is-private ()
+  "Custom draft history directories are created with owner-only modes."
+  (let* ((dir (make-temp-file "nostr-compose-history-dir" t))
+         (history-dir (expand-file-name "nested" dir))
+         (nostr-compose-draft-history-file
+          (expand-file-name "history.el" history-dir)))
+    (unwind-protect
+        (progn
+          (nostr-compose--write-draft-history
+           '(((content . "historical private draft"))))
+          (should (= (logand (file-modes history-dir) #o777) #o700))
+          (should (= (logand (file-modes nostr-compose-draft-history-file) #o777)
+                     #o600)))
+      (delete-directory dir t))))
+
+(ert-deftest nostr-compose-draft-write-replaces-symlink ()
+  "Draft writes replace an existing symlink instead of following it."
+  (let* ((dir (make-temp-file "nostr-compose-draft-symlink-dir" t))
+         (draft-file (expand-file-name "draft.el" dir))
+         (target-file (expand-file-name "target.el" dir))
+         (nostr-compose-draft-directory dir)
+         (nostr-compose-draft-file draft-file))
+    (unwind-protect
+        (progn
+          (write-region "keep me" nil target-file nil 'silent)
+          (make-symbolic-link target-file draft-file)
+          (should (file-symlink-p draft-file))
+          (with-temp-buffer
+            (nostr-compose-mode)
+            (setq nostr-compose-content-start (copy-marker (point-min)))
+            (insert "private draft text")
+            (nostr-compose--save-draft))
+          (should-not (file-symlink-p draft-file))
+          (with-temp-buffer
+            (insert-file-contents-literally target-file)
+            (should (equal (buffer-string) "keep me")))
+          (let ((draft (nostr-compose--read-draft-data draft-file)))
+            (should (equal (alist-get 'content draft)
+                           "private draft text"))))
       (delete-directory dir t))))
 
 (ert-deftest nostr-compose-backend-errors-redact-secret-diagnostics ()

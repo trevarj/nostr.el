@@ -98,6 +98,14 @@ number of `nostr-el-backend verify-event' subprocesses."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-max-queued-verifications 256
+  "Maximum number of relay events waiting for signature verification.
+When the queue is full, additional events are dropped before spawning backend
+processes or storing unverified data.  This bounds memory growth when a relay
+floods the client faster than signatures can be checked."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-relay-sync-timeout-seconds 12
   "Maximum seconds to treat the client as still doing its initial sync.
 While syncing, UI refreshes are throttled (see `nostr--schedule-refresh').
@@ -448,9 +456,30 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
     (when (websocket-openp ws)
       (websocket-send-text ws (json-encode message)))))
 
+(defun nostr-relay--subscription-key (url sub-id)
+  "Return the relay-local subscription key for URL and SUB-ID."
+  (concat url "\0" sub-id))
+
+(defun nostr-relay--subscription-active-p (url sub-id)
+  "Return non-nil when SUB-ID is active on URL."
+  (gethash (nostr-relay--subscription-key url sub-id)
+           nostr-relay--subscriptions))
+
+(defun nostr-relay--remove-subscription-all (sub-id)
+  "Forget SUB-ID across every relay."
+  (let (keys)
+    (maphash (lambda (key _value)
+               (when (string-suffix-p (concat "\0" sub-id) key)
+                 (push key keys)))
+             nostr-relay--subscriptions)
+    (dolist (key keys)
+      (remhash key nostr-relay--subscriptions))))
+
 (defun nostr-relay-subscribe (url sub-id filters)
   "Subscribe to URL with SUB-ID and FILTERS."
-  (puthash sub-id t nostr-relay--subscriptions)
+  (puthash (nostr-relay--subscription-key url sub-id)
+           t
+           nostr-relay--subscriptions)
   (nostr-relay--send url (vconcat `["REQ" ,sub-id] filters)))
 
 (defun nostr-relay--connection-open-p (url)
@@ -477,15 +506,16 @@ Unit tests use t as a lightweight connection sentinel."
 (defun nostr-relay-close-subscription (url sub-id)
   "Close SUB-ID on relay URL."
   (nostr-relay--send url `["CLOSE" ,sub-id])
-  (remhash sub-id nostr-relay--subscriptions))
+  (remhash (nostr-relay--subscription-key url sub-id)
+           nostr-relay--subscriptions))
 
 (defun nostr-relay-close-subscription-all (sub-id)
   "Close SUB-ID on every connected relay."
-  (when (gethash sub-id nostr-relay--subscriptions)
-    (maphash (lambda (url _ws)
-               (nostr-relay--send url `["CLOSE" ,sub-id]))
-             nostr-relay--connections)
-    (remhash sub-id nostr-relay--subscriptions)))
+  (maphash (lambda (url _ws)
+             (when (nostr-relay--subscription-active-p url sub-id)
+               (nostr-relay--send url `["CLOSE" ,sub-id])))
+           nostr-relay--connections)
+  (nostr-relay--remove-subscription-all sub-id))
 
 (defun nostr-relay--client-message-event-id (client-message)
   "Return event id from relay-ready CLIENT-MESSAGE, when available."
@@ -644,15 +674,23 @@ queued event) when the verification resolves."
 (defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
 When `nostr-relay-verify-events' is non-nil, verification subprocesses are
-bounded by `nostr-relay-max-concurrent-verifications'; events arriving while
-at the cap are queued (never dropped) and dispatched as verifications finish."
+bounded by `nostr-relay-max-concurrent-verifications'.  Events arriving while
+at the cap are queued up to `nostr-relay-max-queued-verifications'."
   (nostr-relay--maybe-fetch-profile-search-author sub-id event)
   (if (or (not nostr-relay-verify-events)
           (nostr-relay--primal-profile-search-event-p url sub-id event))
       (nostr-relay--store-verified-event url event)
     (if (>= nostr-relay--verify-inflight
             nostr-relay-max-concurrent-verifications)
-        (progn
+        (if (>= (length nostr-relay--verify-queue)
+                nostr-relay-max-queued-verifications)
+            (progn
+              (nostr-db-store-relay-status
+               url
+               "dropped-event"
+               (format "%s verification queue full"
+                       (or (alist-get 'id event) "(unknown event)")))
+              'dropped-verification)
           (setq nostr-relay--verify-queue
                 (nconc nostr-relay--verify-queue (list (cons url event))))
           'pending-verification)
@@ -708,7 +746,8 @@ at the cap are queued (never dropped) and dispatched as verifications finish."
     (`("NOTICE" . ,rest)
      (nostr-db-store-relay-status url "notice" (car rest)))
     (`("CLOSED" ,sub-id . ,rest)
-     (remhash sub-id nostr-relay--subscriptions)
+     (remhash (nostr-relay--subscription-key url sub-id)
+              nostr-relay--subscriptions)
      (nostr-relay--note-profile-eose sub-id)
      (nostr-relay--note-search-eose sub-id)
      (remhash sub-id nostr-relay--search-profile-queries)

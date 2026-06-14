@@ -416,6 +416,33 @@ smaller frames."
   (or nostr-compose-draft-history-file
       (expand-file-name "history.el" nostr-compose-draft-directory)))
 
+(defun nostr-compose--ensure-draft-directory ()
+  "Ensure `nostr-compose-draft-directory' exists with private permissions."
+  (make-directory nostr-compose-draft-directory t)
+  (set-file-modes nostr-compose-draft-directory #o700))
+
+(defun nostr-compose--ensure-private-directory (directory)
+  "Ensure DIRECTORY exists with private permissions."
+  (make-directory directory t)
+  (set-file-modes directory #o700))
+
+(defun nostr-compose--write-private-elisp-file (file data)
+  "Write DATA to FILE as an owner-only Elisp file via atomic replacement."
+  (let* ((directory (file-name-directory file))
+         (temp-file (make-temp-file (expand-file-name ".nostr-compose-" directory))))
+    (unwind-protect
+        (progn
+          (with-file-modes #o600
+            (with-temp-file temp-file
+              (let ((print-length nil)
+                    (print-level nil))
+                (prin1 data (current-buffer)))))
+          (rename-file temp-file file t)
+          (set-file-modes file #o600)
+          file)
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
 (defun nostr-compose--read-draft-data (file)
   "Read draft data from FILE, returning nil if it cannot be read."
   (when (and file (file-readable-p file))
@@ -446,12 +473,11 @@ smaller frames."
 
 (defun nostr-compose--write-draft-history (history)
   "Persist compose draft HISTORY."
-  (make-directory (file-name-directory (nostr-compose--draft-history-path)) t)
-  (with-file-modes #o600
-    (with-temp-file (nostr-compose--draft-history-path)
-      (let ((print-length nil)
-            (print-level nil))
-        (prin1 history (current-buffer))))))
+  (let ((file (nostr-compose--draft-history-path)))
+    (if nostr-compose-draft-history-file
+        (nostr-compose--ensure-private-directory (file-name-directory file))
+      (nostr-compose--ensure-draft-directory))
+    (nostr-compose--write-private-elisp-file file history)))
 
 (defun nostr-compose--record-draft (&optional draft)
   "Record DRAFT or the current buffer content in reusable history."
@@ -488,17 +514,15 @@ smaller frames."
                (not nostr-compose--sent)
                (not nostr-compose--uploading)
                (not (string-empty-p (string-trim (or content "")))))
-    (make-directory nostr-compose-draft-directory t)
+    (nostr-compose--ensure-draft-directory)
     (unless nostr-compose-draft-file
       (setq nostr-compose-draft-file
             (expand-file-name
              (format "draft-%s.el" (format-time-string "%Y%m%d%H%M%S%N"))
              nostr-compose-draft-directory)))
-    (with-file-modes #o600
-      (with-temp-file nostr-compose-draft-file
-        (let ((print-length nil)
-              (print-level nil))
-          (prin1 (nostr-compose--draft-data) (current-buffer))))))))
+    (nostr-compose--write-private-elisp-file
+     nostr-compose-draft-file
+     (nostr-compose--draft-data)))))
 
 (defun nostr-compose--delete-draft ()
   "Delete the current draft autosave file."

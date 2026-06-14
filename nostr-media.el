@@ -90,6 +90,21 @@ binary DATA.  ERROR receives a human-readable message.")
 (defvar nostr-media--recent-failures (make-hash-table :test #'equal)
   "Recently failed media URLs, mapped to cons cells of time and message.")
 
+(defun nostr-media--atomic-write-file (file data)
+  "Write binary DATA to FILE by replacing it atomically."
+  (let* ((directory (file-name-directory file))
+         (temp-file (make-temp-file (expand-file-name ".nostr-media-" directory))))
+    (unwind-protect
+        (progn
+          (with-file-modes #o600
+            (with-temp-file temp-file
+              (set-buffer-multibyte nil)
+              (insert data)))
+          (rename-file temp-file file t)
+          file)
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
 (defun nostr-media--url-extension (url)
   "Return a cache file extension for URL."
   (let* ((parsed (url-generic-parse-url url))
@@ -139,11 +154,7 @@ binary DATA.  ERROR receives a human-readable message.")
   "Validate and cache downloaded DATA for URL with HEADERS."
   (nostr-media--validate-response url headers data)
   (make-directory nostr-media-cache-directory t)
-  (let ((file (nostr-media-cache-file url)))
-    (with-temp-file file
-      (set-buffer-multibyte nil)
-      (insert data))
-    file))
+  (nostr-media--atomic-write-file (nostr-media-cache-file url) data))
 
 (defun nostr-media--url-buffer-headers ()
   "Return HTTP headers from a `url-retrieve' buffer."
