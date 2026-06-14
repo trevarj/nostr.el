@@ -18,6 +18,9 @@
 
 (declare-function make-websocket "websocket")
 
+(defvar nostr-compose-test--read-eval-triggered nil
+  "Non-nil if a malicious draft read evaluated reader forms.")
+
 (defmacro nostr-operational-test--with-db (&rest body)
   "Run BODY with a temporary Nostr database."
   (declare (indent 0))
@@ -455,6 +458,49 @@
             (kill-buffer nostr-buffer-name))
           (when (file-exists-p path)
             (delete-file path)))))))
+
+(ert-deftest nostr-compose-draft-reader-disables-read-eval ()
+  "Draft restore does not evaluate reader forms from draft files."
+  (let ((file (make-temp-file "nostr-compose-malicious-draft" nil ".el"))
+        (nostr-compose-test--read-eval-triggered nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#.(progn (setq nostr-compose-test--read-eval-triggered t) '((content . \"pwned\")))"))
+          (should-not (nostr-compose--read-draft-data file))
+          (should-not nostr-compose-test--read-eval-triggered))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest nostr-compose-draft-files-are-owner-only ()
+  "Compose autosave and history files are written with owner-only modes."
+  (let ((dir (make-temp-file "nostr-compose-draft-dir" t)))
+    (unwind-protect
+        (let ((nostr-compose-draft-directory dir)
+              (nostr-compose-draft-history-file nil))
+          (with-temp-buffer
+            (nostr-compose-mode)
+            (setq nostr-compose-content-start (copy-marker (point-min)))
+            (insert "private draft text")
+            (nostr-compose--save-draft)
+            (should nostr-compose-draft-file)
+            (should (= (logand (file-modes nostr-compose-draft-file) #o777)
+                       #o600)))
+          (nostr-compose--write-draft-history
+           '(((content . "historical private draft"))))
+          (should (= (logand (file-modes (nostr-compose--draft-history-path)) #o777)
+                     #o600)))
+      (delete-directory dir t))))
+
+(ert-deftest nostr-compose-backend-errors-redact-secret-diagnostics ()
+  "Compose backend error messages do not echo secret-bearing diagnostics."
+  (let ((message (nostr-compose--backend-error-message
+                  '((error . ((message . "backend rejected request"))))
+                  "{\"secret_key\":\"nsec1qqqqqqqq\"}"
+                  "backend error")))
+    (should (string-match-p "backend rejected request" message))
+    (should-not (string-match-p "secret_key\":\"nsec1qqqqqqqq" message))
+    (should-not (string-match-p "nsec1qqqqqqqq" message))))
 
 (ert-deftest nostr-e2e-major-interactive-buffers-render ()
   "Exercise primary interactive buffers against one realistic local cache."

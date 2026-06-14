@@ -27,6 +27,7 @@
 
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
+(defvar read-eval)
 (defvar url-request-data)
 (defvar url-request-extra-headers)
 (defvar url-request-method)
@@ -300,9 +301,19 @@ smaller frames."
 
 (defun nostr-compose--sanitize-upload-error (message)
   "Return upload error MESSAGE without embedded binary request data."
-  (if (string-match "\\`Multibyte text in HTTP request:" message)
-      "Could not build binary upload request"
-    (truncate-string-to-width message 240 nil nil "...")))
+  (let ((sanitized (nostr-backend-sanitize-diagnostic (or message ""))))
+    (if (string-match "\\`Multibyte text in HTTP request:" sanitized)
+        "Could not build binary upload request"
+      (truncate-string-to-width sanitized 240 nil nil "..."))))
+
+(defun nostr-compose--backend-error-message (response stderr fallback)
+  "Return sanitized backend error text from RESPONSE, STDERR, or FALLBACK."
+  (let* ((message (nostr-backend-sanitize-diagnostic
+                   (or (alist-get 'message (alist-get 'error response))
+                       fallback)))
+         (stderr-text (nostr-compose--sanitize-upload-error (or stderr ""))))
+    (concat message
+            (if (string-empty-p stderr-text) "" (concat ": " stderr-text)))))
 
 (defun nostr-compose--read-file-bytes (file)
   "Return unibyte contents of FILE."
@@ -369,11 +380,10 @@ smaller frames."
                               (error-message-string err))))))))
      (lambda (response stderr _status)
        (funcall error file
-                (format "Could not authorize %s: %s%s"
+                (format "Could not authorize %s: %s"
                         file
-                        (or (alist-get 'message (alist-get 'error response))
-                            "backend error")
-                        (if (string-empty-p stderr) "" (concat ": " stderr))))))))
+                        (nostr-compose--backend-error-message
+                         response stderr "backend error")))))))
 
 (defun nostr-compose--upload-attachments (paths success error &optional uploads)
   "Upload PATHS, then call SUCCESS with UPLOADS alist."
@@ -409,11 +419,12 @@ smaller frames."
 (defun nostr-compose--read-draft-data (file)
   "Read draft data from FILE, returning nil if it cannot be read."
   (when (and file (file-readable-p file))
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents file)
-          (read (current-buffer)))
-      (error nil))))
+    (let ((read-eval nil))
+      (condition-case nil
+          (with-temp-buffer
+            (insert-file-contents file)
+            (read (current-buffer)))
+        (error nil)))))
 
 (defun nostr-compose--same-draft-p (a b)
   "Return non-nil when draft A and B represent the same reusable content."
@@ -436,10 +447,11 @@ smaller frames."
 (defun nostr-compose--write-draft-history (history)
   "Persist compose draft HISTORY."
   (make-directory (file-name-directory (nostr-compose--draft-history-path)) t)
-  (with-temp-file (nostr-compose--draft-history-path)
-    (let ((print-length nil)
-          (print-level nil))
-      (prin1 history (current-buffer)))))
+  (with-file-modes #o600
+    (with-temp-file (nostr-compose--draft-history-path)
+      (let ((print-length nil)
+            (print-level nil))
+        (prin1 history (current-buffer))))))
 
 (defun nostr-compose--record-draft (&optional draft)
   "Record DRAFT or the current buffer content in reusable history."
@@ -482,10 +494,11 @@ smaller frames."
             (expand-file-name
              (format "draft-%s.el" (format-time-string "%Y%m%d%H%M%S%N"))
              nostr-compose-draft-directory)))
-    (with-temp-file nostr-compose-draft-file
-      (let ((print-length nil)
-            (print-level nil))
-        (prin1 (nostr-compose--draft-data) (current-buffer)))))))
+    (with-file-modes #o600
+      (with-temp-file nostr-compose-draft-file
+        (let ((print-length nil)
+              (print-level nil))
+          (prin1 (nostr-compose--draft-data) (current-buffer))))))))
 
 (defun nostr-compose--delete-draft ()
   "Delete the current draft autosave file."
@@ -741,9 +754,9 @@ With FORCE, close without prompting."
          (with-current-buffer buffer
            (setq nostr-compose--uploading nil)
            (force-mode-line-update)))
-       (message "Nostr signing failed: %s%s"
-                (or (alist-get 'message (alist-get 'error response)) "backend error")
-                (if (string-empty-p stderr) "" (concat ": " stderr)))))))
+       (message "Nostr signing failed: %s"
+                (nostr-compose--backend-error-message
+                 response stderr "backend error"))))))
 
 (defun nostr-compose-send ()
   "Upload attachments, then sign and send the current compose buffer."

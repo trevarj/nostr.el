@@ -85,12 +85,21 @@
                      (cons 1
                            '((ok . nil)
                              (error . ((code . "invalid-key")
-                                       (message . "Invalid secret key"))))))))
+                                       (message . "Invalid secret key: nsec-secret-that-must-not-leak"))))))))
           (let* ((err (should-error (nostr-setup-derive-pubkey)))
                  (message (error-message-string err)))
             (should (string-match-p "invalid-key" message))
             (should-not (string-match-p "nsec-secret-that-must-not-leak" message))))
       (delete-file nostr-private-key-path))))
+
+(ert-deftest nostr-backend-sanitize-diagnostic-redacts-secret-fields ()
+  "Backend diagnostics redact JSON and key/value secret fields."
+  (let ((message (nostr-backend-sanitize-diagnostic
+                  "{\"secret_key\":\"nsec1qqqqqqqq\"} secret_key=hex-secret"
+                  '("hex-secret"))))
+    (should (string-match-p "\\[redacted-secret\\]" message))
+    (should-not (string-match-p "nsec1qqqqqqqq" message))
+    (should-not (string-match-p "hex-secret" message))))
 
 (ert-deftest nostr-setup-import-private-key-validates-and-encrypts ()
   "Private key import validates the secret and stores only encrypted output."

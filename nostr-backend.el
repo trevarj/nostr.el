@@ -30,6 +30,28 @@
   :type 'string
   :group 'nostr)
 
+(defun nostr-backend-sanitize-diagnostic (text &optional secrets)
+  "Return TEXT with backend secret material redacted.
+SECRETS is an optional list of exact sensitive strings to remove from TEXT."
+  (when (stringp text)
+    (let ((sanitized text))
+      (dolist (secret secrets)
+        (when (and (stringp secret) (not (string-empty-p secret)))
+          (setq sanitized
+                (replace-regexp-in-string
+                 (regexp-quote secret) "[redacted-secret]" sanitized t t))))
+      (setq sanitized
+            (replace-regexp-in-string
+             "\\(\"secret_key\"[[:space:]]*:[[:space:]]*\"\\)[^\"]+\\(\"\\)"
+             "\\1[redacted-secret]\\2" sanitized))
+      (setq sanitized
+            (replace-regexp-in-string
+             "\\(secret_key[[:space:]]*[=:][[:space:]]*\\)[^[:space:]]+"
+             "\\1[redacted-secret]" sanitized))
+      (replace-regexp-in-string
+       "\\bnsec1[023456789acdefghjklmnpqrstuvwxyz]+\\b"
+       "[redacted-nsec]" sanitized))))
+
 (defun nostr-backend-load-secret ()
   "Decrypt and return the configured local Nostr secret key."
   (string-trim

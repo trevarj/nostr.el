@@ -63,13 +63,28 @@ file and GPG prompts locally for its passphrase."
   "Return an empty JSON object payload for backend calls."
   (make-hash-table :test 'equal))
 
-(defun nostr-setup--error-text (response stderr exit-status fallback)
+(defun nostr-setup--payload-secrets (payload)
+  "Return sensitive backend values from PAYLOAD for diagnostic redaction."
+  (delq nil
+        (cond
+         ((hash-table-p payload)
+          (list (gethash 'secret_key payload)
+                (gethash "secret_key" payload)))
+         ((listp payload)
+          (list (alist-get 'secret_key payload)
+                (alist-get "secret_key" payload nil nil #'equal))))))
+
+(defun nostr-setup--error-text (response stderr exit-status fallback &optional secrets)
   "Return actionable setup error text from RESPONSE, STDERR and EXIT-STATUS.
 FALLBACK describes the operation that failed."
   (let* ((error-body (and (listp response) (alist-get 'error response)))
          (code (and (listp error-body) (alist-get 'code error-body)))
-         (message (and (listp error-body) (alist-get 'message error-body)))
-         (stderr-text (string-trim (or stderr ""))))
+         (message (nostr-backend-sanitize-diagnostic
+                   (and (listp error-body) (alist-get 'message error-body))
+                   secrets))
+         (stderr-text (string-trim
+                       (or (nostr-backend-sanitize-diagnostic stderr secrets)
+                           ""))))
     (string-join
      (delq nil
            (list
@@ -92,7 +107,9 @@ FALLBACK describes the operation that failed."
              (exit-status (car result))
              (response (cdr result)))
         (unless (and (zerop exit-status) (alist-get 'ok response))
-          (error "%s" (nostr-setup--error-text response nil exit-status fallback)))
+          (error "%s" (nostr-setup--error-text
+                       response nil exit-status fallback
+                       (nostr-setup--payload-secrets payload))))
         response)
     (file-missing
      (error "%s\nCould not run backend command %S. Build the Rust backend or set `nostr-backend-command'."
