@@ -179,6 +179,76 @@
           (should (string-match-p "↩ 1" text))
           (should (string-match-p "♥ 1" text)))))))
 
+(ert-deftest nostr-ui-note-counts-use-newer-db-values ()
+  "Stale inline zero counts do not hide accumulated interaction counts."
+  (nostr-test-with-db
+    (nostr-test-store-text-note "stale-counts" "me" 100 "root note")
+    (nostr-db-store-event
+     '((id . "reaction-stale-1")
+       (pubkey . "alice")
+       (created_at . 101)
+       (kind . 7)
+       (tags . (("e" "stale-counts")))
+       (content . "+")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "reaction-stale-2")
+       (pubkey . "bob")
+       (created_at . 102)
+       (kind . 7)
+       (tags . (("e" "stale-counts")))
+       (content . "❤️")
+       (sig . "sig")))
+    (with-temp-buffer
+      (let ((event '((id . "stale-counts")
+                     (pubkey . "me")
+                     (created-at . 100)
+                     (kind . 1)
+                     (content . "root note")
+                     (reactions . 0)
+                     (reposts . 0)
+                     (replies . 0))))
+        (nostr-ui-insert-note event)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "♥ 2" text)))))))
+
+(ert-deftest nostr-timeline-primary-feeds-render-accumulated-reactions ()
+  "Feed, Conversations, and My Posts cards show DB-backed reaction counts."
+  (nostr-test-with-db
+    (emacsql nostr-db--connection
+             [:insert-or-ignore :into follows :values [$s1 $s2 $s3 $s4]]
+             "me" "alice" nil nil)
+    (nostr-test-store-text-note "feed-note" "alice" 100 "feed note")
+    (nostr-test-store-text-note "conversation-note" "alice" 101 "reply" "root" "root")
+    (nostr-test-store-text-note "my-note" "me" 102 "my post")
+    (dolist (target '("feed-note" "conversation-note" "my-note"))
+      (dotimes (i 2)
+        (nostr-db-store-event
+         `((id . ,(format "reaction-%s-%d" target i))
+           (pubkey . ,(format "reactor-%d" i))
+           (created_at . ,(+ 200 i))
+           (kind . 7)
+           (tags . (("e" ,target)))
+           (content . "+")
+           (sig . "sig")))))
+    (cl-letf (((symbol-function 'nostr-timeline--backfill-missing-reposts)
+               #'ignore)
+              ((symbol-function 'nostr-timeline--backfill-visible-metadata)
+               #'ignore)
+              ((symbol-function 'nostr-timeline--sync-active-feed)
+               #'ignore))
+      (dolist (case '((feed . "feed note")
+                      (conversations . "reply")
+                      (my-posts . "my post")))
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey "me")
+          (setq-local nostr-timeline-feed-kind (car case))
+          (nostr-timeline-refresh)
+          (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+            (should (string-match-p (cdr case) text))
+            (should (string-match-p "♥ 2" text))))))))
+
 (ert-deftest nostr-ui-formats-relative-and-exact-note-times ()
   "Feed cards use relative dates while detail cards use exact dates."
   (should (equal (nostr-ui-format-relative-time 1000 4540) "59 minutes ago"))

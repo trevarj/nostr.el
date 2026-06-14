@@ -1001,11 +1001,11 @@ render or refresh runs `nostr-db-event-counts' once rather than once per key."
 
 (defun nostr-ui--event-count (event key)
   "Return EVENT count KEY, loading cached counts lazily when needed.
-A count carried inline on EVENT takes precedence; otherwise the value is
-looked up from the memoized full counts alist for the event id."
-  (if-let* ((existing (assoc key event)))
-      (or (cdr existing) 0)
-    (or (alist-get key (nostr-ui--event-counts event)) 0)))
+A count carried inline on EVENT is treated as a floor; database counts may be
+newer for normal cached feeds, while provider-ranked feeds such as Discover
+may carry richer inline stats."
+  (max (or (cdr (assoc key event)) 0)
+       (or (alist-get key (nostr-ui--event-counts event)) 0)))
 
 (defun nostr-ui--note-option (options key default)
   "Return OPTIONS plist KEY or DEFAULT."
