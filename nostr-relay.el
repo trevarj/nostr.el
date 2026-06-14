@@ -155,6 +155,11 @@ startup feed subscriptions unless also present in `nostr-relay-urls'."
   :type 'number
   :group 'nostr)
 
+(defcustom nostr-notifications-mode-line-icon "◉"
+  "Compact icon shown in the mode line for unread Nostr notifications."
+  :type 'string
+  :group 'nostr)
+
 (defvar nostr-relay--connections (make-hash-table :test #'equal)
   "Relay URL to websocket connection map.")
 
@@ -284,11 +289,24 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
       (> (nostr-relay--pending-profile-count) 0)
       (> (length nostr-relay--connect-queue) 0)))
 
-(defun nostr-relay--mode-line-spinner-string ()
-  "Return compact spinner text for Nostr relay activity."
-  (format " Nostr %s"
-          (aref nostr-relay--mode-line-spinner-frames
-                nostr-relay--mode-line-spinner-index)))
+(defun nostr-relay--unread-notification-count ()
+  "Return unread notification count, or 0 when the DB is unavailable."
+  (if (and (boundp 'nostr-db--connection) nostr-db--connection)
+      (nostr-db-unread-notification-count)
+    0))
+
+(defun nostr-relay--mode-line-string ()
+  "Return compact mode-line text for Nostr activity and notifications."
+  (let ((parts nil)
+        (unread (nostr-relay--unread-notification-count)))
+    (when (nostr-relay--mode-line-active-p)
+      (push (aref nostr-relay--mode-line-spinner-frames
+                  nostr-relay--mode-line-spinner-index)
+            parts))
+    (when (> unread 0)
+      (push (format "%s%d" nostr-notifications-mode-line-icon unread) parts))
+    (when parts
+      (format " Nostr %s" (string-join (nreverse parts) " ")))))
 
 (defun nostr-relay--schedule-mode-line-refresh ()
   "Schedule a coalesced mode-line refresh and spinner tick."
@@ -303,17 +321,16 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
                      (mod (1+ nostr-relay--mode-line-spinner-index)
                           (length nostr-relay--mode-line-spinner-frames)))
                (setq nostr-relay--mode-line-string
-                     (nostr-relay--mode-line-spinner-string)))
+                     (nostr-relay--mode-line-string)))
              (force-mode-line-update)
-             (when nostr-relay--mode-line-string
+             (when (nostr-relay--mode-line-active-p)
                (nostr-relay--schedule-mode-line-refresh)))))))
 
 (defun nostr-relay--update-mode-line ()
   "Refresh the Nostr relay activity mode-line segment state."
   (nostr-relay--ensure-mode-line)
   (setq nostr-relay--mode-line-string
-        (when (nostr-relay--mode-line-active-p)
-          (nostr-relay--mode-line-spinner-string)))
+        (nostr-relay--mode-line-string))
   ;; Relay process filters can run while redisplay is evaluating third-party
   ;; mode-line forms.  Do not force an immediate all-frame mode-line update
   ;; from that path; coalesce the visual invalidation onto the timer queue.
@@ -699,39 +716,43 @@ at the cap are queued up to `nostr-relay-max-queued-verifications'."
 (defun nostr-relay--maybe-store-notification (event)
   "Store notifications caused by EVENT for `nostr-current-pubkey'."
   (when (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
-    (let ((event-id (alist-get 'id event))
+    (let ((before (nostr-relay--unread-notification-count))
+          (event-id (alist-get 'id event))
           (pubkey (alist-get 'pubkey event))
           (created-at (or (alist-get 'created_at event)
                           (alist-get 'created-at event))))
-      (pcase (alist-get 'kind event)
-        (1
-         (cond
-          ((member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
-           (nostr-db-store-notification
-            (format "%s-mention" event-id) "mention" event-id pubkey nostr-current-pubkey created-at))
-          ((and (alist-get 'reply-id event)
-                (equal (nostr-db-event-pubkey (alist-get 'reply-id event)) nostr-current-pubkey))
-           (nostr-db-store-notification
-            (format "%s-reply" event-id) "reply" event-id pubkey nostr-current-pubkey created-at))))
-        (7
-         (when-let* ((target (nostr-event-reaction-event-id event)))
-           (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-             (nostr-db-store-notification
-              (format "%s-reaction" event-id) "reaction" event-id pubkey nostr-current-pubkey created-at))))
-        (6
-         (when-let* ((target (nostr-event-repost-event-id event)))
-           (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-             (nostr-db-store-notification
-              (format "%s-repost" event-id) "repost" event-id pubkey nostr-current-pubkey created-at))))
-        (9735
-         (when-let* ((target (nostr-event-zap-target-event-id event)))
-           (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-             (nostr-db-store-notification
-              (format "%s-zap" event-id) "zap" event-id pubkey nostr-current-pubkey created-at))))
-        (3
-         (when (member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
-           (nostr-db-store-notification
-            (format "%s-follow" event-id) "follow" event-id pubkey nostr-current-pubkey created-at)))))))
+      (unwind-protect
+          (pcase (alist-get 'kind event)
+            (1
+             (cond
+              ((member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
+               (nostr-db-store-notification
+                (format "%s-mention" event-id) "mention" event-id pubkey nostr-current-pubkey created-at))
+              ((and (alist-get 'reply-id event)
+                    (equal (nostr-db-event-pubkey (alist-get 'reply-id event)) nostr-current-pubkey))
+               (nostr-db-store-notification
+                (format "%s-reply" event-id) "reply" event-id pubkey nostr-current-pubkey created-at))))
+            (7
+             (when-let* ((target (nostr-event-reaction-event-id event)))
+               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
+                 (nostr-db-store-notification
+                  (format "%s-reaction" event-id) "reaction" event-id pubkey nostr-current-pubkey created-at))))
+            (6
+             (when-let* ((target (nostr-event-repost-event-id event)))
+               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
+                 (nostr-db-store-notification
+                  (format "%s-repost" event-id) "repost" event-id pubkey nostr-current-pubkey created-at))))
+            (9735
+             (when-let* ((target (nostr-event-zap-target-event-id event)))
+               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
+                 (nostr-db-store-notification
+                  (format "%s-zap" event-id) "zap" event-id pubkey nostr-current-pubkey created-at))))
+            (3
+             (when (member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
+               (nostr-db-store-notification
+                (format "%s-follow" event-id) "follow" event-id pubkey nostr-current-pubkey created-at))))
+        (when (/= before (nostr-relay--unread-notification-count))
+          (nostr-relay--update-mode-line))))))
 
 (defun nostr-relay-handle-frame (url payload)
   "Handle relay frame PAYLOAD from URL."

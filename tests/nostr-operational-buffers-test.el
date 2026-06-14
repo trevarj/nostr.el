@@ -177,6 +177,53 @@
                                 [:select [seen] :from notifications :where (= id "notif1")])
                      '((1)))))))
 
+(ert-deftest nostr-notifications-mark-seen-updates-mode-line ()
+  "Marking notifications seen refreshes the unread mode-line indicator."
+  (nostr-operational-test--with-db
+    (let ((nostr-relay--mode-line-string nil)
+          (nostr-relay--ingested-event-count 0)
+          (nostr-relay--connect-queue nil)
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--search-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal)))
+      (emacsql nostr-db--connection
+               [:insert :into notifications :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
+               "notif1" "mention" "note1" "alice" "me" 100 0)
+      (with-temp-buffer
+        (nostr-notifications-mode)
+        (nostr-relay--update-mode-line)
+        (should (string-match-p "◉1" nostr-relay--mode-line-string))
+        (nostr-notifications-refresh)
+        (nostr-operational-test--goto-first-section)
+        (nostr-notifications-mark-seen)
+        (should-not nostr-relay--mode-line-string)
+        (should (= 0 (nostr-db-unread-notification-count)))))))
+
+(ert-deftest nostr-notifications-open-marks-all-seen-and-clears-mode-line ()
+  "Visiting Notifications clears unread notifications and their indicator."
+  (nostr-operational-test--with-db
+    (let ((nostr-relay--mode-line-string nil)
+          (nostr-relay--ingested-event-count 0)
+          (nostr-relay--connect-queue nil)
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--search-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal)))
+      (emacsql nostr-db--connection
+               [:insert :into notifications :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
+               "notif1" "mention" "note1" "alice" "me" 100 0)
+      (emacsql nostr-db--connection
+               [:insert :into notifications :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
+               "notif2" "reply" "note2" "bob" "me" 101 0)
+      (nostr-relay--update-mode-line)
+      (should (string-match-p "◉2" nostr-relay--mode-line-string))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (nostr-notifications-open)
+        (should (eq major-mode 'nostr-notifications-mode))
+        (should (= 0 (nostr-db-unread-notification-count)))
+        (should-not nostr-relay--mode-line-string)
+        (should (string-match-p "0 unread  2 total" (buffer-string)))))))
+
 (ert-deftest nostr-notifications-open-event-and-actor ()
   "Notification commands open cached event threads and actor profiles."
   (nostr-operational-test--with-db

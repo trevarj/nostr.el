@@ -594,6 +594,14 @@ Rows include cached profile columns for the reactor when available."
   (emacsql nostr-db--connection
            [:update notifications :set (= seen 1)]))
 
+(defun nostr-db-unread-notification-count ()
+  "Return the number of cached unread notifications."
+  (or (caar (emacsql nostr-db--connection
+                     [:select (funcall count *)
+                              :from notifications
+                              :where (= seen 0)]))
+      0))
+
 (defun nostr-db-select-follows (pubkey)
   "Return PUBKEY's followed pubkeys."
   (mapcar #'car

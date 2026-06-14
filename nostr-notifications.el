@@ -21,6 +21,7 @@
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
 (declare-function nostr-profile-open-self "nostr-profile" ())
+(declare-function nostr-relay--update-mode-line "nostr-relay" ())
 (declare-function nostr-search-open "nostr-search" (query))
 (declare-function nostr-thread-open "nostr-thread" (event))
 (declare-function nostr-timeline-conversations "nostr-timeline" ())
@@ -172,13 +173,21 @@
   (when-let* ((notification (nostr-notifications-selected))
               (id (alist-get 'id notification)))
     (nostr-db-mark-notification-seen id)
+    (nostr-relay--update-mode-line)
     (nostr-notifications-refresh)))
 
 (defun nostr-notifications-mark-all-seen ()
   "Mark all notifications as seen."
   (interactive)
   (nostr-db-mark-all-notifications-seen)
+  (nostr-relay--update-mode-line)
   (nostr-notifications-refresh))
+
+(defun nostr-notifications--clear-unread-on-open ()
+  "Mark cached notifications seen when visiting the Notifications page."
+  (when nostr-db--connection
+    (nostr-db-mark-all-notifications-seen)
+    (nostr-relay--update-mode-line)))
 
 (defun nostr-notifications--type-key (type)
   "Return normalized lowercase notification TYPE."
@@ -407,10 +416,12 @@ when the main Nostr buffer has not been created yet."
      ((or (eq major-mode 'nostr-timeline-mode)
           (eq major-mode 'nostr-notifications-mode))
       (nostr-notifications-mode)
+      (nostr-notifications--clear-unread-on-open)
       (nostr-notifications-refresh))
      (main-buffer
       (switch-to-buffer main-buffer)
       (nostr-notifications-mode)
+      (nostr-notifications--clear-unread-on-open)
       (nostr-notifications-refresh))
      (t
       (nostr-notifications-open-standalone)))))
@@ -421,6 +432,7 @@ when the main Nostr buffer has not been created yet."
   (let ((buffer (get-buffer-create "*Nostr Notifications*")))
     (with-current-buffer buffer
       (nostr-notifications-mode)
+      (nostr-notifications--clear-unread-on-open)
       (nostr-notifications-refresh))
     (switch-to-buffer buffer)))
 

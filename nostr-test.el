@@ -474,6 +474,17 @@
       (should (equal (nth 7 profile)
                      "{\"name\":\"alice\",\"website\":\"https://example.test\"}")))))
 
+(ert-deftest nostr-db-counts-unread-notifications ()
+  "Unread notification counts use cached seen state."
+  (nostr-test-with-db
+    (nostr-db-store-notification "notif1" "mention" "note1" "alice" "me" 100)
+    (nostr-db-store-notification "notif2" "reply" "note2" "bob" "me" 101)
+    (should (= 2 (nostr-db-unread-notification-count)))
+    (nostr-db-mark-notification-seen "notif1")
+    (should (= 1 (nostr-db-unread-notification-count)))
+    (nostr-db-mark-all-notifications-seen)
+    (should (= 0 (nostr-db-unread-notification-count)))))
+
 (ert-deftest nostr-db-feed-includes-own-root-notes ()
   (nostr-test-with-db
     (nostr-db-store-event
@@ -1921,6 +1932,58 @@
                  (when (timerp timer)
                    (cancel-timer timer)))
                nostr-relay--search-timeout-timers))))
+
+(ert-deftest nostr-relay-mode-line-shows-unread-notifications ()
+  "Unread notifications appear in the compact Nostr mode-line segment."
+  (nostr-test-with-db
+    (let ((nostr-relay--search-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--mode-line-string nil)
+          (nostr-relay--ingested-event-count 0)
+          (nostr-relay--connect-queue nil)
+          (global-mode-string nil))
+      (nostr-db-store-notification "notif1" "mention" "note1" "alice" "me" 100)
+      (nostr-db-store-notification "notif2" "reply" "note2" "bob" "me" 101)
+      (nostr-relay--update-mode-line)
+      (should (equal nostr-relay--mode-line-string " Nostr ◉2"))
+      (should (member '(:eval nostr-relay--mode-line-string) global-mode-string))
+      (nostr-db-mark-all-notifications-seen)
+      (nostr-relay--update-mode-line)
+      (should-not nostr-relay--mode-line-string))))
+
+(ert-deftest nostr-relay-mode-line-combines-spinner-and-notifications ()
+  "Relay activity and unread notifications share one Nostr mode-line segment."
+  (nostr-test-with-db
+    (let ((nostr-relay--search-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--mode-line-string nil)
+          (nostr-relay--mode-line-spinner-index 0)
+          (nostr-relay--ingested-event-count 1)
+          (nostr-relay--connect-queue nil))
+      (nostr-db-store-notification "notif1" "mention" "note1" "alice" "me" 100)
+      (nostr-relay--update-mode-line)
+      (should (equal nostr-relay--mode-line-string " Nostr ⠋ ◉1")))))
+
+(ert-deftest nostr-relay-stored-notification-updates-mode-line ()
+  "Storing a new notification refreshes the unread mode-line indicator."
+  (nostr-test-with-db
+    (let ((nostr-current-pubkey "me")
+          (nostr-relay--search-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--mode-line-string nil)
+          (nostr-relay--ingested-event-count 0)
+          (nostr-relay--connect-queue nil))
+      (nostr-relay--maybe-store-notification
+       '((id . "note1")
+         (pubkey . "alice")
+         (created_at . 100)
+         (kind . 1)
+         (tags . (("p" "me")))
+         (content . "hello me")))
+      (should (equal nostr-relay--mode-line-string " Nostr ◉1")))))
 
 (ert-deftest nostr-search-relay-fetches-authors-from-profile-hits ()
   "Matching profile search events trigger bounded author activity fetches."
