@@ -1195,6 +1195,15 @@
     (nostr-compose-mode)
     (should-error (nostr-compose-send) :type 'user-error)))
 
+(ert-deftest nostr-actions-reaction-labels-use-configured-choices ()
+  "Reaction transient labels show configured emoji/content values."
+  (let ((nostr-reaction-choices '("+" "🔥" "🤙" "👀" "💜")))
+    (should (equal (nostr-actions--reaction-choice-label-1) "+"))
+    (should (equal (nostr-actions--reaction-choice-label-2) "🔥"))
+    (should (equal (nostr-actions--reaction-choice-label-3) "🤙"))
+    (should (equal (nostr-actions--reaction-choice-label-4) "👀"))
+    (should (equal (nostr-actions--reaction-choice-label-5) "💜"))))
+
 (ert-deftest nostr-compose-extra-tags-are-sent ()
   (let (captured-kind captured-tags captured-content stored-event hook-event)
     (cl-letf (((symbol-function 'nostr-backend-sign-event)

@@ -81,6 +81,30 @@
   "Return configured reaction at INDEX."
   (or (nth index nostr-reaction-choices) "+"))
 
+(defun nostr-actions--reaction-choice-label (index)
+  "Return transient label for configured reaction at INDEX."
+  (format "%s" (nostr-actions--reaction-choice index)))
+
+(defun nostr-actions--reaction-choice-label-1 ()
+  "Return transient label for the first configured reaction."
+  (nostr-actions--reaction-choice-label 0))
+
+(defun nostr-actions--reaction-choice-label-2 ()
+  "Return transient label for the second configured reaction."
+  (nostr-actions--reaction-choice-label 1))
+
+(defun nostr-actions--reaction-choice-label-3 ()
+  "Return transient label for the third configured reaction."
+  (nostr-actions--reaction-choice-label 2))
+
+(defun nostr-actions--reaction-choice-label-4 ()
+  "Return transient label for the fourth configured reaction."
+  (nostr-actions--reaction-choice-label 3))
+
+(defun nostr-actions--reaction-choice-label-5 ()
+  "Return transient label for the fifth configured reaction."
+  (nostr-actions--reaction-choice-label 4))
+
 (defun nostr-actions--react-choice (index)
   "React to `nostr-actions--reaction-event' with configured INDEX."
   (unless nostr-actions--reaction-event
@@ -125,11 +149,11 @@
 (transient-define-prefix nostr-actions-reaction-transient ()
   "Choose a reaction for the selected Nostr note."
   [["React"
-    ("1" "1st configured" nostr-actions-react-choice-1)
-    ("2" "2nd configured" nostr-actions-react-choice-2)
-    ("3" "3rd configured" nostr-actions-react-choice-3)
-    ("4" "4th configured" nostr-actions-react-choice-4)
-    ("5" "5th configured" nostr-actions-react-choice-5)
+    ("1" nostr-actions--reaction-choice-label-1 nostr-actions-react-choice-1)
+    ("2" nostr-actions--reaction-choice-label-2 nostr-actions-react-choice-2)
+    ("3" nostr-actions--reaction-choice-label-3 nostr-actions-react-choice-3)
+    ("4" nostr-actions--reaction-choice-label-4 nostr-actions-react-choice-4)
+    ("5" nostr-actions--reaction-choice-label-5 nostr-actions-react-choice-5)
     ("e" "Choose emoji" nostr-actions-react-read)]])
 
 (defun nostr-actions-react-menu (event)
