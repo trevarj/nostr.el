@@ -1499,7 +1499,7 @@
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
                (lambda (&rest _) nil)))
       (let ((sub-id (nostr-relay-search "ODELL" 25)))
-        (should (string-match-p " Nostr \\[[ ⠁⠂⠄⡀][ ⠁⠂⠄⡀][ ⠁⠂⠄⡀]\\]"
+        (should (string-match-p " Nostr [⠋⠙⠹⢸⣰⣠⣄⣆⡇⠏]"
                                 nostr-relay--mode-line-string))
         (should (timerp (gethash sub-id nostr-relay--search-timeout-timers)))
         (nostr-relay--note-search-eose sub-id)
@@ -1519,7 +1519,7 @@
     (unwind-protect
         (progn
           (nostr-relay--track-search-request "search-timeout" 1)
-          (should (string-match-p " Nostr \\[[ ⠁⠂⠄⡀][ ⠁⠂⠄⡀][ ⠁⠂⠄⡀]\\]"
+          (should (string-match-p " Nostr [⠋⠙⠹⢸⣰⣠⣄⣆⡇⠏]"
                                   nostr-relay--mode-line-string))
           (should (timerp (gethash "search-timeout"
                                    nostr-relay--search-timeout-timers)))
@@ -1729,7 +1729,7 @@
                  (tags . nil)
                  (content . "hello")
                  (sig . "sig")))
-              (should (string-match-p " Nostr \\[[ ⠁⠂⠄⡀][ ⠁⠂⠄⡀][ ⠁⠂⠄⡀]\\]"
+              (should (string-match-p " Nostr [⠋⠙⠹⢸⣰⣠⣄⣆⡇⠏]"
                                       nostr-relay--mode-line-string))
               (nostr-relay--handle-event
                "wss://relay.example"
@@ -1741,7 +1741,7 @@
                  (tags . nil)
                  (content . "{\"name\":\"Alice\",\"picture\":\"https://example.test/a.png\"}")
                  (sig . "sig")))
-              (should (string-match-p " Nostr \\[[ ⠁⠂⠄⡀][ ⠁⠂⠄⡀][ ⠁⠂⠄⡀]\\]"
+              (should (string-match-p " Nostr [⠋⠙⠹⢸⣰⣠⣄⣆⡇⠏]"
                                       nostr-relay--mode-line-string))
               (nostr-relay--clear-recent-activity)
               (should-not nostr-relay--mode-line-string)))
