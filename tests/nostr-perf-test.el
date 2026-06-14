@@ -185,6 +185,25 @@
       (should (timerp nostr--refresh-timer))
       (should-not (eq nostr--refresh-timer first)))))
 
+(ert-deftest nostr-open-refreshes-after-local-actions ()
+  "Opening Nostr wires locally sent actions into the refresh scheduler."
+  (let ((nostr-actions-after-send-hook nil)
+        (nostr-relay-event-hook nil)
+        (nostr-relay-sync-finished-hook nil)
+        (nostr-discover-finished-hook nil)
+        (window-buffer-change-functions nil)
+        (nostr-current-pubkey "me")
+        (nostr-db--connection t))
+    (cl-letf (((symbol-function 'nostr-timeline-refresh) #'ignore)
+              ((symbol-function 'nostr-relay-connect-all-deferred) #'ignore)
+              ((symbol-function 'nostr-relay-disconnect-all) #'ignore)
+              ((symbol-function 'nostr-db-close) #'ignore)
+              ((symbol-function 'switch-to-buffer) #'ignore))
+      (nostr-open)
+      (should (memq #'nostr--schedule-refresh nostr-actions-after-send-hook))
+      (nostr-close)
+      (should-not (memq #'nostr--schedule-refresh nostr-actions-after-send-hook)))))
+
 ;;; Stage 1 --- conservative global relay subscriptions
 
 (ert-deftest nostr-global-filter-is-small-and-recent ()

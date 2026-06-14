@@ -79,7 +79,9 @@
 
 (defun nostr-event-reaction-event-id (event)
   "Return the event id targeted by reaction EVENT."
-  (nostr-event-first-tag-value (alist-get 'tags event) "e"))
+  ;; NIP-25 says that if clients include extra e-tags, the reacted event id
+  ;; should be the last e-tag.
+  (cadr (car (last (nostr-event-tags-by-name (alist-get 'tags event) "e")))))
 
 (defun nostr-event-repost-event-id (event)
   "Return the event id targeted by repost EVENT."

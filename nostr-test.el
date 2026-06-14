@@ -113,6 +113,14 @@
     (should (equal (nostr-event-zap-target-event-id receipt) "note-zapped"))
     (should (= (nostr-event-zap-amount-msats receipt) 21000))))
 
+(ert-deftest nostr-event-reaction-target-uses-last-e-tag ()
+  "NIP-25 reactions target the last e-tag when extra e-tags are present."
+  (let ((reaction '((id . "reaction1")
+                    (kind . 7)
+                    (tags . (("e" "thread-root" "wss://relay.example" "root")
+                             ("e" "actual-target" "wss://relay.example"))))))
+    (should (equal (nostr-event-reaction-event-id reaction) "actual-target"))))
+
 (ert-deftest nostr-db-stores-and-selects-feed ()
   (nostr-test-with-db
     (nostr-db-store-event
@@ -211,6 +219,29 @@
         (nostr-ui-insert-note event)
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
           (should (string-match-p "♥ 2" text)))))))
+
+(ert-deftest nostr-ui-note-counts-use-nip25-reaction-target ()
+  "Reaction counts accumulate on the final e-tag target used by NIP-25."
+  (nostr-test-with-db
+    (nostr-test-store-text-note "thread-root" "alice" 100 "root")
+    (nostr-test-store-text-note "actual-target" "alice" 101 "reply" "thread-root" "thread-root")
+    (nostr-db-store-event
+     '((id . "reaction-nip25")
+       (pubkey . "bob")
+       (created_at . 102)
+       (kind . 7)
+       (tags . (("e" "thread-root" "wss://relay.example" "root")
+                ("e" "actual-target" "wss://relay.example")))
+       (content . "+")
+       (sig . "sig")))
+    (with-temp-buffer
+      (nostr-ui-insert-note '((id . "actual-target")
+                              (pubkey . "alice")
+                              (created-at . 101)
+                              (kind . 1)
+                              (content . "reply")))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "♥ 1" text))))))
 
 (ert-deftest nostr-timeline-primary-feeds-render-accumulated-reactions ()
   "Feed, Conversations, and My Posts cards show DB-backed reaction counts."

@@ -239,6 +239,7 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
     (nostr-db-open nostr-db-path))
   (cl-incf nostr--open-generation)
   (add-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  (add-hook 'nostr-actions-after-send-hook #'nostr--schedule-refresh)
   ;; Repaint on EOSE (a final render once the sync burst settles) and when a
   ;; previously-hidden Nostr buffer becomes visible again.
   (add-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
@@ -266,6 +267,7 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
   (setq nostr--opening-account nil
         nostr--refresh-pending-since nil)
   (remove-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  (remove-hook 'nostr-actions-after-send-hook #'nostr--schedule-refresh)
   (remove-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
