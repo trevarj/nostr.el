@@ -266,28 +266,37 @@ Values above 50 move the rendered avatar upward relative to the text baseline."
   "Insert a custom section of TYPE, ID, DATA and TITLE around BODY.
 TITLE may be a string or a function called with the new section."
   (declare (indent 4))
-  `(let* ((start (point))
-          (parent nostr-ui--current-parent)
-          (section (make-nostr-ui-section :id ,id :type ,type :start start
-                                          :data ,data :parent parent)))
-     (if (functionp ,title)
-         (funcall ,title section)
-       (insert-text-button
-        (format "▾ %s\n" ,title)
-        'follow-link t
-        'nostr-ui-section section
-        'action (lambda (_button) (nostr-ui-toggle-section))))
-     (setf (nostr-ui-section-content-start section) (point))
-     (let ((nostr-ui--current-parent section))
-       ,@body)
-     (setf (nostr-ui-section-end section) (point))
-     (let ((ov (make-overlay (nostr-ui-section-content-start section)
-                             (nostr-ui-section-end section))))
-       (overlay-put ov 'nostr-ui-section t)
-       (setf (nostr-ui-section-overlay section) ov))
-     (nostr-ui--apply-section-fold-state section)
-     (push section nostr-ui--sections)
-     section))
+  (let ((start-sym (cl-gensym "start-"))
+        (parent-sym (cl-gensym "parent-"))
+        (section-sym (cl-gensym "section-"))
+        (title-sym (cl-gensym "title-"))
+        (overlay-sym (cl-gensym "overlay-")))
+    `(let* ((,start-sym (point))
+            (,parent-sym nostr-ui--current-parent)
+            (,title-sym ,title)
+            (,section-sym (make-nostr-ui-section :id ,id :type ,type
+                                                 :start ,start-sym
+                                                 :data ,data
+                                                 :parent ,parent-sym)))
+       (if (functionp ,title-sym)
+           (funcall ,title-sym ,section-sym)
+         (insert-text-button
+          (format "▾ %s\n" ,title-sym)
+          'follow-link t
+          'nostr-ui-section ,section-sym
+          'action (lambda (_button) (nostr-ui-toggle-section))))
+       (setf (nostr-ui-section-content-start ,section-sym) (point))
+       (let ((nostr-ui--current-parent ,section-sym))
+         ,@body)
+       (setf (nostr-ui-section-end ,section-sym) (point))
+       (let ((,overlay-sym (make-overlay
+                            (nostr-ui-section-content-start ,section-sym)
+                            (nostr-ui-section-end ,section-sym))))
+         (overlay-put ,overlay-sym 'nostr-ui-section t)
+         (setf (nostr-ui-section-overlay ,section-sym) ,overlay-sym))
+       (nostr-ui--apply-section-fold-state ,section-sym)
+       (push ,section-sym nostr-ui--sections)
+       ,section-sym)))
 
 (defun nostr-ui--sections-by-start ()
   "Return `nostr-ui--sections' as a fresh list sorted by ascending start."
@@ -471,7 +480,7 @@ Return non-nil when a usable STATE was restored."
              (nostr-ui--resolve-position (alist-get 'start window-state))
              t))))
       (nostr-ui-update-selection)
-      t)))
+      (not (null (nostr-ui-section-at-point))))))
 
 (defun nostr-ui-finish-refresh (&optional position-state)
   "Restore POSITION-STATE or move to the first rendered section."
@@ -1564,24 +1573,24 @@ thread/detail style uses exact dates."
     (insert (propertize "────────────────────────────────────────\n"
                         'face 'nostr-ui-card-border))
     (nostr-ui-with-section 'note (alist-get 'id event) event
-			   (lambda (section)
-			     (nostr-ui--insert-note-heading section indent picture author))
-			   (nostr-ui-insert-badge-line (nostr-ui--note-badges event style)
-						       (concat indent "  "))
-			   (when-let* ((reposter (nostr-ui-format-reposter event)))
-			     (insert indent)
-			     (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
-						 'face 'nostr-ui-meta)))
-			   (nostr-ui--insert-filled-content display-content indent)
-			   (dolist (item (nostr-event-media-items (alist-get 'content event)))
-                             (nostr-ui--insert-media-placeholder item indent))
-			   (nostr-ui--restore-note-media section)
-                           (if (> embed-depth 0)
-                               (nostr-ui--insert-nevent-summaries event indent)
-                             (nostr-ui--insert-nevent-embeds event depth style embed-depth))
-                           (nostr-ui--insert-note-footer event (concat indent "  "))
-			   (insert "\n")
-			   (insert "\n"))))
+        (lambda (section)
+          (nostr-ui--insert-note-heading section indent picture author))
+      (nostr-ui-insert-badge-line (nostr-ui--note-badges event style)
+                                  (concat indent "  "))
+      (when-let* ((reposter (nostr-ui-format-reposter event)))
+        (insert indent)
+        (insert (propertize (format "  ↻ Reposted by %s\n" reposter)
+                            'face 'nostr-ui-meta)))
+      (nostr-ui--insert-filled-content display-content indent)
+      (dolist (item (nostr-event-media-items (alist-get 'content event)))
+        (nostr-ui--insert-media-placeholder item indent))
+      (nostr-ui--restore-note-media nostr-ui--current-parent)
+      (if (> embed-depth 0)
+          (nostr-ui--insert-nevent-summaries event indent)
+        (nostr-ui--insert-nevent-embeds event depth style embed-depth))
+      (nostr-ui--insert-note-footer event (concat indent "  "))
+      (insert "\n")
+      (insert "\n"))))
 
 (provide 'nostr-ui)
 ;;; nostr-ui.el ends here

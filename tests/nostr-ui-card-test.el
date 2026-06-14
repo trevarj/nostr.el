@@ -108,6 +108,48 @@
     (nostr-ui-toggle-section)
     (should (nostr-ui-section-folded (nostr-ui-section-at-point)))))
 
+(ert-deftest nostr-ui-with-section-does-not-capture-body-bindings ()
+  "Section macro internals do not shadow same-named caller bindings."
+  (with-temp-buffer
+    (let ((section "caller-section")
+          (start "caller-start")
+          (parent "caller-parent")
+          (ov "caller-ov")
+          (seen nil))
+      (nostr-ui-with-section 'test "capture" '((value . 1)) "Capture"
+        (setq seen (list section start parent ov))
+        (insert "body\n"))
+      (should (equal seen
+                     '("caller-section"
+                       "caller-start"
+                       "caller-parent"
+                       "caller-ov")))
+      (should (equal (length nostr-ui--sections) 1)))))
+
+(ert-deftest nostr-ui-with-section-evaluates-title-once ()
+  "Section titles with side effects are evaluated a single time."
+  (with-temp-buffer
+    (let ((calls 0))
+      (nostr-ui-with-section 'test "title" nil
+          (progn
+            (setq calls (1+ calls))
+            "One Shot")
+        (insert "body\n"))
+      (should (= calls 1))
+      (should (string-match-p "One Shot" (buffer-string))))))
+
+(ert-deftest nostr-ui-finish-refresh-selects-first-section-with-header-point ()
+  "Initial refreshes move from non-section header text to the first section."
+  (with-temp-buffer
+    (let ((position-state (nostr-ui-capture-position)))
+      (insert "Header\n\n")
+      (nostr-ui-with-section 'test "first" '((id . "first")) "First"
+        (insert "body\n"))
+      (nostr-ui-finish-refresh position-state)
+      (should (equal (point) (nostr-ui-section-start (nostr-ui-section-at-point))))
+      (should (equal (nostr-ui-section-id (nostr-ui-section-at-point))
+                     "first")))))
+
 (ert-deftest nostr-ui-note-card-renders-avatar-button ()
   "Cards render a loadable avatar when an author picture URL is available."
   (let ((nostr-ui-auto-load-avatars nil))

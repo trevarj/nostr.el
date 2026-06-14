@@ -161,7 +161,7 @@
     (nostr-ui-insert-footer
      '("g refresh" "r reply" "l react" "R repost" "Q quote" "w copy" "? actions"))
     (nostr-ui-finish-refresh position-state)
-    (when (or (not point-state)
+    (when (or (not (alist-get 'id point-state))
               (not (nostr-ui-section-at-point)))
       (nostr-thread--goto-focus focus-id))))
 
