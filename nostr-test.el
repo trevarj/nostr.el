@@ -959,6 +959,64 @@
             (should (equal (nostr-compose--content) "newer draft"))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-compose-mention-completion-uses-cached-profile-names ()
+  "Compose mention completion offers cached display names and usernames."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "alice-profile")
+       (pubkey . "alice-pubkey")
+       (created_at . 10)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"name\":\"alice\",\"display_name\":\"Alice Example\",\"nip05\":\"alice@example.test\"}")
+       (sig . "sig")))
+    (let ((pairs (nostr-compose--completion-candidates)))
+      (should (equal (cdr (assoc "Alice Example" pairs)) "alice-pubkey"))
+      (should (equal (cdr (assoc "alice" pairs)) "alice-pubkey"))
+      (should (equal (cdr (assoc "alice@example.test" pairs)) "alice-pubkey")))))
+
+(ert-deftest nostr-compose-mention-completion-replaces-trigger-with-npub ()
+  "Finished mention completion replaces @text with a NIP-19 profile reference."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "alice-profile")
+       (pubkey . "alice-pubkey")
+       (created_at . 10)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"name\":\"alice\",\"display_name\":\"Alice Example\"}")
+       (sig . "sig")))
+    (cl-letf (((symbol-function 'nostr-nip19-encode-sync)
+               (lambda (entity value)
+                 (should (equal entity "npub"))
+                 (should (equal value "alice-pubkey"))
+                 '((value . "npub1alice")))))
+      (with-temp-buffer
+        (nostr-compose-mode)
+        (insert "@ali")
+        (let* ((capf (nostr-compose-complete-mention))
+               (start (nth 0 capf))
+               (end (nth 1 capf))
+               (exit (plist-get (nthcdr 3 capf) :exit-function)))
+          (should (equal (buffer-substring-no-properties start end) "ali"))
+          (delete-region start end)
+          (insert "Alice Example")
+          (funcall exit "Alice Example" 'finished)
+          (should (equal (buffer-string) "nostr:npub1alice")))))))
+
+(ert-deftest nostr-compose-at-key-starts-mention-completion ()
+  "The @ key inserts a mention trigger and invokes completion."
+  (with-temp-buffer
+    (nostr-compose-mode)
+    (should (eq (lookup-key nostr-compose-mode-map (kbd "@"))
+                #'nostr-compose-insert-mention-trigger))
+    (let (completed)
+      (cl-letf (((symbol-function 'completion-at-point)
+                 (lambda () (setq completed t))))
+        (nostr-compose-insert-mention-trigger))
+      (should (equal (buffer-string) "@"))
+      (should completed))))
+
 (ert-deftest nostr-compose-send-empty-signals-user-error ()
   (with-temp-buffer
     (nostr-compose-mode)

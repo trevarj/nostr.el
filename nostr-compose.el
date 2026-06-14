@@ -113,6 +113,7 @@ smaller frames."
     (define-key map (kbd "C-c C-a") #'nostr-compose-attach-file)
     (define-key map (kbd "M-p") #'nostr-compose-previous-draft)
     (define-key map (kbd "M-n") #'nostr-compose-next-draft)
+    (define-key map (kbd "@") #'nostr-compose-insert-mention-trigger)
     (define-key map (kbd "?") #'nostr-compose-actions)
     map)
   "Keymap for `nostr-compose-mode'.")
@@ -588,36 +589,63 @@ When SKIP-CURRENT is non-nil, omit entries matching current buffer content."
 (defun nostr-compose--completion-candidates ()
   "Return cached profile completion candidates as LABEL/PUBKEY pairs."
   (and nostr-db--connection
-       (mapcar
-        (lambda (row)
-          (pcase-let ((`(,pubkey ,name ,display-name ,nip05) row))
-            (cons (or display-name name nip05 pubkey) pubkey)))
-        (nostr-db-select-profile-completions nostr-compose-mention-completion-limit))))
+       (let ((seen (make-hash-table :test #'equal))
+             candidates)
+         (dolist (row (nostr-db-select-profile-completions
+                       nostr-compose-mention-completion-limit))
+           (pcase-let ((`(,pubkey ,name ,display-name ,nip05) row))
+             (dolist (label (delq nil (list display-name name nip05 pubkey)))
+               (when (and (stringp label)
+                          (not (string-empty-p label))
+                          (not (gethash label seen)))
+                 (puthash label t seen)
+                 (push (cons label pubkey) candidates)))))
+         (nreverse candidates))))
+
+(defun nostr-compose--mention-bounds ()
+  "Return completion bounds for an @mention at point."
+  (let ((end (point))
+        start)
+    (save-excursion
+      (skip-chars-backward "[:alnum:]_.-")
+      (setq start (point)))
+    (when (and (> start (point-min))
+               (eq (char-before start) ?@)
+               (or (= (1- start) (point-min))
+                   (memq (char-syntax (char-before (1- start)))
+                         '(?\s ?. ?\( ?\)))))
+      (cons start end))))
+
+(defun nostr-compose-insert-mention-trigger ()
+  "Insert @ and start cached profile completion."
+  (interactive)
+  (insert "@")
+  (completion-at-point))
 
 (defun nostr-compose-complete-mention ()
   "Complete cached profile mentions near point."
-  (let ((bounds (bounds-of-thing-at-point 'symbol)))
-    (when (and bounds
-               (> (car bounds) (point-min))
-               (eq (char-before (car bounds)) ?@))
-      (let* ((pairs (nostr-compose--completion-candidates))
-             (table (mapcar #'car pairs)))
-        (list (car bounds) (cdr bounds)
-            (completion-table-dynamic (lambda (_string) table))
-            :annotation-function
-            (lambda (candidate)
-              (let ((pubkey (cdr (assoc candidate pairs))))
-                (when pubkey
-                  (concat " " (truncate-string-to-width pubkey 12 nil nil "...")))))
-            :exit-function
-            (lambda (candidate status)
-              (when (eq status 'finished)
-                (let ((pubkey (cdr (assoc candidate pairs))))
-                  (when pubkey
-                    (delete-region (1- (car bounds)) (cdr bounds))
-                    (insert "nostr:"
-                            (alist-get 'value
-                                       (nostr-nip19-encode-sync "npub" pubkey))))))))))))
+  (let ((bounds (nostr-compose--mention-bounds)))
+    (when bounds
+      (when-let* ((pairs (nostr-compose--completion-candidates)))
+        (let* ((table (mapcar #'car pairs))
+               (start-marker (copy-marker (car bounds)))
+               (end-marker (copy-marker (cdr bounds) t)))
+          (list (car bounds) (cdr bounds)
+                (completion-table-dynamic (lambda (_string) table))
+                :annotation-function
+                (lambda (candidate)
+                  (let ((pubkey (cdr (assoc candidate pairs))))
+                    (when pubkey
+                      (concat " " (truncate-string-to-width pubkey 12 nil nil "...")))))
+                :exit-function
+                (lambda (candidate status)
+                  (when (eq status 'finished)
+                    (let ((pubkey (cdr (assoc candidate pairs))))
+                      (when pubkey
+                        (delete-region (1- start-marker) end-marker)
+                        (insert "nostr:"
+                                (alist-get 'value
+                                           (nostr-nip19-encode-sync "npub" pubkey)))))))))))))
 
 (defun nostr-compose--display-action ()
   "Return automatic display action for compose buffers."
