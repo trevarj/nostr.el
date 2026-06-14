@@ -224,8 +224,8 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
   "Pending timer for coalesced Nostr mode-line redisplay.")
 
 (defconst nostr-relay--mode-line-spinner-frames
-  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Braille frames used for compact Nostr activity in the mode line.")
+  ["⠁  " " ⠁ " "  ⠁" "  ⠂" "  ⠄" "  ⡀" " ⡀ " "⡀  " "⠄  " "⠂  "]
+  "Three-column, four-row braille-dot spinner frames for the mode line.")
 
 (defvar nostr-relay--mode-line-spinner-index 0
   "Current index into `nostr-relay--mode-line-spinner-frames'.")
@@ -257,7 +257,7 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 
 (defun nostr-relay--mode-line-spinner-string ()
   "Return compact spinner text for Nostr relay activity."
-  (format " Nostr %s"
+  (format " Nostr [%s]"
           (aref nostr-relay--mode-line-spinner-frames
                 nostr-relay--mode-line-spinner-index)))
 
