@@ -121,6 +121,39 @@ so new columns must be added explicitly."
            [:create-index :if-not-exists idx_mutes_pubkey
                           :on mutes ([pubkey])]))
 
+(defun nostr-db--ensure-reactions-table ()
+  "Ensure kind-7 reaction table has the current column order.
+Older caches created `reactions' as id/pubkey/created_at/event_id/content.
+Current code expects id/event_id/pubkey/content/created_at; because inserts are
+positional, old tables can hold target event ids in `pubkey' and emoji content
+in `event_id'.  Rebuild the table when that legacy order is detected."
+  (emacsql nostr-db--connection
+           [:create-table :if-not-exists reactions
+                          ([(id :primary-key)
+                            event_id
+                            pubkey
+                            content
+                            (created_at integer)])])
+  (when (equal (nostr-db--table-columns "reactions")
+               '("id" "pubkey" "created_at" "event_id" "content"))
+    (emacsql nostr-db--connection "drop table if exists reactions_migrated")
+    (emacsql nostr-db--connection
+             "create table reactions_migrated
+              (id primary key, event_id, pubkey, content, created_at integer)")
+    (emacsql nostr-db--connection
+             "insert or ignore into reactions_migrated (id, event_id, pubkey, content, created_at)
+              select id,
+                     case when typeof(created_at) = 'integer' then event_id else pubkey end,
+                     case when typeof(created_at) = 'integer' then pubkey else created_at end,
+                     case when typeof(created_at) = 'integer' then content else event_id end,
+                     case when typeof(created_at) = 'integer' then created_at else content end
+              from reactions")
+    (emacsql nostr-db--connection "drop table reactions")
+    (emacsql nostr-db--connection "alter table reactions_migrated rename to reactions"))
+  (emacsql nostr-db--connection
+           [:create-index :if-not-exists idx_reactions_event_id
+                          :on reactions ([event_id])]))
+
 (defun nostr-db-init ()
   "Initialize a fresh v1 database schema."
   (emacsql nostr-db--connection
@@ -165,13 +198,7 @@ so new columns must be added explicitly."
                           ([pubkey contact relay petname]
                            (:unique [pubkey contact]))])
   (nostr-db--ensure-mutes-table)
-  (emacsql nostr-db--connection
-           [:create-table :if-not-exists reactions
-                          ([(id :primary-key)
-                            event_id
-                            pubkey
-                            content
-                            (created_at integer)])])
+  (nostr-db--ensure-reactions-table)
   (emacsql nostr-db--connection
            [:create-table :if-not-exists reposts
                           ([(id :primary-key)

@@ -608,6 +608,41 @@
             (should (equal follows '("bob")))))
       (emacsql-close nostr-db--connection))))
 
+(ert-deftest nostr-db-init-repairs-legacy-reaction-column-order ()
+  "Opening an older cache restores reaction target ids before counting."
+  (let ((nostr-db--connection (emacsql-sqlite-open nil)))
+    (unwind-protect
+        (progn
+          (emacsql nostr-db--connection
+                   [:create-table reactions
+                                  ([(id :primary-key)
+                                    pubkey
+                                    (created_at integer)
+                                    event_id
+                                    content])])
+          ;; Row shape produced by current positional inserts against the old
+          ;; column order: target id in pubkey, reactor pubkey in created_at.
+          (emacsql nostr-db--connection
+                   [:insert :into reactions :values [$s1 $s2 $s3 $s4 $s5]]
+                   "reaction-scrambled" "note1" "reactor1" "+" 101)
+          ;; Row shape from the original old schema: already semantically
+          ;; correct for the old column names.
+          (emacsql nostr-db--connection
+                   [:insert :into reactions :values [$s1 $s2 $s3 $s4 $s5]]
+                   "reaction-old-correct" "reactor2" 102 "note2" "🤙")
+          (nostr-db-init)
+          (should (equal (nostr-db--table-columns "reactions")
+                         '("id" "event_id" "pubkey" "content" "created_at")))
+          (should (= (alist-get 'reactions (nostr-db-event-counts "note1")) 1))
+          (should (= (alist-get 'reactions (nostr-db-event-counts "note2")) 1))
+          (should (equal (emacsql nostr-db--connection
+                                  [:select [id event_id pubkey content created_at]
+                                           :from reactions
+                                           :order-by id])
+                         '(("reaction-old-correct" "note2" "reactor2" "🤙" 102)
+                           ("reaction-scrambled" "note1" "reactor1" "+" 101)))))
+      (emacsql-close nostr-db--connection))))
+
 (ert-deftest nostr-db-select-thread-returns-root-and-replies ()
   (nostr-test-with-db
     (nostr-db-store-event (nostr-event-normalize nostr-test-root-event "relay"))
