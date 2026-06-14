@@ -41,7 +41,7 @@
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "RET") #'nostr-reactions-open-profile)
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'nostr-reactions-quit)
     map)
   "Keymap for `nostr-reactions-mode'.")
 
@@ -167,13 +167,18 @@
               (pubkey (alist-get 'pubkey (nostr-ui-section-data section))))
     (nostr-profile-open pubkey)))
 
+(defun nostr-reactions-quit ()
+  "Quit the reaction popup and kill its temporary buffer."
+  (interactive)
+  (quit-window t))
+
 (defun nostr-reactions-open (event)
   "Open a popup listing cached reactions to EVENT."
   (interactive)
   (unless (alist-get 'id event)
     (user-error "Selected note has no event id"))
   (let ((buffer (get-buffer-create
-                 (format "*Nostr Reactions %s*"
+                 (format " *Nostr Reactions %s*"
                          (nostr-ui--shorten-identifier (alist-get 'id event))))))
     (with-current-buffer buffer
       (nostr-reactions-mode)

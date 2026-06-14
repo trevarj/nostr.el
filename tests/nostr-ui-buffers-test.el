@@ -245,6 +245,26 @@
       (should (equal fetched '("bob-pubkey")))
       (should (equal opened "bob-pubkey")))))
 
+(ert-deftest nostr-reactions-open-uses-temporary-buffer ()
+  "Reaction popups use hidden buffers and `q' kills them."
+  (nostr-ui-buffers-test-with-db
+    (let (opened)
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &optional _action)
+                   (setq opened buffer)
+                   (display-buffer-same-window buffer nil))))
+        (nostr-reactions-open '((id . "target") (pubkey . "alice-pubkey"))))
+      (unwind-protect
+          (progn
+            (should (buffer-live-p opened))
+            (should (string-prefix-p " " (buffer-name opened)))
+            (should (eq (lookup-key nostr-reactions-mode-map (kbd "q"))
+                        #'nostr-reactions-quit))
+            (with-current-buffer opened
+              (should (eq major-mode 'nostr-reactions-mode))))
+        (when (buffer-live-p opened)
+          (kill-buffer opened))))))
+
 (ert-deftest nostr-profile-mute-and-unmute-use-profile-pubkey ()
   "Profile mute commands publish updates for the displayed account."
   (nostr-ui-buffers-test-with-db
