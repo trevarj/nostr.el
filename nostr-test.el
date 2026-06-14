@@ -996,6 +996,36 @@
         (should (equal (buffer-substring-no-properties start end) "O"))
         (should (member "ODELL" (all-completions "O" table)))))))
 
+(ert-deftest nostr-compose-mention-completion-sources-follow-petnames ()
+  "Compose mention completion offers followed contact petnames."
+  (nostr-test-with-db
+    (let ((nostr-current-pubkey "me")
+          (nostr-compose-mention-completion-limit 1))
+      (nostr-db-store-event
+       '((id . "alice-profile")
+         (pubkey . "alice-pubkey")
+         (created_at . 10)
+         (kind . 0)
+         (tags . nil)
+         (content . "{\"name\":\"Alice\"}")
+         (sig . "sig")))
+      (nostr-db-store-event
+       '((id . "contacts")
+         (pubkey . "me")
+         (created_at . 11)
+         (kind . 3)
+         (tags . (("p" "odell-pubkey" nil "ODELL")))))
+      (with-temp-buffer
+        (nostr-compose-mode)
+        (insert "@ODELL")
+        (let* ((capf (nostr-compose-complete-mention))
+               (start (nth 0 capf))
+               (end (nth 1 capf))
+               (table (nth 2 capf)))
+          (should (equal (buffer-substring-no-properties start end) "ODELL"))
+          (should (member "ODELL" (all-completions "ODELL" table)))
+          (should (member "ODELL" (all-completions "odell" table))))))))
+
 (ert-deftest nostr-compose-mention-completion-replaces-trigger-with-npub ()
   "Finished mention completion replaces @text with a NIP-19 profile reference."
   (nostr-test-with-db

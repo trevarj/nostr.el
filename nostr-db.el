@@ -1011,6 +1011,23 @@ Rows are PUBKEY, NAME, DISPLAY_NAME, NIP05 ordered by display value."
                     :limit $s1]
            (or limit 200)))
 
+(defun nostr-db-select-follow-profile-completions (pubkey &optional limit)
+  "Return cached completion rows for accounts followed by PUBKEY.
+Rows are PUBKEY, NAME, DISPLAY_NAME, NIP05, PETNAME ordered by follow label."
+  (emacsql nostr-db--connection
+           [:select [follows:contact profiles:name profiles:display_name
+                     profiles:nip05 follows:petname]
+                    :from follows
+                    :left-join profiles :on (= follows:contact profiles:pubkey)
+                    :where (= follows:pubkey $s1)
+                    :order-by [(asc follows:petname)
+                               (asc profiles:display_name)
+                               (asc profiles:name)
+                               (asc profiles:nip05)
+                               (asc follows:contact)]
+                    :limit $s2]
+           pubkey (or limit 200)))
+
 (defun nostr-db-select-relays ()
   "Return stored relay status rows."
   (emacsql nostr-db--connection

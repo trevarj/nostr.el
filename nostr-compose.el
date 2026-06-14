@@ -30,6 +30,7 @@
 (defvar url-request-data)
 (defvar url-request-extra-headers)
 (defvar url-request-method)
+(defvar nostr-current-pubkey)
 
 (defvar-local nostr-compose-reply-to nil
   "Event being replied to.")
@@ -591,16 +592,29 @@ When SKIP-CURRENT is non-nil, omit entries matching current buffer content."
   (and nostr-db--connection
        (let ((seen (make-hash-table :test #'equal))
              candidates)
-         (dolist (row (nostr-db-select-profile-completions
-                       nostr-compose-mention-completion-limit))
-           (pcase-let ((`(,pubkey ,name ,display-name ,nip05) row))
-             (dolist (label (delq nil (list display-name name nip05 pubkey)))
+         (dolist (row (append
+                       (when (and (boundp 'nostr-current-pubkey)
+                                  nostr-current-pubkey)
+                         (nostr-db-select-follow-profile-completions
+                          nostr-current-pubkey
+                          nostr-compose-mention-completion-limit))
+                       (nostr-db-select-profile-completions
+                        nostr-compose-mention-completion-limit)))
+           (pcase-let ((`(,pubkey ,name ,display-name ,nip05 ,petname) row))
+             (dolist (label (delq nil (list petname display-name name nip05 pubkey)))
                (when (and (stringp label)
                           (not (string-empty-p label))
                           (not (gethash label seen)))
                  (puthash label t seen)
                  (push (cons label pubkey) candidates)))))
          (nreverse candidates))))
+
+(defun nostr-compose--completion-table (candidates)
+  "Return a case-insensitive completion table for CANDIDATES."
+  (let ((labels (mapcar #'car candidates)))
+    (lambda (string predicate action)
+      (let ((completion-ignore-case t))
+        (complete-with-action action labels string predicate)))))
 
 (defun nostr-compose--mention-bounds ()
   "Return completion bounds for an @mention at point."
@@ -627,11 +641,11 @@ When SKIP-CURRENT is non-nil, omit entries matching current buffer content."
   (let ((bounds (nostr-compose--mention-bounds)))
     (when bounds
       (when-let* ((pairs (nostr-compose--completion-candidates)))
-        (let* ((table (mapcar #'car pairs))
+        (let* ((table (nostr-compose--completion-table pairs))
                (start-marker (copy-marker (car bounds)))
                (end-marker (copy-marker (cdr bounds) t)))
           (list (car bounds) (cdr bounds)
-                (completion-table-dynamic (lambda (_string) table))
+                table
                 :annotation-function
                 (lambda (candidate)
                   (let ((pubkey (cdr (assoc candidate pairs))))
