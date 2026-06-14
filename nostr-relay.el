@@ -115,9 +115,13 @@ syncing state is force-cleared after this many seconds."
   :type 'integer
   :group 'nostr)
 
-(defcustom nostr-relay-visible-reaction-window-seconds 300
-  "Seconds of recent reactions to request when tracking visible note cards."
-  :type 'integer
+(defcustom nostr-relay-visible-reaction-window-seconds nil
+  "Optional recent-reaction window for visible note cards.
+When nil, visible-card reaction subscriptions request reactions by event id
+without a time cutoff.  This is still scoped to rendered cards, but lets the
+client backfill older reactions into the local `reactions' table."
+  :type '(choice (const :tag "No time cutoff" nil)
+                 integer)
   :group 'nostr)
 
 (defcustom nostr-relay-search-urls '("wss://cache2.primal.net/v1")
@@ -1374,8 +1378,9 @@ visible."
         (let* ((sub-id (nostr-relay--sub-id "visible-reactions" ids-key))
                (filter `(("kinds" . (,nostr-kind-reaction))
                          ("#e" . ,ids)
-                         ("since" . ,(max 0 (- (floor (float-time))
-                                               nostr-relay-visible-reaction-window-seconds)))
+                         ,@(when nostr-relay-visible-reaction-window-seconds
+                             `(("since" . ,(max 0 (- (floor (float-time))
+                                                     nostr-relay-visible-reaction-window-seconds)))))
                          ("limit" . ,(or limit (* 8 (length ids)))))))
           (maphash (lambda (url _ws)
                      (nostr-relay-subscribe url sub-id (list filter))
