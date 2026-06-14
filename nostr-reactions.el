@@ -17,6 +17,7 @@
 (require 'nostr-ui)
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
+(declare-function nostr-profile-open-self "nostr-profile" ())
 
 (defcustom nostr-reactions-limit 200
   "Maximum number of cached reactions shown for one note."
@@ -40,6 +41,7 @@
     (define-key map (kbd "g") #'nostr-reactions-refresh)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "RET") #'nostr-reactions-open-profile)
     (define-key map (kbd "q") #'nostr-reactions-quit)
     map)

@@ -12,25 +12,18 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
 (require 'seq)
 (require 'subr-x)
-(require 'url)
-(require 'url-http)
 (require 'nostr-backend)
 (require 'nostr-db)
 (require 'nostr-event)
 (require 'nostr-nip)
 (require 'nostr-relay)
+(require 'nostr-upload)
 (require 'nostr-ui)
 (require 'transient)
 
-(defvar url-http-end-of-headers)
-(defvar url-http-response-status)
 (defvar read-eval)
-(defvar url-request-data)
-(defvar url-request-extra-headers)
-(defvar url-request-method)
 (defvar nostr-current-pubkey)
 
 (defvar-local nostr-compose-reply-to nil
@@ -101,16 +94,6 @@ for unsent compose text."
 When nil, compose opens in a side window, right on wide frames and bottom on
 smaller frames."
   :type '(choice (const :tag "Automatic side window" nil) sexp)
-  :group 'nostr)
-
-(defcustom nostr-blossom-upload-server "https://blossom.primal.net"
-  "Blossom server URL used for compose media attachment uploads."
-  :type '(choice (const :tag "Unset" nil) string)
-  :group 'nostr)
-
-(defcustom nostr-blossom-upload-auth-expiration-seconds 300
-  "Seconds before generated Blossom upload authorization expires."
-  :type 'integer
   :group 'nostr)
 
 (defvar nostr-compose-mode-map
@@ -254,35 +237,6 @@ smaller frames."
         (push (match-string-no-properties 1) paths)))
     (delete-dups (nreverse paths))))
 
-(defun nostr-compose--sha256-file (file)
-  "Return SHA-256 hex digest for FILE."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (insert-file-contents-literally file)
-    (secure-hash 'sha256 (buffer-string))))
-
-(defun nostr-compose--upload-url ()
-  "Return configured Blossom upload endpoint."
-  (unless (and (stringp nostr-blossom-upload-server)
-               (not (string-empty-p nostr-blossom-upload-server)))
-    (user-error "Set `nostr-blossom-upload-server' before sending attachments"))
-  (concat (string-remove-suffix "/" nostr-blossom-upload-server) "/upload"))
-
-(defun nostr-compose--parse-blossom-url (json-text)
-  "Return uploaded media URL from Blossom JSON-TEXT."
-  (let* ((parsed (json-parse-string json-text :object-type 'alist :array-type 'list
-                                    :false-object nil))
-         (url (or (alist-get 'url parsed)
-                  (alist-get 'download_url parsed)
-                  (alist-get 'downloadUrl parsed)))
-         (nip94 (alist-get 'nip94_event parsed)))
-    (or url
-        (when-let* ((tags (alist-get 'tags nip94)))
-          (cadr (seq-find (lambda (tag)
-                            (and (listp tag) (equal (car tag) "url")))
-                          tags)))
-        (error "Blossom upload response did not include a URL"))))
-
 (defun nostr-compose--replace-attachments (content uploads)
   "Replace attachment tokens in CONTENT using UPLOADS alist."
   (replace-regexp-in-string
@@ -293,103 +247,15 @@ smaller frames."
        token))
    content t t))
 
-(defun nostr-compose--http-unibyte (string)
-  "Return STRING encoded as unibyte HTTP header/body text."
-  (if (multibyte-string-p string)
-      (encode-coding-string string 'us-ascii)
-    string))
-
-(defun nostr-compose--sanitize-upload-error (message)
-  "Return upload error MESSAGE without embedded binary request data."
-  (let ((sanitized (nostr-backend-sanitize-diagnostic (or message ""))))
-    (if (string-match "\\`Multibyte text in HTTP request:" sanitized)
-        "Could not build binary upload request"
-      (truncate-string-to-width sanitized 240 nil nil "..."))))
-
 (defun nostr-compose--backend-error-message (response stderr fallback)
   "Return sanitized backend error text from RESPONSE, STDERR, or FALLBACK."
-  (let* ((message (nostr-backend-sanitize-diagnostic
-                   (or (alist-get 'message (alist-get 'error response))
-                       fallback)))
-         (stderr-text (nostr-compose--sanitize-upload-error (or stderr ""))))
-    (concat message
-            (if (string-empty-p stderr-text) "" (concat ": " stderr-text)))))
-
-(defun nostr-compose--read-file-bytes (file)
-  "Return unibyte contents of FILE."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (insert-file-contents-literally file)
-    (encode-coding-string (buffer-string) 'no-conversion)))
-
-(defun nostr-compose--upload-file (file success error)
-  "Upload FILE to the configured Blossom server."
-  (unless (file-readable-p file)
-    (user-error "Attachment is not readable: %s" file))
-  (let* ((upload-url (nostr-compose--upload-url))
-         (server (string-remove-suffix "/" nostr-blossom-upload-server))
-         (sha256 (nostr-compose--sha256-file file))
-         (expiration (+ (truncate (float-time))
-                        nostr-blossom-upload-auth-expiration-seconds)))
-    (nostr-backend-blossom-auth
-     server sha256 expiration
-     (lambda (auth)
-       (let ((url-request-method "PUT")
-             (url-request-data (nostr-compose--read-file-bytes file))
-             (url-request-extra-headers
-              `((,(nostr-compose--http-unibyte "Authorization")
-                 . ,(nostr-compose--http-unibyte
-                     (alist-get 'authorization auth)))
-                (,(nostr-compose--http-unibyte "Content-Type")
-                 . ,(nostr-compose--http-unibyte
-                     "application/octet-stream")))))
-         (condition-case err
-             (url-retrieve
-              upload-url
-              (lambda (status)
-                (unwind-protect
-                    (if-let* ((err (plist-get status :error)))
-                        (funcall error file
-                                 (format "Could not upload %s: %s"
-                                         file
-                                         (nostr-compose--sanitize-upload-error
-                                          (format "%S" err))))
-                      (if (not (and url-http-response-status
-                                    (>= url-http-response-status 200)
-                                    (< url-http-response-status 300)))
-                          (funcall error file
-                                   (format "Could not upload %s: HTTP %s"
-                                           file
-                                           (or url-http-response-status "unknown")))
-                        (condition-case err
-                            (funcall success file
-                                     (nostr-compose--parse-blossom-url
-                                      (buffer-substring-no-properties
-                                       (1+ url-http-end-of-headers)
-                                       (point-max))))
-                          (error (funcall error file
-                                          (nostr-compose--sanitize-upload-error
-                                           (error-message-string err)))))))
-                  (kill-buffer (current-buffer))))
-              nil t)
-           (error
-            (funcall error file
-                     (format "Could not upload %s: %s"
-                             file
-                             (nostr-compose--sanitize-upload-error
-                              (error-message-string err))))))))
-     (lambda (response stderr _status)
-       (funcall error file
-                (format "Could not authorize %s: %s"
-                        file
-                        (nostr-compose--backend-error-message
-                         response stderr "backend error")))))))
+  (nostr-upload-backend-error-message response stderr fallback))
 
 (defun nostr-compose--upload-attachments (paths success error &optional uploads)
   "Upload PATHS, then call SUCCESS with UPLOADS alist."
   (if (null paths)
       (funcall success (nreverse uploads))
-    (nostr-compose--upload-file
+    (nostr-upload-file
      (car paths)
      (lambda (file url)
        (nostr-compose--upload-attachments

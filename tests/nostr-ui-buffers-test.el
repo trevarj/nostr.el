@@ -307,6 +307,132 @@
                        (unfollow "alice-pubkey"))))
       (should (= refreshed 2)))))
 
+(ert-deftest nostr-profile-open-self-uses-current-pubkey ()
+  "The self-profile command opens the active local account profile."
+  (let ((nostr-current-pubkey "me-pubkey")
+        opened)
+    (cl-letf (((symbol-function 'nostr-profile-open)
+               (lambda (pubkey) (setq opened pubkey))))
+      (nostr-profile-open-self))
+    (should (equal opened "me-pubkey"))))
+
+(ert-deftest nostr-profile-edit-requires-own-profile ()
+  "Profile editing is only available on the current account's profile."
+  (let ((nostr-current-pubkey "me-pubkey"))
+    (with-temp-buffer
+      (nostr-profile-mode)
+      (setq-local nostr-profile-pubkey "alice-pubkey")
+      (should-error (nostr-profile-edit) :type 'user-error))))
+
+(ert-deftest nostr-profile-edit-metadata-preserves-unknown-raw-fields ()
+  "Publishing common fields preserves unsupported cached metadata keys."
+  (let* ((profile '((pubkey . "me-pubkey")
+                    (name . "old")
+                    (display-name . "Old")
+                    (picture . "https://example.test/old.png")
+                    (raw-content . "{\"name\":\"old\",\"displayName\":\"Old Alias\",\"website\":\"https://example.test\",\"bot\":false}")))
+         (json (nostr-profile-edit--metadata-json
+                profile
+                '((name . "new")
+                  (display_name . "New Display")
+                  (nip05 . "")
+                  (lud16 . "tips@example.test")
+                  (picture . "")
+                  (about . "hello"))))
+         (metadata (json-parse-string json :object-type 'alist :array-type 'list
+                                      :false-object json-false)))
+    (should (equal (alist-get 'name metadata) "new"))
+    (should (equal (alist-get 'display_name metadata) "New Display"))
+    (should (equal (alist-get 'lud16 metadata) "tips@example.test"))
+    (should (equal (alist-get 'about metadata) "hello"))
+    (should (equal (alist-get 'website metadata) "https://example.test"))
+    (should (eq (alist-get 'bot metadata) json-false))
+    (should-not (assq 'displayName metadata))
+    (should-not (assq 'picture metadata))))
+
+(ert-deftest nostr-profile-edit-reconstructs-common-fields-without-raw-content ()
+  "Older cached profiles can still publish common metadata fields."
+  (let* ((profile '((pubkey . "me-pubkey")
+                    (name . "old")
+                    (display-name . "Old")
+                    (nip05 . "old@example.test")
+                    (raw-content . nil)))
+         (json (nostr-profile-edit--metadata-json
+                profile
+                '((name . "old")
+                  (display_name . "Old")
+                  (nip05 . "")
+                  (lud16 . "")
+                  (picture . "")
+                  (about . ""))))
+         (metadata (json-parse-string json :object-type 'alist :array-type 'list)))
+    (should (equal (alist-get 'name metadata) "old"))
+    (should (equal (alist-get 'display_name metadata) "Old"))
+    (should-not (assq 'nip05 metadata))))
+
+(ert-deftest nostr-profile-edit-validates-obvious-bad-fields ()
+  "Profile edit validation rejects malformed URL and address fields."
+  (should-error
+   (nostr-profile-edit--metadata-json
+    '((pubkey . "me-pubkey"))
+    '((name . "") (display_name . "") (nip05 . "") (lud16 . "")
+      (picture . "ftp://example.test/avatar.png") (about . "")))
+   :type 'user-error)
+  (should-error
+   (nostr-profile-edit--metadata-json
+    '((pubkey . "me-pubkey"))
+    '((name . "") (display_name . "") (nip05 . "not-an-address") (lud16 . "")
+      (picture . "") (about . "")))
+   :type 'user-error))
+
+(ert-deftest nostr-profile-edit-avatar-upload-fills-picture-field ()
+  "Avatar attach uploads through the shared helper and fills Picture."
+  (let ((file "/tmp/avatar.png"))
+    (with-temp-buffer
+      (nostr-profile-edit-mode)
+      (nostr-profile-edit--insert-form '((pubkey . "me-pubkey")))
+      (setq nostr-profile-edit-dirty nil)
+      (cl-letf (((symbol-function 'nostr-upload-file)
+                 (lambda (selected success _error)
+                   (should (equal selected file))
+                   (funcall success selected "https://cdn.example/avatar.png"))))
+        (nostr-profile-edit-attach-avatar file))
+      (should (string-match-p "^Picture: https://cdn.example/avatar.png$"
+                              (buffer-string)))
+      (should nostr-profile-edit-dirty))))
+
+(ert-deftest nostr-profile-edit-publish-closes-and-refreshes-target ()
+  "Publishing signs kind-0 metadata, closes the editor, and refreshes target."
+  (let (published-json refreshed)
+    (with-temp-buffer
+      (nostr-profile-mode)
+      (setq-local nostr-profile-pubkey "me-pubkey")
+      (let ((target (current-buffer))
+            (editor (generate-new-buffer " *nostr-profile-edit-test*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer editor
+                (nostr-profile-edit-mode)
+                (setq-local nostr-profile-edit-original
+                            '((pubkey . "me-pubkey")
+                              (raw-content . "{\"website\":\"https://example.test\"}")))
+                (setq-local nostr-profile-edit-target-buffer target)
+                (nostr-profile-edit--insert-form '((name . "Alice")))
+                (nostr-profile-edit--set-field "Name" "alice")
+                (cl-letf (((symbol-function 'nostr-actions-publish-profile)
+                           (lambda (json after-send &optional _after-error)
+                             (setq published-json json)
+                             (funcall after-send '((id . "profile-event")))))
+                          ((symbol-function 'nostr-profile-refresh)
+                           (lambda () (setq refreshed t))))
+                  (nostr-profile-edit-publish)))
+              (should (not (buffer-live-p editor)))
+              (should refreshed)
+              (should (string-match-p "\"name\":\"alice\"" published-json))
+              (should (string-match-p "\"website\":\"https://example.test\"" published-json)))
+          (when (buffer-live-p editor)
+            (kill-buffer editor)))))))
+
 (ert-deftest nostr-profile-open-requests-recent-author-events ()
   "Opening a profile requests recent author activity from relays."
   (nostr-ui-buffers-test-with-db

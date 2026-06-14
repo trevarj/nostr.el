@@ -20,6 +20,7 @@
 (require 'transient)
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
+(declare-function nostr-profile-open-self "nostr-profile" ())
 (declare-function nostr-search-open "nostr-search" (query))
 (declare-function nostr-thread-open "nostr-thread" (event))
 (declare-function nostr-timeline-conversations "nostr-timeline" ())
@@ -56,6 +57,7 @@
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "RET") #'nostr-notifications-open-at-point)
     (define-key map (kbd "a") #'nostr-notifications-open-actor)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "m") #'nostr-notifications-mark-seen)
     (define-key map (kbd "M") #'nostr-notifications-mark-all-seen)
     (define-key map (kbd "?") #'nostr-notifications-actions)
@@ -84,6 +86,7 @@
     ("M" "Mark all seen" nostr-notifications-mark-all-seen)]
    ["Navigation"
     ("g" "Refresh" nostr-notifications-refresh)
+    ("i" "My profile" nostr-profile-open-self)
     ("f" "Feed" nostr-timeline-feed)
     ("C" "Conversations" nostr-timeline-conversations)
     ("d" "Discover" nostr-timeline-discover)

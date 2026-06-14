@@ -22,6 +22,7 @@
 
 (defvar nostr-current-pubkey)
 (defvar nostr-relay--connections)
+(declare-function nostr-profile-open-self "nostr-profile" ())
 
 (defun nostr-relays--candidate-urls ()
   "Return relay URLs that should be displayed as candidates."
@@ -58,6 +59,7 @@
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "a") #'nostr-relays-add)
     (define-key map (kbd "c") #'nostr-relays-connect)
     (define-key map (kbd "d") #'nostr-relays-disconnect)
@@ -75,6 +77,7 @@
   "Actions for the selected Nostr relay."
   [["Relays"
     ("g" "Refresh" nostr-relays-refresh)
+    ("i" "My profile" nostr-profile-open-self)
     ("a" "Add" nostr-relays-add)
     ("c" "Connect" nostr-relays-connect)
     ("d" "Disconnect" nostr-relays-disconnect)

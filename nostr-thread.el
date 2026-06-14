@@ -24,6 +24,7 @@
 (require 'transient)
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
+(declare-function nostr-profile-open-self "nostr-profile" ())
 (declare-function nostr-open-identifier "nostr-dispatch" (value))
 
 (defvar-local nostr-thread-root-event nil
@@ -36,6 +37,7 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'nostr-thread-refresh)
     (define-key map (kbd "a") #'nostr-thread-open-author)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
@@ -67,6 +69,7 @@
    ["Thread"
     ("RET" "Open selected" nostr-thread-open-at-point)
     ("g" "Refresh" nostr-thread-refresh)
+    ("i" "My profile" nostr-profile-open-self)
     ("o" "Open embedded" nostr-thread-open-embedded-nevent)
     ("D" "Publish details" nostr-ui-show-publish-details)
     ("n" "Next note" nostr-ui-next-section)

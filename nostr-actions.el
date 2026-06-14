@@ -46,7 +46,7 @@
                       (unless (string-empty-p (or stderr "")) stderr)))
       ": "))))
 
-(defun nostr-actions--send (kind tags content success-message &optional after-send)
+(defun nostr-actions--send (kind tags content success-message &optional after-send after-error)
   "Sign KIND event with TAGS and CONTENT, then broadcast it."
   (nostr-backend-sign-event
    kind tags content
@@ -67,6 +67,8 @@
          (funcall after-send event))
        (message "%s" success-message)))
    (lambda (response stderr _status)
+     (when after-error
+       (funcall after-error response stderr))
      (user-error "Nostr action failed: %s"
                  (nostr-actions--error-message response stderr)))))
 
@@ -82,6 +84,19 @@
   "Send a positive reaction to EVENT."
   (interactive)
   (nostr-actions-react event "+"))
+
+(defun nostr-actions-publish-profile (metadata-json &optional after-send after-error)
+  "Publish kind-0 profile METADATA-JSON."
+  (interactive "sProfile metadata JSON: ")
+  (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
+    (user-error "No current Nostr pubkey is available"))
+  (nostr-actions--send
+   nostr-kind-metadata
+   nil
+   metadata-json
+   "Nostr profile published"
+   after-send
+   after-error))
 
 (defun nostr-actions--reaction-choice (index)
   "Return configured reaction at INDEX."

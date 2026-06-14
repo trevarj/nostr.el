@@ -41,6 +41,7 @@
 (require 'nostr-setup)
 (require 'nostr-share)
 (require 'nostr-timeline)
+(require 'nostr-upload)
 (require 'nostr-ui)
 
 (defcustom nostr-db-path (expand-file-name "nostr-db.sqlite" user-emacs-directory)

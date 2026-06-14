@@ -59,6 +59,7 @@ so new columns must be added explicitly."
   (nostr-db--ensure-column "events" "reply_id")
   (nostr-db--ensure-column "events" "quote_id")
   (nostr-db--ensure-column "profiles" "lud16")
+  (nostr-db--ensure-column "profiles" "content")
   (nostr-db--ensure-column "follows" "relay")
   (nostr-db--ensure-column "follows" "petname")
   (nostr-db--ensure-column "notifications" "seen" "integer default 0")
@@ -192,6 +193,7 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
                             picture
                             nip05
                             lud16
+                            content
                             (updated_at integer)])])
   (emacsql nostr-db--connection
            [:create-table :if-not-exists follows
@@ -292,8 +294,8 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
         (created-at (or (alist-get 'created_at event) 0)))
   (emacsql nostr-db--connection
              [:insert-or-replace :into profiles
-                                 [pubkey name display_name about picture nip05 lud16 updated_at]
-                                 :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8]]
+                                 [pubkey name display_name about picture nip05 lud16 content updated_at]
+                                 :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9]]
              pubkey
              (nostr-db--profile-name-from-json content 'name 'username)
              (nostr-db--profile-name-from-json content 'display_name 'displayName)
@@ -301,6 +303,7 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
              (nostr-db--profile-name-from-json content 'picture)
              (nostr-db--profile-name-from-json content 'nip05)
              (nostr-db--profile-name-from-json content 'lud16)
+             content
              created-at)))
 
 (defun nostr-db-store-follows-event (event)
@@ -1023,7 +1026,7 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
 (defun nostr-db-select-profile (pubkey)
   "Return profile for PUBKEY."
   (car (emacsql nostr-db--connection
-                [:select [pubkey name display_name about picture nip05 lud16 updated_at]
+                [:select [pubkey name display_name about picture nip05 lud16 content updated_at]
                          :from profiles
                          :where (= pubkey $s1)]
                 pubkey)))
@@ -1036,7 +1039,7 @@ stored profile are absent from the result.  Runs one query for the whole batch."
     (when ids
       (mapcar (lambda (row) (cons (car row) row))
               (emacsql nostr-db--connection
-                       [:select [pubkey name display_name about picture nip05 lud16 updated_at]
+                       [:select [pubkey name display_name about picture nip05 lud16 content updated_at]
                                 :from profiles
                                 :where (in pubkey $v1)]
                        (vconcat ids))))))

@@ -462,6 +462,18 @@
       (should-not (nth 4 profile))
       (should-not (nth 5 profile)))))
 
+(ert-deftest nostr-db-profile-metadata-stores-raw-content ()
+  "Profile metadata keeps raw JSON so unsupported fields can be preserved."
+  (nostr-test-with-db
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 100)
+       (kind . 0)
+       (content . "{\"name\":\"alice\",\"website\":\"https://example.test\"}")))
+    (let ((profile (nostr-db-select-profile "alice")))
+      (should (equal (nth 7 profile)
+                     "{\"name\":\"alice\",\"website\":\"https://example.test\"}")))))
+
 (ert-deftest nostr-db-feed-includes-own-root-notes ()
   (nostr-test-with-db
     (nostr-db-store-event
@@ -1458,7 +1470,7 @@
                        (setq captured-data url-request-data)
                        (setq captured-headers url-request-extra-headers))))
             (let ((nostr-blossom-upload-server "https://blossom.example"))
-              (nostr-compose--upload-file file #'ignore #'ignore)))
+              (nostr-upload-file file #'ignore #'ignore)))
           (should-not (multibyte-string-p captured-data))
           (dolist (header captured-headers)
             (should-not (multibyte-string-p (car header)))
@@ -1466,7 +1478,7 @@
       (delete-file file))))
 
 (ert-deftest nostr-compose-upload-sanitizes-binary-request-errors ()
-  (should (equal (nostr-compose--sanitize-upload-error
+  (should (equal (nostr-upload-sanitize-error
                   "Multibyte text in HTTP request: PUT /upload ...binary...")
                  "Could not build binary upload request")))
 

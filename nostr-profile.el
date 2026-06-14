@@ -13,6 +13,7 @@
 
 (require 'cl-lib)
 (require 'emacsql)
+(require 'json)
 (require 'subr-x)
 (require 'nostr-actions)
 (require 'nostr-db)
@@ -20,6 +21,7 @@
 (require 'nostr-relay)
 (require 'nostr-share)
 (require 'nostr-thread)
+(require 'nostr-upload)
 (require 'nostr-ui)
 (require 'transient)
 
@@ -40,13 +42,36 @@
 (defvar-local nostr-profile-list-kind nil
   "Social list kind displayed in the current buffer: `followers' or `following'.")
 
+(defvar-local nostr-profile-edit-target-buffer nil
+  "Profile buffer refreshed after the current edit buffer publishes.")
+
+(defvar-local nostr-profile-edit-pubkey nil
+  "Pubkey being edited by the current profile edit buffer.")
+
+(defvar-local nostr-profile-edit-original nil
+  "Original profile alist used to populate the current edit buffer.")
+
+(defvar-local nostr-profile-edit-content-start nil
+  "Marker for editable profile form content.")
+
+(defvar-local nostr-profile-edit-dirty nil
+  "Whether the current profile edit buffer has unsaved changes.")
+
+(defvar-local nostr-profile-edit--publishing nil
+  "Whether the current profile edit buffer is publishing metadata.")
+
+(defvar-local nostr-profile-edit--uploading nil
+  "Whether the current profile edit buffer is uploading an avatar.")
+
 (defvar nostr-profile-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'nostr-profile-refresh)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "RET") #'nostr-profile-open-at-point)
+    (define-key map (kbd "e") #'nostr-profile-edit)
     (define-key map (kbd "f") #'nostr-profile-follow)
     (define-key map (kbd "u") #'nostr-profile-unfollow)
     (define-key map (kbd "M") #'nostr-profile-mute)
@@ -60,11 +85,21 @@
     map)
   "Keymap for `nostr-profile-mode'.")
 
+(defvar nostr-profile-edit-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'nostr-profile-edit-publish)
+    (define-key map (kbd "C-c C-a") #'nostr-profile-edit-attach-avatar)
+    (define-key map (kbd "C-c C-k") #'nostr-profile-edit-cancel)
+    (define-key map (kbd "?") #'nostr-profile-edit-actions)
+    map)
+  "Keymap for `nostr-profile-edit-mode'.")
+
 (defvar nostr-profile-list-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "g") #'nostr-profile-list-refresh)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "RET") #'nostr-profile-list-open-at-point)
     (define-key map (kbd "q") #'quit-window)
     map)
@@ -78,9 +113,17 @@
   "Mode for cached Nostr profile relationship lists."
   (setq-local truncate-lines nil))
 
+(define-derived-mode nostr-profile-edit-mode text-mode "Nostr-Profile-Edit"
+  "Mode for editing your own Nostr profile metadata."
+  (setq-local header-line-format '(:eval (nostr-profile-edit--header-line)))
+  (add-hook 'after-change-functions #'nostr-profile-edit--after-change nil t)
+  (add-hook 'kill-buffer-query-functions #'nostr-profile-edit--confirm-kill nil t))
+
 (transient-define-prefix nostr-profile-actions ()
   "Actions for the current Nostr profile."
   [["Profile"
+    ("i" "My profile" nostr-profile-open-self)
+    ("e" "Edit profile" nostr-profile-edit)
     ("f" "Follow" nostr-profile-follow)
     ("u" "Unfollow" nostr-profile-unfollow)
     ("M" "Mute" nostr-profile-mute)
@@ -98,6 +141,13 @@
     ("y" "Copy raw id" nostr-share-copy-raw-id)
     ("b" "Browse" nostr-share-browse)]])
 
+(transient-define-prefix nostr-profile-edit-actions ()
+  "Actions for the current Nostr profile edit buffer."
+  [["Edit Profile"
+    ("C-c C-c" "Publish" nostr-profile-edit-publish)
+    ("C-c C-a" "Upload avatar" nostr-profile-edit-attach-avatar)
+    ("C-c C-k" "Cancel" nostr-profile-edit-cancel)]])
+
 (defun nostr-profile--row-to-alist (row pubkey)
   "Convert profile ROW for PUBKEY to an alist."
   (pcase row
@@ -109,6 +159,17 @@
        (picture . ,(and (stringp picture) picture))
        (nip05 . ,(and (stringp nip05) nip05))
        (lud16 . ,(and (stringp lud16) lud16))
+       (raw-content . nil)
+       (updated-at . ,updated-at)))
+    (`(,row-pubkey ,name ,display-name ,about ,picture ,nip05 ,lud16 ,content ,updated-at)
+     `((pubkey . ,row-pubkey)
+       (name . ,(and (stringp name) name))
+       (display-name . ,(and (stringp display-name) display-name))
+       (about . ,(and (stringp about) about))
+       (picture . ,(and (stringp picture) picture))
+       (nip05 . ,(and (stringp nip05) nip05))
+       (lud16 . ,(and (stringp lud16) lud16))
+       (raw-content . ,(and (stringp content) content))
        (updated-at . ,updated-at)))
     (_ `((pubkey . ,pubkey)))))
 
@@ -132,9 +193,22 @@
   (let* ((pubkey (alist-get 'pubkey profile))
          (nip05 (alist-get 'nip05 profile)))
     (or (nostr-ui-format-nip05 nip05 pubkey)
-        (when-let* ((npub (nostr-ui--cached-npub pubkey)))
-          (nostr-ui--shorten-identifier npub))
-        (nostr-ui--shorten-identifier pubkey))))
+      (when-let* ((npub (nostr-ui--cached-npub pubkey)))
+        (nostr-ui--shorten-identifier npub))
+      (nostr-ui--shorten-identifier pubkey))))
+
+(defun nostr-profile--own-profile-p (&optional pubkey)
+  "Return non-nil when PUBKEY, or current profile, is the local account."
+  (and (boundp 'nostr-current-pubkey)
+       nostr-current-pubkey
+       (equal (or pubkey nostr-profile-pubkey) nostr-current-pubkey)))
+
+(defun nostr-profile-open-self ()
+  "Open the current account's profile."
+  (interactive)
+  (unless (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
+    (user-error "No current Nostr pubkey is available"))
+  (nostr-profile-open nostr-current-pubkey))
 
 (defun nostr-profile--about-preview (profile)
   "Return a single-line about preview for PROFILE."
@@ -211,6 +285,230 @@
     (nostr-relay-fetch-event-metadata ids)
     (nostr-relay-subscribe-visible-reactions ids)))
 
+(defun nostr-profile-edit--display-action ()
+  "Return automatic display action for profile edit buffers."
+  (let ((wide (>= (frame-width) 120)))
+    `((display-buffer-in-side-window)
+      (side . ,(if wide 'right 'bottom))
+      (slot . 0)
+      ,@(if wide
+            '((window-width . 0.38))
+          '((window-height . 0.34))))))
+
+(defun nostr-profile-edit--header-line ()
+  "Return profile editor header line text."
+  (string-join
+   (delq nil
+         (list "Nostr Profile Edit"
+               (when nostr-profile-edit--uploading "uploading avatar")
+               (when nostr-profile-edit--publishing "publishing")
+               "C-c C-c publish"
+               "C-c C-a avatar"
+               "C-c C-k cancel"))
+   "  |  "))
+
+(defun nostr-profile-edit--after-change (&rest _ignored)
+  "Mark the current profile edit buffer dirty after edits."
+  (when (and (markerp nostr-profile-edit-content-start)
+             (>= (point-max) nostr-profile-edit-content-start))
+    (setq nostr-profile-edit-dirty t)))
+
+(defun nostr-profile-edit--confirm-kill ()
+  "Ask before killing a dirty profile editor."
+  (or (not nostr-profile-edit-dirty)
+      (yes-or-no-p "Discard unsaved Nostr profile edits? ")))
+
+(defun nostr-profile-edit--field-value (field)
+  "Return single-line FIELD value in the current edit buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (format "^%s:[ \t]*\\(.*\\)$" (regexp-quote field)) nil t)
+      (string-trim (match-string-no-properties 1)))))
+
+(defun nostr-profile-edit--about-value ()
+  "Return multi-line About value in the current edit buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^About:[ \t]*$" nil t)
+      (string-trim (buffer-substring-no-properties (point) (point-max))))))
+
+(defun nostr-profile-edit--set-field (field value)
+  "Set single-line FIELD to VALUE in the current edit buffer."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (unless (re-search-forward (format "^%s:[ \t]*\\(.*\\)$" (regexp-quote field)) nil t)
+        (user-error "No %s field in profile editor" field))
+      (replace-match (or value "") t t nil 1))))
+
+(defun nostr-profile-edit--form-alist ()
+  "Return profile edit form values as an alist."
+  `((name . ,(nostr-profile-edit--field-value "Name"))
+    (display_name . ,(nostr-profile-edit--field-value "Display name"))
+    (nip05 . ,(nostr-profile-edit--field-value "NIP-05"))
+    (lud16 . ,(nostr-profile-edit--field-value "Lightning"))
+    (picture . ,(nostr-profile-edit--field-value "Picture"))
+    (about . ,(nostr-profile-edit--about-value))))
+
+(defun nostr-profile-edit--url-p (value)
+  "Return non-nil when VALUE is an HTTP(S) URL or blank."
+  (or (string-empty-p value)
+      (string-match-p "\\`https?://[^[:space:]]+\\'" value)))
+
+(defun nostr-profile-edit--address-p (value)
+  "Return non-nil when VALUE is an address-like identifier or blank."
+  (or (string-empty-p value)
+      (string-match-p "\\`[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+\\'" value)))
+
+(defun nostr-profile-edit--validate (fields)
+  "Validate profile edit FIELDS."
+  (let ((picture (alist-get 'picture fields))
+        (nip05 (alist-get 'nip05 fields))
+        (lud16 (alist-get 'lud16 fields)))
+    (unless (nostr-profile-edit--url-p picture)
+      (user-error "Picture must be blank or an http(s) URL"))
+    (unless (nostr-profile-edit--address-p nip05)
+      (user-error "NIP-05 must be blank or address-like"))
+    (unless (nostr-profile-edit--address-p lud16)
+      (user-error "Lightning must be blank or address-like"))))
+
+(defconst nostr-profile-edit--metadata-keys
+  '(name username display_name displayName about picture nip05 lud16)
+  "Kind-0 metadata keys managed by the profile editor.")
+
+(defun nostr-profile-edit--raw-metadata (profile)
+  "Return cached raw metadata alist for PROFILE."
+  (or (when-let* ((content (alist-get 'raw-content profile)))
+        (ignore-errors
+          (json-parse-string content
+                             :object-type 'alist
+                             :array-type 'list
+                             :null-object nil
+                             :false-object json-false)))
+      (delq nil
+            `((name . ,(alist-get 'name profile))
+              (display_name . ,(alist-get 'display-name profile))
+              (about . ,(alist-get 'about profile))
+              (picture . ,(alist-get 'picture profile))
+              (nip05 . ,(alist-get 'nip05 profile))
+              (lud16 . ,(alist-get 'lud16 profile))))))
+
+(defun nostr-profile-edit--metadata-json (profile fields)
+  "Return kind-0 JSON for PROFILE with edited FIELDS merged."
+  (nostr-profile-edit--validate fields)
+  (let ((metadata (copy-alist (nostr-profile-edit--raw-metadata profile))))
+    (dolist (key nostr-profile-edit--metadata-keys)
+      (setq metadata (assq-delete-all key metadata)))
+    (dolist (entry fields)
+      (let ((value (cdr entry)))
+        (unless (string-empty-p value)
+          (push (cons (car entry) value) metadata))))
+    (json-encode (nreverse metadata))))
+
+(defun nostr-profile-edit--insert-form (profile)
+  "Insert editable form for PROFILE."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (insert (format "Name: %s\n" (or (alist-get 'name profile) "")))
+    (insert (format "Display name: %s\n" (or (alist-get 'display-name profile) "")))
+    (insert (format "NIP-05: %s\n" (or (alist-get 'nip05 profile) "")))
+    (insert (format "Lightning: %s\n" (or (alist-get 'lud16 profile) "")))
+    (insert (format "Picture: %s\n" (or (alist-get 'picture profile) "")))
+    (insert "About:\n")
+    (insert (or (alist-get 'about profile) ""))
+    (setq nostr-profile-edit-content-start (copy-marker (point-min)))))
+
+(defun nostr-profile-edit--image-file-p (file)
+  "Return non-nil when FILE has a supported avatar image extension."
+  (string-match-p "\\.\\(png\\|jpe?g\\|gif\\|webp\\)\\'" (downcase file)))
+
+(defun nostr-profile-edit-attach-avatar (file)
+  "Upload FILE to Blossom and set it as the Picture URL."
+  (interactive "fAvatar image: ")
+  (unless (nostr-profile-edit--image-file-p file)
+    (user-error "Avatar file must be png, jpg, jpeg, gif, or webp"))
+  (let ((buffer (current-buffer)))
+    (setq nostr-profile-edit--uploading t)
+    (force-mode-line-update)
+    (nostr-upload-file
+     file
+     (lambda (_file url)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq nostr-profile-edit--uploading nil)
+           (nostr-profile-edit--set-field "Picture" url)
+           (setq nostr-profile-edit-dirty t)
+           (force-mode-line-update)
+           (message "Nostr avatar uploaded"))))
+     (lambda (_file message)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq nostr-profile-edit--uploading nil)
+           (force-mode-line-update)))
+       (message "%s" message)))))
+
+(defun nostr-profile-edit-publish ()
+  "Publish the edited profile metadata."
+  (interactive)
+  (when nostr-profile-edit--uploading
+    (user-error "Wait for avatar upload to finish"))
+  (when nostr-profile-edit--publishing
+    (user-error "Profile publish already in progress"))
+  (unless nostr-profile-edit-original
+    (user-error "No profile metadata is associated with this editor"))
+  (let* ((buffer (current-buffer))
+         (target-buffer nostr-profile-edit-target-buffer)
+         (json (nostr-profile-edit--metadata-json
+                nostr-profile-edit-original
+                (nostr-profile-edit--form-alist))))
+    (setq nostr-profile-edit--publishing t)
+    (force-mode-line-update)
+    (nostr-actions-publish-profile
+     json
+     (lambda (_event)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq nostr-profile-edit-dirty nil
+                 nostr-profile-edit--publishing nil))
+         (kill-buffer buffer))
+       (when (buffer-live-p target-buffer)
+         (with-current-buffer target-buffer
+           (nostr-profile-refresh))))
+     (lambda (_response _stderr)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq nostr-profile-edit--publishing nil)
+           (force-mode-line-update)))))))
+
+(defun nostr-profile-edit-cancel (&optional force)
+  "Cancel profile editing.
+With FORCE, close without prompting."
+  (interactive "P")
+  (when (or force (nostr-profile-edit--confirm-kill))
+    (setq nostr-profile-edit-dirty nil)
+    (kill-buffer (current-buffer))
+    (message "Nostr profile edit cancelled")))
+
+(defun nostr-profile-edit ()
+  "Edit the local account profile."
+  (interactive)
+  (unless (nostr-profile--own-profile-p)
+    (user-error "Only your own profile can be edited"))
+  (let* ((pubkey nostr-profile-pubkey)
+         (profile (nostr-profile--row-to-alist
+                   (nostr-db-select-profile pubkey)
+                   pubkey))
+         (target-buffer (current-buffer))
+         (buffer (generate-new-buffer "*Nostr Profile Edit*")))
+    (with-current-buffer buffer
+      (nostr-profile-edit-mode)
+      (setq-local nostr-profile-edit-pubkey pubkey)
+      (setq-local nostr-profile-edit-original profile)
+      (setq-local nostr-profile-edit-target-buffer target-buffer)
+      (nostr-profile-edit--insert-form profile)
+      (setq nostr-profile-edit-dirty nil))
+    (select-window (display-buffer buffer (nostr-profile-edit--display-action)))))
+
 (defun nostr-profile--insert-header (profile)
   "Insert PROFILE metadata section."
   (nostr-ui-with-section 'profile (alist-get 'pubkey profile) profile
@@ -264,7 +562,9 @@
        "No cached notes for this profile."
        "Use f to follow, M to mute, or w to copy the profile id."))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open" "f follow" "u unfollow" "M mute" "U unmute" "v verify" "w copy" "b browse" "? actions"))
+     (append '("g refresh" "RET open" "i my profile")
+             (when (nostr-profile--own-profile-p) '("e edit"))
+             '("f follow" "u unfollow" "M mute" "U unmute" "v verify" "w copy" "b browse" "? actions")))
     (nostr-ui-finish-refresh position-state)))
 
 (defun nostr-profile-open-at-point ()
@@ -441,7 +741,7 @@
        "No cached profiles for this list."
        "Refresh relays or open more profiles to grow the local cache."))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open profile" "n next" "p prev" "q quit"))
+     '("g refresh" "RET open profile" "i my profile" "n next" "p prev" "q quit"))
     (nostr-ui-finish-refresh position-state)))
 
 (defun nostr-profile-list-open-at-point ()

@@ -43,6 +43,7 @@
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "RET") #'nostr-search-open-at-point)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "s") #'nostr-search-relay)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
     (define-key map (kbd "w") #'nostr-share-copy)
@@ -60,6 +61,7 @@
   "Actions for Nostr search results."
   [["Search"
     ("g" "Refresh local results" nostr-search-refresh)
+    ("i" "My profile" nostr-profile-open-self)
     ("s" "Search relays" nostr-search-relay)]
    ["Result"
     ("RET" "Open result" nostr-search-open-at-point)

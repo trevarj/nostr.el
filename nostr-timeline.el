@@ -60,6 +60,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "RET") #'nostr-timeline-open-thread)
     (define-key map (kbd "a") #'nostr-timeline-open-author)
+    (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "c") #'nostr-compose-open)
     (define-key map (kbd "/") #'nostr-search-open)
     (define-key map (kbd "o") #'nostr-open-identifier)
@@ -104,6 +105,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     ("d" "Discover" nostr-timeline-discover)
     (">" "Load more" nostr-discover-load-more)
     ("P" "My posts" nostr-timeline-my-posts)
+    ("i" "My profile" nostr-profile-open-self)
     ("c" "Compose" nostr-compose-open)
     ("/" "Search" nostr-search-open)
     ("o" "Open id" nostr-open-identifier)]
