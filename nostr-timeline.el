@@ -30,6 +30,7 @@
 ;; Defined in nostr.el, which requires this file (avoid a circular require).
 (defvar nostr-debug-logging)
 (defvar nostr-current-pubkey)
+(defvar nostr-media-auto-preview)
 (declare-function nostr-debug-message "nostr" (fmt &rest args))
 
 (defvar nostr-timeline-current-pubkey nil
@@ -221,7 +222,10 @@ When FORCE is non-nil, request a fresh provider/relay page."
       (nostr-timeline--backfill-visible-metadata events)
       (if events
           (dolist (event events)
-            (nostr-ui-insert-note event)
+            (let ((nostr-media-auto-preview
+                   (and nostr-media-auto-preview
+                        (not (eq nostr-timeline-feed-kind 'discover)))))
+              (nostr-ui-insert-note event))
             (setq rendered (1+ rendered)))
         (nostr-ui-insert-empty-state
          (if (eq nostr-timeline-feed-kind 'discover)

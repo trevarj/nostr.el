@@ -649,6 +649,27 @@
       (should (string-match-p "media https://example.test/pic.jpg" media))
       (should-not (string-match-p "home root" media)))))
 
+(ert-deftest nostr-timeline-discover-does-not-auto-fetch-media ()
+  "Discover disables aggressive media downloads even when auto-preview is on."
+  (nostr-test-with-db
+    (nostr-test-store-text-note
+     "discover-media" "carol" 120 "media https://example.test/discover.jpg")
+    (nostr-db-store-discover-result
+     "primal" "global" "trending" "discover-media" 1 10 120)
+    (let ((nostr-media-auto-preview t)
+          (nostr-media-fetch-function
+           (lambda (&rest _)
+             (ert-fail "Discover should not auto-fetch media"))))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (setq-local nostr-timeline-current-pubkey "me")
+        (setq-local nostr-timeline-feed-kind 'discover)
+        (nostr-timeline-refresh)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "\\[image: https://example.test/discover.jpg\\]"
+                                  text))
+          (should-not (string-match-p "\\[image loaded:" text)))))))
+
 (ert-deftest nostr-timeline-feed-refresh-backfills-missing-repost-targets ()
   "Feed refresh requests original notes referenced only by cached reposts."
   (nostr-test-with-db
