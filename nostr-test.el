@@ -47,6 +47,26 @@
     (content . "reply")
     (sig . "sig")))
 
+(defun nostr-test-backend-command ()
+  "Return a usable backend command for integration tests, or nil."
+  (or (executable-find nostr-backend-command)
+      (let ((release (expand-file-name "target/release/nostr-el-backend"
+                                       default-directory))
+            (debug (expand-file-name "target/debug/nostr-el-backend"
+                                     default-directory)))
+        (cond
+         ((file-executable-p release) release)
+         ((file-executable-p debug) debug)))))
+
+(defun nostr-test-wait-until (predicate &optional timeout)
+  "Wait until PREDICATE returns non-nil or TIMEOUT seconds pass."
+  (let ((deadline (+ (float-time) (or timeout 5)))
+        result)
+    (while (and (not result) (< (float-time) deadline))
+      (accept-process-output nil 0.05)
+      (setq result (funcall predicate)))
+    result))
+
 (defun nostr-test-store-text-note (id pubkey created-at content &optional root-id reply-id)
   "Store a normalized text note for tests."
   (nostr-db-store-event
@@ -1415,6 +1435,71 @@
                             (kind . 1)
                             (relay . "wss://relay.example"))))
     (should (equal refreshed "note1"))))
+
+(ert-deftest nostr-actions-generated-key-reaction-updates-visible-card ()
+  "Generate a fresh npub, send a signed reaction, and confirm the card updates."
+  (let ((backend-command (nostr-test-backend-command)))
+    (skip-unless backend-command)
+    (nostr-test-with-db
+      (let* ((nostr-backend-command backend-command)
+             (key-result (nostr-backend-call-sync
+                          "generate-key"
+                          (make-hash-table :test 'equal)))
+             (key-response (cdr key-result))
+             (secret (alist-get 'secret_key key-response))
+             (pubkey (alist-get 'pubkey key-response))
+             (npub (alist-get 'npub key-response))
+             (nostr-current-pubkey pubkey)
+             (nostr-relay-urls '("wss://relay.example"))
+             sent-message)
+        (should (zerop (car key-result)))
+        (should (alist-get 'ok key-response))
+        (should (and (stringp secret) (not (string-empty-p secret))))
+        (should (and (stringp pubkey) (= (length pubkey) 64)))
+        (should (string-prefix-p "npub1" npub))
+        (nostr-test-store-text-note "visual-reaction-target" "alice" 100
+                                    "react to me")
+        (with-temp-buffer
+          (nostr-ui-insert-note
+           '((id . "visual-reaction-target")
+             (pubkey . "alice")
+             (created-at . 100)
+             (kind . 1)
+             (relay . "wss://relay.example")
+             (content . "react to me")))
+          (should (string-match-p "♥ 0"
+                                  (buffer-substring-no-properties
+                                   (point-min) (point-max))))
+          (cl-letf (((symbol-function 'nostr-backend-load-secret)
+                     (lambda () secret))
+                    ((symbol-function 'nostr-relay-send-client-message)
+                     (lambda (client-message)
+                       (setq sent-message client-message))))
+            (nostr-actions-like
+             '((id . "visual-reaction-target")
+               (pubkey . "alice")
+               (kind . 1)
+               (relay . "wss://relay.example")))
+            (should (nostr-test-wait-until
+                     (lambda ()
+                       (string-match-p
+                        "♥ 1"
+                        (buffer-substring-no-properties
+                         (point-min) (point-max))))
+                     5)))
+          (should (string-prefix-p "[\"EVENT\"" sent-message))
+          (should (equal
+                   (emacsql nostr-db--connection
+                            [:select [pubkey content]
+                                     :from reactions
+                                     :where (= event_id "visual-reaction-target")])
+                   `((,pubkey "+"))))
+          (should (= (alist-get 'reactions
+                                (nostr-db-event-counts "visual-reaction-target"))
+                     1))
+          (should (string-match-p "♥ 1"
+                                  (buffer-substring-no-properties
+                                   (point-min) (point-max)))))))))
 
 (ert-deftest nostr-actions-follow-tags-preserve-existing-follows ()
   (nostr-test-with-db
