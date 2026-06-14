@@ -223,6 +223,13 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--mode-line-timer nil
   "Pending timer for coalesced Nostr mode-line redisplay.")
 
+(defconst nostr-relay--mode-line-spinner-frames
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Braille frames used for compact Nostr activity in the mode line.")
+
+(defvar nostr-relay--mode-line-spinner-index 0
+  "Current index into `nostr-relay--mode-line-spinner-frames'.")
+
 (defvar nostr-current-pubkey)
 
 (defun nostr-relay--ensure-mode-line ()
@@ -241,37 +248,47 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
   (+ (hash-table-count nostr-relay--search-request-counts)
      (hash-table-count nostr-relay--search-author-request-counts)))
 
-(defun nostr-relay--update-mode-line ()
-  "Refresh the Nostr relay activity mode-line segment state."
-  (nostr-relay--ensure-mode-line)
-  (let ((profiles (nostr-relay--pending-profile-count))
-        (searches (nostr-relay--pending-search-count))
-        (connecting (length nostr-relay--connect-queue)))
-    (setq nostr-relay--mode-line-string
-          (cond
-           ((> searches 0)
-            (format " Nostr:searching %d" searches))
-           ((and (> nostr-relay--ingested-event-count 0)
-                 (> profiles 0))
-            (format " Nostr:loading %d events/%d profiles"
-                    nostr-relay--ingested-event-count profiles))
-           ((> nostr-relay--ingested-event-count 0)
-            (format " Nostr:loading %d events" nostr-relay--ingested-event-count))
-           ((> profiles 0)
-            (format " Nostr:profiles %d" profiles))
-           ((> connecting 0)
-            (format " Nostr:connecting %d" connecting))
-           (t nil))))
-  ;; Relay process filters can run while redisplay is evaluating third-party
-  ;; mode-line forms.  Do not force an immediate all-frame mode-line update
-  ;; from that path; coalesce the visual invalidation onto the timer queue.
+(defun nostr-relay--mode-line-active-p ()
+  "Return non-nil when relay activity should show in the mode line."
+  (or (> (nostr-relay--pending-search-count) 0)
+      (> nostr-relay--ingested-event-count 0)
+      (> (nostr-relay--pending-profile-count) 0)
+      (> (length nostr-relay--connect-queue) 0)))
+
+(defun nostr-relay--mode-line-spinner-string ()
+  "Return compact spinner text for Nostr relay activity."
+  (format " Nostr %s"
+          (aref nostr-relay--mode-line-spinner-frames
+                nostr-relay--mode-line-spinner-index)))
+
+(defun nostr-relay--schedule-mode-line-refresh ()
+  "Schedule a coalesced mode-line refresh and spinner tick."
   (unless (timerp nostr-relay--mode-line-timer)
     (setq nostr-relay--mode-line-timer
           (run-at-time
            0.2 nil
            (lambda ()
              (setq nostr-relay--mode-line-timer nil)
-             (force-mode-line-update))))))
+             (when nostr-relay--mode-line-string
+               (setq nostr-relay--mode-line-spinner-index
+                     (mod (1+ nostr-relay--mode-line-spinner-index)
+                          (length nostr-relay--mode-line-spinner-frames)))
+               (setq nostr-relay--mode-line-string
+                     (nostr-relay--mode-line-spinner-string)))
+             (force-mode-line-update)
+             (when nostr-relay--mode-line-string
+               (nostr-relay--schedule-mode-line-refresh)))))))
+
+(defun nostr-relay--update-mode-line ()
+  "Refresh the Nostr relay activity mode-line segment state."
+  (nostr-relay--ensure-mode-line)
+  (setq nostr-relay--mode-line-string
+        (when (nostr-relay--mode-line-active-p)
+          (nostr-relay--mode-line-spinner-string)))
+  ;; Relay process filters can run while redisplay is evaluating third-party
+  ;; mode-line forms.  Do not force an immediate all-frame mode-line update
+  ;; from that path; coalesce the visual invalidation onto the timer queue.
+  (nostr-relay--schedule-mode-line-refresh))
 
 (defun nostr-relay--clear-recent-activity ()
   "Clear recent relay ingestion activity from the mode line."

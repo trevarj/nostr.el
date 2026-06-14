@@ -1481,7 +1481,7 @@
       (should (nostr-db-select-profile "odell-pubkey")))))
 
 (ert-deftest nostr-search-progress-appears-in-mode-line ()
-  "Relay-backed search requests show and clear mode-line progress."
+  "Relay-backed search requests show and clear compact mode-line progress."
   (let ((nostr-relay--connections (make-hash-table :test #'equal))
         (nostr-relay--search-request-counts (make-hash-table :test #'equal))
         (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
@@ -1499,7 +1499,7 @@
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
                (lambda (&rest _) nil)))
       (let ((sub-id (nostr-relay-search "ODELL" 25)))
-        (should (string-match-p "Nostr:searching 1"
+        (should (string-match-p " Nostr [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
                                 nostr-relay--mode-line-string))
         (should (timerp (gethash sub-id nostr-relay--search-timeout-timers)))
         (nostr-relay--note-search-eose sub-id)
@@ -1519,7 +1519,7 @@
     (unwind-protect
         (progn
           (nostr-relay--track-search-request "search-timeout" 1)
-          (should (string-match-p "Nostr:searching 1"
+          (should (string-match-p " Nostr [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
                                   nostr-relay--mode-line-string))
           (should (timerp (gethash "search-timeout"
                                    nostr-relay--search-timeout-timers)))
@@ -1703,7 +1703,7 @@
                          (list nostr-kind-metadata)))))))
 
 (ert-deftest nostr-relay-mode-line-shows-ingestion-and-profile-backfill ()
-  "Relay ingestion updates a compact global mode-line loading indicator."
+  "Relay ingestion updates a compact global mode-line loading spinner."
   (nostr-test-with-db
     (let ((nostr-relay-verify-events nil)
           (nostr-relay--connections (make-hash-table :test #'equal))
@@ -1729,8 +1729,8 @@
                  (tags . nil)
                  (content . "hello")
                  (sig . "sig")))
-              (should (equal nostr-relay--mode-line-string
-                             " Nostr:loading 1 events/1 profiles"))
+              (should (string-match-p " Nostr [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+                                      nostr-relay--mode-line-string))
               (nostr-relay--handle-event
                "wss://relay.example"
                "profile-sub"
@@ -1741,8 +1741,8 @@
                  (tags . nil)
                  (content . "{\"name\":\"Alice\",\"picture\":\"https://example.test/a.png\"}")
                  (sig . "sig")))
-              (should (equal nostr-relay--mode-line-string
-                             " Nostr:loading 2 events"))
+              (should (string-match-p " Nostr [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+                                      nostr-relay--mode-line-string))
               (nostr-relay--clear-recent-activity)
               (should-not nostr-relay--mode-line-string)))
         (when (timerp nostr-relay--activity-timer)
