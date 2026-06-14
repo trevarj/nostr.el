@@ -199,8 +199,9 @@
          (profiles (nostr-search--select-profiles nostr-search-query))
          (results (nostr-search--select-local nostr-search-query))
          (total (+ (length profiles) (length results))))
-    (nostr-relay-fetch-event-metadata
-     (mapcar (lambda (event) (alist-get 'id event)) results))
+    (let ((ids (mapcar (lambda (event) (alist-get 'id event)) results)))
+      (nostr-relay-fetch-event-metadata ids)
+      (nostr-relay-subscribe-visible-reactions ids))
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      "Search"

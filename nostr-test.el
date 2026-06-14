@@ -243,6 +243,32 @@
       (let ((text (buffer-substring-no-properties (point-min) (point-max))))
         (should (string-match-p "♥ 1" text))))))
 
+(ert-deftest nostr-ui-refresh-note-counts-updates-visible-footer ()
+  "Targeted count refresh updates the visible card footer without full redraw."
+  (nostr-test-with-db
+    (nostr-test-store-text-note "reacted-note" "alice" 100 "hello")
+    (with-temp-buffer
+      (nostr-ui-insert-note '((id . "reacted-note")
+                              (pubkey . "alice")
+                              (created-at . 100)
+                              (kind . 1)
+                              (content . "hello")))
+      (should (string-match-p "♥ 0"
+                              (buffer-substring-no-properties
+                               (point-min) (point-max))))
+      (nostr-db-store-event
+       '((id . "reaction-targeted")
+         (pubkey . "me")
+         (created_at . 101)
+         (kind . 7)
+         (tags . (("e" "reacted-note")))
+         (content . "+")
+         (sig . "sig")))
+      (nostr-ui-refresh-note-counts "reacted-note")
+      (should (string-match-p "♥ 1"
+                              (buffer-substring-no-properties
+                               (point-min) (point-max)))))))
+
 (ert-deftest nostr-timeline-primary-feeds-render-accumulated-reactions ()
   "Feed, Conversations, and My Posts cards show DB-backed reaction counts."
   (nostr-test-with-db
@@ -1326,6 +1352,26 @@
     (should (= (caar (last sent)) nostr-kind-reaction))
     (should (= (caar sent) nostr-kind-repost))))
 
+(ert-deftest nostr-actions-reaction-refreshes-target-counts ()
+  "Sending a reaction refreshes the reacted note footer immediately."
+  (let (refreshed)
+    (cl-letf (((symbol-function 'nostr-backend-sign-event)
+               (lambda (kind tags _content success _error)
+                 (funcall success `((client_message . "[\"EVENT\",{}]")
+                                    (event . ((id . "signed-reaction")
+                                              (kind . ,kind)
+                                              (created_at . 1)
+                                              (tags . ,tags)))))))
+              ((symbol-function 'nostr-relay-send-client-message) #'ignore)
+              ((symbol-function 'nostr-db-store-event) #'ignore)
+              ((symbol-function 'nostr-ui-refresh-note-counts)
+               (lambda (event-id) (setq refreshed event-id))))
+      (nostr-actions-like '((id . "note1")
+                            (pubkey . "alice")
+                            (kind . 1)
+                            (relay . "wss://relay.example"))))
+    (should (equal refreshed "note1"))))
+
 (ert-deftest nostr-actions-follow-tags-preserve-existing-follows ()
   (nostr-test-with-db
     (let ((nostr-current-pubkey "me"))
@@ -1956,6 +2002,37 @@
           (should (= 2 (cl-count kind kinds)))))
       (should (= (nostr-relay-fetch-event-metadata '("note1" "note2")) 0))
       (should (= (length sent) 8)))))
+
+(ert-deftest nostr-relay-visible-reactions-ignore-metadata-ttl ()
+  "Visible reaction subscriptions stay independent from metadata backfill TTL."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--event-metadata-requests (make-hash-table :test #'equal))
+        (nostr-relay--visible-reaction-sub-id nil)
+        (nostr-relay--visible-reaction-event-ids nil)
+        (nostr-relay-visible-reaction-window-seconds 300)
+        (now 1000.0)
+        sent)
+    (puthash "note1" now nostr-relay--event-metadata-requests)
+    (puthash "wss://relay-a.example" t nostr-relay--connections)
+    (puthash "wss://relay-b.example" t nostr-relay--connections)
+    (cl-letf (((symbol-function 'float-time) (lambda () now))
+              ((symbol-function 'nostr-relay-subscribe)
+               (lambda (url sub-id filters)
+                 (puthash sub-id t nostr-relay--subscriptions)
+                 (push (list url sub-id filters) sent))))
+      (should (= (nostr-relay-fetch-event-metadata '("note1")) 0))
+      (should (= (nostr-relay-subscribe-visible-reactions '("note1")) 2))
+      (should (= (length sent) 2))
+      (pcase-let ((`(,_url ,sub-id ,filters) (car sent)))
+        (should (string-prefix-p "visible-reactions-" sub-id))
+        (should (equal (alist-get "kinds" (car filters) nil nil #'equal)
+                       (list nostr-kind-reaction)))
+        (should (equal (alist-get "#e" (car filters) nil nil #'equal)
+                       '("note1")))
+        (should (= (alist-get "since" (car filters) nil nil #'equal) 700)))
+      (should (= (nostr-relay-subscribe-visible-reactions '("note1")) 0))
+      (should (= (length sent) 2)))))
 
 (ert-deftest nostr-relay-fetch-events-by-id-requests-missing-context ()
   "Thread backfill requests missing root/parent events directly by id."

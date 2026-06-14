@@ -143,10 +143,10 @@
      (if root-id
          (format "Focused conversation for %s." root-id)
        "Focused conversation."))
-    (nostr-relay-fetch-event-metadata
-     (nostr-thread--context-ids nostr-thread-root-event events))
-    (nostr-relay-fetch-events-by-id
-     (nostr-thread--context-ids nostr-thread-root-event events))
+    (let ((context-ids (nostr-thread--context-ids nostr-thread-root-event events)))
+      (nostr-relay-fetch-event-metadata context-ids)
+      (nostr-relay-subscribe-visible-reactions context-ids)
+      (nostr-relay-fetch-events-by-id context-ids))
     (if events
         (dolist (event events)
           (nostr-ui-insert-note

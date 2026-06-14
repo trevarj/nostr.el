@@ -207,8 +207,9 @@
 
 (defun nostr-profile--backfill-visible-metadata (notes)
   "Request relay metadata for visible profile NOTES."
-  (nostr-relay-fetch-event-metadata
-   (mapcar (lambda (event) (alist-get 'id event)) notes)))
+  (let ((ids (mapcar (lambda (event) (alist-get 'id event)) notes)))
+    (nostr-relay-fetch-event-metadata ids)
+    (nostr-relay-subscribe-visible-reactions ids)))
 
 (defun nostr-profile--insert-header (profile)
   "Insert PROFILE metadata section."

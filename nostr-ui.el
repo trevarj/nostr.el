@@ -1055,6 +1055,94 @@ may carry richer inline stats."
                  (nostr-ui--publish-footer-chips event))))
     (string-join parts "   ")))
 
+(defun nostr-ui--insert-note-footer (event indent)
+  "Insert EVENT's stats footer with metadata for targeted refresh."
+  (let ((start (point))
+        (event-id (alist-get 'id event)))
+    (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
+                                 indent)
+    (add-text-properties
+     start (point)
+     `(nostr-ui-note-footer ,event-id
+       nostr-ui-note-footer-indent ,indent
+       rear-nonsticky t))))
+
+(defun nostr-ui--shift-section-position (value pivot delta)
+  "Return VALUE shifted by DELTA when it is after PIVOT."
+  (if (and (integerp value) (>= value pivot))
+      (+ value delta)
+    value))
+
+(defun nostr-ui--note-footer-position (event-id start end)
+  "Return footer position for EVENT-ID between START and END."
+  (let (pos found)
+    (setq pos start)
+    (while (and (not found) (< pos end))
+      (when (equal (get-text-property pos 'nostr-ui-note-footer) event-id)
+        (setq found pos))
+      (setq pos (next-single-property-change
+                 pos 'nostr-ui-note-footer nil end)))
+    found))
+
+(defun nostr-ui--refresh-section-note-footer (section)
+  "Refresh SECTION's note footer from current cached counts."
+  (when (and (eq (nostr-ui-section-type section) 'note)
+             (nostr-ui-section-id section))
+    (let* ((event (nostr-ui-section-data section))
+           (event-id (nostr-ui-section-id section))
+           (start (nostr-ui-section-content-start section))
+           (end (nostr-ui-section-end section))
+           (pos (and start end
+                     (nostr-ui--note-footer-position event-id start end))))
+      (when pos
+        (let* ((indent (or (get-text-property pos 'nostr-ui-note-footer-indent)
+                           ""))
+               (old-start (save-excursion
+                            (goto-char pos)
+                            (line-beginning-position)))
+               (old-end (save-excursion
+                          (goto-char pos)
+                          (line-beginning-position 2)))
+               (new-text (with-temp-buffer
+                           (nostr-ui--insert-note-footer event indent)
+                           (buffer-string)))
+               (old-len (- old-end old-start))
+               (new-len (length new-text))
+               (delta (- new-len old-len))
+               (inhibit-read-only t))
+          (delete-region old-start old-end)
+          (goto-char old-start)
+          (insert new-text)
+          (when (/= delta 0)
+            (dolist (candidate nostr-ui--sections)
+              (setf (nostr-ui-section-start candidate)
+                    (nostr-ui--shift-section-position
+                     (nostr-ui-section-start candidate) old-end delta))
+              (setf (nostr-ui-section-content-start candidate)
+                    (nostr-ui--shift-section-position
+                     (nostr-ui-section-content-start candidate) old-end delta))
+              (setf (nostr-ui-section-end candidate)
+                    (nostr-ui--shift-section-position
+                     (nostr-ui-section-end candidate) old-end delta)))
+            (when-let* ((overlay (nostr-ui-section-overlay section)))
+              (move-overlay overlay
+                            (nostr-ui-section-content-start section)
+                            (nostr-ui-section-end section))))
+          t)))))
+
+(defun nostr-ui-refresh-note-counts (event-id)
+  "Refresh visible note-count footers for EVENT-ID across Nostr buffers."
+  (when (stringp event-id)
+    (dolist (buffer (buffer-list))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (and nostr-ui--sections
+                     (hash-table-p nostr-ui--event-counts-cache))
+            (remhash event-id nostr-ui--event-counts-cache))
+          (dolist (section nostr-ui--sections)
+            (when (equal (nostr-ui-section-id section) event-id)
+              (nostr-ui--refresh-section-note-footer section))))))))
+
 (defun nostr-ui--note-badges (event style)
   "Return compact metadata badges for EVENT using STYLE."
   (let* ((created (or (alist-get 'created-at event) (alist-get 'created_at event)))
@@ -1479,8 +1567,7 @@ thread/detail style uses exact dates."
                            (if (> embed-depth 0)
                                (nostr-ui--insert-nevent-summaries event indent)
                              (nostr-ui--insert-nevent-embeds event depth style embed-depth))
-			   (nostr-ui-insert-badge-line (split-string (nostr-ui--note-footer event) "   ")
-						       (concat indent "  "))
+                           (nostr-ui--insert-note-footer event (concat indent "  "))
 			   (insert "\n")
 			   (insert "\n"))))
 

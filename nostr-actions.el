@@ -24,6 +24,7 @@
 
 (defvar nostr-current-pubkey)
 (declare-function nostr-compose-open "nostr-compose" (&optional reply-to extra-tags))
+(declare-function nostr-ui-refresh-note-counts "nostr-ui" (event-id))
 
 (defvar nostr-actions-after-send-hook nil
   "Hook run with the signed event after a public action is sent.")
@@ -55,8 +56,13 @@
        (when client-message
          (nostr-relay-send-client-message client-message))
        (when event
-         (nostr-db-store-event (nostr-event-normalize event nil))
-         (run-hook-with-args 'nostr-actions-after-send-hook event))
+         (let ((normalized (nostr-event-normalize event nil)))
+           (nostr-db-store-event normalized)
+           (when (and (equal (alist-get 'kind normalized) nostr-kind-reaction)
+                      (fboundp 'nostr-ui-refresh-note-counts))
+             (when-let* ((target (nostr-event-reaction-event-id normalized)))
+               (nostr-ui-refresh-note-counts target)))
+           (run-hook-with-args 'nostr-actions-after-send-hook normalized)))
        (when after-send
          (funcall after-send event))
        (message "%s" success-message)))

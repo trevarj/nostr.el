@@ -170,8 +170,9 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
   "Request relay metadata for visible timeline EVENTS."
   (setq events (seq-take events nostr-timeline-metadata-backfill-limit))
   (nostr-timeline--backfill-profiles events)
-  (nostr-relay-fetch-event-metadata
-   (mapcar (lambda (event) (alist-get 'id event)) events)))
+  (let ((ids (mapcar (lambda (event) (alist-get 'id event)) events)))
+    (nostr-relay-fetch-event-metadata ids)
+    (nostr-relay-subscribe-visible-reactions ids)))
 
 (defun nostr-timeline--backfill-missing-reposts ()
   "Request reposted notes that are referenced by followed accounts."

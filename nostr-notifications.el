@@ -375,10 +375,11 @@
                    (nostr-notifications--unread-count notifications)
                    (length notifications)))
           (nostr-ui-insert-primary-nav nostr-ui-primary-nav-items 'notifications)
-          (nostr-relay-fetch-event-metadata
-           (mapcar (lambda (notification)
-                     (alist-get 'event-id notification))
-                   notifications))
+          (let ((ids (mapcar (lambda (notification)
+                                (alist-get 'event-id notification))
+                              notifications)))
+            (nostr-relay-fetch-event-metadata ids)
+            (nostr-relay-subscribe-visible-reactions ids))
           (if notifications
               (dolist (notification notifications)
                 (nostr-notifications--insert-notification notification))
