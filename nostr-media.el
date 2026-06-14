@@ -51,6 +51,11 @@ commands still operate on every supported media URL in the selected note."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-media-failure-cooldown 300
+  "Seconds to suppress automatic retries for a media URL after fetch failure."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-media-inline-image-max-width 720
   "Maximum pixel width for inline media images."
   :type 'integer
@@ -75,6 +80,12 @@ commands still operate on every supported media URL in the selected note."
   "Optional test hook used to fetch media.
 The function receives URL, SUCCESS and ERROR.  SUCCESS receives HEADERS and
 binary DATA.  ERROR receives a human-readable message.")
+
+(defvar nostr-media--in-flight (make-hash-table :test #'equal)
+  "Media URLs currently being fetched, mapped to success callback lists.")
+
+(defvar nostr-media--recent-failures (make-hash-table :test #'equal)
+  "Recently failed media URLs, mapped to cons cells of time and message.")
 
 (defun nostr-media--url-extension (url)
   "Return a cache file extension for URL."
@@ -188,11 +199,60 @@ binary DATA.  ERROR receives a human-readable message.")
          (kill-buffer (current-buffer))))
      nil t)))
 
-(defun nostr-media-fetch (url success error)
-  "Fetch URL and call SUCCESS with headers/data or ERROR with a message."
-  (if nostr-media-fetch-function
-      (funcall nostr-media-fetch-function url success error)
-    (nostr-media--fetch-head-then-body url success error)))
+(defun nostr-media--failure-cooling-down-p (url)
+  "Return non-nil when URL is still inside the media failure cooldown."
+  (when-let* ((failure (gethash url nostr-media--recent-failures)))
+    (< (- (float-time) (car failure))
+       nostr-media-failure-cooldown)))
+
+(defun nostr-media--remember-failure (url message)
+  "Remember failed URL with MESSAGE for retry suppression."
+  (puthash url (cons (float-time) message) nostr-media--recent-failures))
+
+(defun nostr-media-fetch (url success error &optional force)
+  "Fetch URL and call SUCCESS with headers/data or ERROR with a message.
+When FORCE is non-nil, bypass recent failure suppression."
+  (cond
+   ((and (not force)
+         (nostr-media--failure-cooling-down-p url))
+    nil)
+   ((gethash url nostr-media--in-flight)
+    (puthash url
+             (cons success (gethash url nostr-media--in-flight))
+             nostr-media--in-flight)
+    url)
+   (t
+    (puthash url (list success) nostr-media--in-flight)
+    (let ((settled nil))
+      (cl-labels
+          ((finish-success
+            (headers data)
+            (unless settled
+              (setq settled t)
+              (let ((callbacks (gethash url nostr-media--in-flight)))
+                (remhash url nostr-media--in-flight)
+                (remhash url nostr-media--recent-failures)
+                (dolist (callback callbacks)
+                  (funcall callback headers data)))))
+           (finish-error
+            (message)
+            (unless settled
+              (setq settled t)
+              (remhash url nostr-media--in-flight)
+              (nostr-media--remember-failure url message)
+              ;; One failed request may have many renderers waiting on it.
+              ;; Report once; later automatic attempts are quiet during the
+              ;; cooldown.
+              (funcall error message))))
+        (condition-case err
+            (if nostr-media-fetch-function
+                (funcall nostr-media-fetch-function
+                         url #'finish-success #'finish-error)
+              (nostr-media--fetch-head-then-body
+               url #'finish-success #'finish-error))
+          (error
+           (finish-error (error-message-string err))))))
+    url)))
 
 (defun nostr-media-url-at-point ()
   "Return the media URL represented at point, when any."
@@ -336,10 +396,11 @@ Return the number of removed preview blocks."
     file))
 
 ;;;###autoload
-(defun nostr-media-load-at-point (&optional cached-only)
+(defun nostr-media-load-at-point (&optional cached-only force)
   "Load and render the media placeholder at point.
 When CACHED-ONLY is non-nil, render only an existing cached file and do not
-start a network request."
+start a network request.  When FORCE is non-nil, bypass recent failure
+suppression."
   (interactive)
   (let* ((url (or (nostr-media-url-at-point)
                   (user-error "No Nostr media placeholder at point")))
@@ -361,10 +422,11 @@ start a network request."
              (nostr-media-render-file-at-point
               url
               (nostr-media--write-cache url headers data)
-              marker)
+             marker)
            (error (message "[nostr] %s" (error-message-string err)))))
        (lambda (message)
-         (message "[nostr] %s" message)))
+         (message "[nostr] %s" message))
+       (or force (called-interactively-p 'interactive)))
       url))))
 
 ;;;###autoload

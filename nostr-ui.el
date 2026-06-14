@@ -726,7 +726,7 @@ When URL is non-nil, add media properties for the source URL."
               (insert (nostr-ui--avatar-string url size))))
           (setq pos (if (= next pos) (1+ pos) next)))))))
 
-(defun nostr-ui-load-avatar-at-point (&optional button)
+(defun nostr-ui-load-avatar-at-point (&optional button force)
   "Load avatar at point or BUTTON and replace the placeholder in-place."
   (interactive)
   (let* ((button (or button
@@ -755,7 +755,8 @@ When URL is non-nil, add media properties for the source URL."
                      (nostr-ui--replace-avatar-placeholders url size))))
              (error (message "[nostr] %s" (error-message-string err)))))
          (lambda (message)
-           (message "[nostr] %s" message)))))
+           (message "[nostr] %s" message))
+         (or force (called-interactively-p 'interactive)))))
     url))
 
 (defun nostr-ui--maybe-auto-load-avatar (button url)
@@ -794,7 +795,7 @@ shared media cache and replaces itself in-place."
                'nostr-media-url url
                'nostr-avatar-size size
                'help-echo "Load this profile picture"
-               'action (lambda (button) (nostr-ui-load-avatar-at-point button)))
+               'action (lambda (button) (nostr-ui-load-avatar-at-point button t)))
               (nostr-ui--maybe-auto-load-avatar (button-at (1- (point))) url)))
         (insert (nostr-ui--default-avatar-string size))))))
 
@@ -1294,7 +1295,7 @@ looked up from the memoized full counts alist for the event id."
      'action (lambda (button)
                (if (eq (button-get button 'nostr-media-type) 'video)
                    (nostr-media-play-video-at-point button)
-                 (nostr-media-load-at-point))))
+                 (nostr-media-load-at-point nil t))))
     (insert "\n")))
 
 (defun nostr-ui--insert-note-heading (section indent picture author)
@@ -1439,7 +1440,7 @@ looked up from the memoized full counts alist for the event id."
           (when-let* ((position (nostr-ui--media-placeholder-position url start end)))
             (save-excursion
               (goto-char position)
-              (nostr-media-load-at-point))))
+              (nostr-media-load-at-point nil t))))
         (message "Loading %d media preview%s"
                  (length image-urls)
                  (if (= (length image-urls) 1) "" "s")))))))

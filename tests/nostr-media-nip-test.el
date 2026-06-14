@@ -96,6 +96,62 @@
           (should-not (string-match-p "\\[image loaded:" (buffer-string))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-media-deduplicates-in-flight-fetches ()
+  "Duplicate media fetches for one URL share one network request."
+  (let* ((url "https://example.com/flaky.jpg")
+         (nostr-media--in-flight (make-hash-table :test #'equal))
+         (nostr-media--recent-failures (make-hash-table :test #'equal))
+         captured-error
+         (fetch-count 0)
+         (error-count 0)
+         (success-count 0)
+         (nostr-media-fetch-function
+          (lambda (requested-url _success error)
+            (should (equal requested-url url))
+            (setq fetch-count (1+ fetch-count))
+            (setq captured-error error))))
+    (nostr-media-fetch
+     url
+     (lambda (_headers _data)
+       (setq success-count (1+ success-count)))
+     (lambda (_message)
+       (setq error-count (1+ error-count))))
+    (nostr-media-fetch
+     url
+     (lambda (_headers _data)
+       (setq success-count (1+ success-count)))
+     (lambda (_message)
+       (setq error-count (1+ error-count))))
+    (should (= fetch-count 1))
+    (funcall captured-error "boom")
+    (should (= error-count 1))
+    (should (= success-count 0))))
+
+(ert-deftest nostr-media-suppresses-recent-failure-retries ()
+  "Recently failed media URLs do not auto-fetch again until forced."
+  (let* ((url "https://example.com/flaky.jpg")
+         (nostr-media--in-flight (make-hash-table :test #'equal))
+         (nostr-media--recent-failures (make-hash-table :test #'equal))
+         (nostr-media-failure-cooldown 60)
+         captured-error
+         (fetch-count 0)
+         (error-count 0)
+         (nostr-media-fetch-function
+          (lambda (_requested-url _success error)
+            (setq fetch-count (1+ fetch-count))
+            (setq captured-error error))))
+    (nostr-media-fetch url #'ignore (lambda (_message)
+                                      (setq error-count (1+ error-count))))
+    (funcall captured-error "boom")
+    (nostr-media-fetch url #'ignore (lambda (_message)
+                                      (setq error-count (1+ error-count))))
+    (should (= fetch-count 1))
+    (should (= error-count 1))
+    (nostr-media-fetch url #'ignore (lambda (_message)
+                                      (setq error-count (1+ error-count)))
+                       t)
+    (should (= fetch-count 2))))
+
 (ert-deftest nostr-media-video-placeholder-plays-without-fetching ()
   "Video media placeholders play directly without downloading."
   (let ((url "https://example.com/movie.mp4")
