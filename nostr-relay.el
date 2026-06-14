@@ -22,6 +22,7 @@
 (require 'nostr-event)
 
 (declare-function nostr-ui-refresh-note-counts "nostr-ui" (event-id))
+(declare-function nostr-visible-note-ids "nostr" ())
 
 (defcustom nostr-relay-urls '("wss://relay.primal.net"
                               "wss://relay.damus.io")
@@ -200,6 +201,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 
 (defvar nostr-relay--visible-reaction-event-ids nil
   "Event ids currently tracked by the visible-card reaction subscription.")
+
+(defvar nostr-relay--visible-reaction-relays (make-hash-table :test #'equal)
+  "Relay URLs that received the active visible-card reaction subscription.")
 
 (defvar nostr-relay--event-id-requests (make-hash-table :test #'equal)
   "Event ids recently requested directly by id.")
@@ -914,7 +918,10 @@ nil on failure."
                              (nostr-relay--drain-pending-subscriptions url)
                              (when pubkey
                                (nostr-relay-subscribe-personal url pubkey)
-                               (nostr-relay-subscribe-follows-feed url pubkey)))
+                               (nostr-relay-subscribe-follows-feed url pubkey))
+                             (when (fboundp 'nostr-visible-note-ids)
+                               (nostr-relay-subscribe-visible-reactions
+                                (nostr-visible-note-ids) nil (list url))))
                   :on-error (lambda (_ws _type err)
                               ;; HTTP upgrade failures such as relay-side 503s
                               ;; should mark only that relay unhealthy, not emit
@@ -1116,6 +1123,7 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
         nostr-relay--verify-queue nil
         nostr-relay--visible-reaction-sub-id nil
         nostr-relay--visible-reaction-event-ids nil)
+  (clrhash nostr-relay--visible-reaction-relays)
   (nostr-relay--update-mode-line))
 
 (defun nostr-relay-publish-target-urls ()
@@ -1360,11 +1368,30 @@ suppressed so frequent UI refreshes do not spam relays."
             (puthash event-id now nostr-relay--event-metadata-requests))))
     sent))
 
-(defun nostr-relay-subscribe-visible-reactions (event-ids &optional limit)
+(defun nostr-relay--visible-reaction-filter (event-ids &optional limit)
+  "Return a NIP-25 reaction filter for visible EVENT-IDS.
+NIP-01 filter fields are ANDed, so this intentionally does not add `authors'
+or `#p': visible note counts need every kind-7 event tagging these note ids."
+  (append `(("kinds" . (,nostr-kind-reaction))
+            ("#e" . ,event-ids))
+          (when nostr-relay-visible-reaction-window-seconds
+            `(("since" . ,(max 0 (- (floor (float-time))
+                                    nostr-relay-visible-reaction-window-seconds)))))
+          (when limit
+            `(("limit" . ,limit)))))
+
+(defun nostr-relay--connected-urls ()
+  "Return connected relay URLs."
+  (let (urls)
+    (maphash (lambda (url _ws) (push url urls)) nostr-relay--connections)
+    (nreverse urls)))
+
+(defun nostr-relay-subscribe-visible-reactions (event-ids &optional limit urls)
   "Keep an open reaction subscription for visible EVENT-IDS.
 Unlike `nostr-relay-fetch-event-metadata', this is not TTL-suppressed: it is
 the live path that keeps note-card reaction counts current while cards are
-visible."
+visible.  When URLS is non-nil, subscribe only those relays; this lets a relay
+that opens after the UI render catch up without disturbing existing relays."
   (let* ((ids (delete-dups (seq-filter #'stringp (copy-sequence event-ids))))
          (ids-key (sort (copy-sequence ids) #'string<))
          (sent 0))
@@ -1373,22 +1400,22 @@ visible."
         (nostr-relay-close-subscription-all nostr-relay--visible-reaction-sub-id))
       (setq nostr-relay--visible-reaction-sub-id nil
             nostr-relay--visible-reaction-event-ids nil)
-      (if (not ids)
-          (setq nostr-relay--visible-reaction-event-ids nil)
-        (let* ((sub-id (nostr-relay--sub-id "visible-reactions" ids-key))
-               (filter `(("kinds" . (,nostr-kind-reaction))
-                         ("#e" . ,ids)
-                         ,@(when nostr-relay-visible-reaction-window-seconds
-                             `(("since" . ,(max 0 (- (floor (float-time))
-                                                     nostr-relay-visible-reaction-window-seconds)))))
-                         ("limit" . ,(or limit (* 8 (length ids)))))))
-          (maphash (lambda (url _ws)
-                     (nostr-relay-subscribe url sub-id (list filter))
-                     (setq sent (1+ sent)))
-                   nostr-relay--connections)
-          (when (> sent 0)
-            (setq nostr-relay--visible-reaction-sub-id sub-id
-                  nostr-relay--visible-reaction-event-ids ids-key)))))
+      (clrhash nostr-relay--visible-reaction-relays))
+    (if (not ids)
+        (setq nostr-relay--visible-reaction-event-ids nil)
+      (let* ((sub-id (or nostr-relay--visible-reaction-sub-id
+                         (nostr-relay--sub-id "visible-reactions" ids-key)))
+             (filter (nostr-relay--visible-reaction-filter ids limit))
+             (target-urls (or urls (nostr-relay--connected-urls))))
+        (dolist (url target-urls)
+          (when (and (gethash url nostr-relay--connections)
+                     (not (gethash url nostr-relay--visible-reaction-relays)))
+            (nostr-relay-subscribe url sub-id (list filter))
+            (puthash url t nostr-relay--visible-reaction-relays)
+            (setq sent (1+ sent))))
+        (when (or (> sent 0) nostr-relay--visible-reaction-sub-id)
+          (setq nostr-relay--visible-reaction-sub-id sub-id
+                nostr-relay--visible-reaction-event-ids ids-key))))
     sent))
 
 (defun nostr-relay--fresh-missing-event-ids (event-ids now)

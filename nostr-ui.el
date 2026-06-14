@@ -303,6 +303,16 @@ them, but timeline navigation should move between primary cards only."
                 (null (nostr-ui-section-parent section)))
               (nostr-ui--sections-by-start)))
 
+(defun nostr-ui-rendered-note-ids ()
+  "Return top-level rendered note event ids in display order."
+  (delete-dups
+   (seq-filter
+    #'stringp
+    (mapcar (lambda (section)
+              (when (eq (nostr-ui-section-type section) 'note)
+                (nostr-ui-section-id section)))
+            (nostr-ui--top-level-sections-by-start)))))
+
 (defun nostr-ui-section-at-point ()
   "Return the nearest Nostr UI section at point."
   (or (get-text-property (point) 'nostr-ui-section)

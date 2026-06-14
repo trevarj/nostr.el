@@ -140,6 +140,21 @@ pending refresh longer than `nostr-refresh-max-wait-seconds'."
     ('nostr-notifications-mode #'nostr-notifications-refresh)
     ('nostr-relays-mode #'nostr-relays-refresh)))
 
+(defun nostr-visible-note-ids ()
+  "Return rendered note ids from visible Nostr buffers."
+  (delete-dups
+   (apply #'append
+          (delq nil
+                (mapcar
+                 (lambda (window)
+                   (let ((buffer (window-buffer window)))
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (when (and (nostr--buffer-refresh-function)
+                                    (fboundp 'nostr-ui-rendered-note-ids))
+                           (nostr-ui-rendered-note-ids))))))
+                 (window-list nil 'no-minibuf))))))
+
 (defvar nostr--refreshing nil
   "Non-nil while `nostr-refresh-visible-buffers' is running.
 Guards against re-entrant refreshes (e.g. a window-change handler firing during
