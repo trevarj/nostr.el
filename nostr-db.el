@@ -354,6 +354,22 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
              (alist-get 'content event)
              (alist-get 'created_at event))))
 
+(defun nostr-db-select-reactions-for-event (event-id &optional limit)
+  "Return cached reactions targeting EVENT-ID, newest first.
+Rows include cached profile columns for the reactor when available."
+  (emacsql nostr-db--connection
+           [:select [reactions:id reactions:event_id reactions:pubkey
+                     reactions:content reactions:created_at
+                     profiles:name profiles:display_name profiles:about
+                     profiles:picture profiles:nip05 profiles:lud16
+                     profiles:updated_at]
+                    :from reactions
+                    :left-join profiles :on (= reactions:pubkey profiles:pubkey)
+                    :where (= reactions:event_id $s1)
+                    :order-by [(desc reactions:created_at)]
+                    :limit $s2]
+           event-id (or limit 200)))
+
 (defun nostr-db-store-repost-event (event)
   "Store kind 6 repost EVENT."
   (when-let* ((event-id (nostr-event-repost-event-id event)))

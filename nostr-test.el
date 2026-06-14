@@ -643,6 +643,37 @@
                            ("reaction-scrambled" "note1" "reactor1" "+" 101)))))
       (emacsql-close nostr-db--connection))))
 
+(ert-deftest nostr-db-select-reactions-for-event-joins-profiles ()
+  "Reaction detail rows include cached reactor profile metadata."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "target")
+       (pubkey . "alice")
+       (created_at . 100)
+       (kind . 1)
+       (tags . nil)
+       (content . "note")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "profile")
+       (pubkey . "bob")
+       (created_at . 101)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"name\":\"bob\",\"display_name\":\"Bob\"}")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "reaction")
+       (pubkey . "bob")
+       (created_at . 102)
+       (kind . 7)
+       (tags . (("e" "target")))
+       (content . "🤙")
+       (sig . "sig")))
+    (should (equal (car (nostr-db-select-reactions-for-event "target"))
+                   '("reaction" "target" "bob" "🤙" 102
+                     "bob" "Bob" nil nil nil nil 101)))))
+
 (ert-deftest nostr-db-select-thread-returns-root-and-replies ()
   (nostr-test-with-db
     (nostr-db-store-event (nostr-event-normalize nostr-test-root-event "relay"))
@@ -2432,6 +2463,15 @@
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "d")) #'nostr-timeline-discover))
   (should-not (lookup-key nostr-notifications-mode-map (kbd "G")))
   (should (eq (lookup-key nostr-notifications-mode-map (kbd "P")) #'nostr-timeline-my-posts)))
+
+(ert-deftest nostr-note-buffers-bind-view-reactions ()
+  "Timeline and thread buffers expose reaction detail commands."
+  (should (eq (lookup-key nostr-timeline-mode-map (kbd "v"))
+              #'nostr-timeline-view-reactions))
+  (should (eq (lookup-key nostr-thread-mode-map (kbd "v"))
+              #'nostr-thread-view-reactions))
+  (should (commandp #'nostr-timeline-view-reactions))
+  (should (commandp #'nostr-thread-view-reactions)))
 
 (ert-deftest nostr-ui-pages-bind-question-mark-to-transients ()
   "Every Nostr UI page exposes its action menu on `?'."

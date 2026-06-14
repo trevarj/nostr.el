@@ -16,6 +16,7 @@
 (require 'nostr-compose)
 (require 'nostr-db)
 (require 'nostr-event)
+(require 'nostr-reactions)
 (require 'nostr-relay)
 (require 'nostr-share)
 (require 'nostr-ui)
@@ -42,6 +43,7 @@
     (define-key map (kbd "o") #'nostr-thread-open-embedded-nevent)
     (define-key map (kbd "r") #'nostr-thread-reply)
     (define-key map (kbd "l") #'nostr-thread-like)
+    (define-key map (kbd "v") #'nostr-thread-view-reactions)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
     (define-key map (kbd "D") #'nostr-ui-show-publish-details)
     (define-key map (kbd "R") #'nostr-thread-repost)
@@ -72,6 +74,7 @@
     ("TAB" "Toggle note" nostr-ui-toggle-section)]
    ["Social"
     ("l" "React" nostr-thread-like)
+    ("v" "View reactions" nostr-thread-view-reactions)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
     ("R" "Repost" nostr-thread-repost)
     ("Q" "Quote" nostr-thread-quote)]
@@ -173,6 +176,12 @@
   (interactive)
   (when-let* ((event (nostr-ui-selected-data)))
     (nostr-actions-react-menu event)))
+
+(defun nostr-thread-view-reactions ()
+  "Show cached reactions for the selected thread note."
+  (interactive)
+  (when-let* ((event (nostr-ui-selected-data)))
+    (nostr-reactions-open event)))
 
 (defun nostr-thread-repost ()
   "Repost selected thread note."

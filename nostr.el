@@ -34,6 +34,7 @@
 (require 'nostr-nip)
 (require 'nostr-notifications)
 (require 'nostr-profile)
+(require 'nostr-reactions)
 (require 'nostr-relay)
 (require 'nostr-relays)
 (require 'nostr-search)

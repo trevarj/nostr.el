@@ -20,6 +20,7 @@
 (require 'nostr-dispatch)
 (require 'nostr-notifications)
 (require 'nostr-profile)
+(require 'nostr-reactions)
 (require 'nostr-relay)
 (require 'nostr-relays)
 (require 'nostr-search)
@@ -67,6 +68,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (define-key map (kbd "S") #'nostr-setup-status)
     (define-key map (kbd "r") #'nostr-timeline-reply)
     (define-key map (kbd "l") #'nostr-timeline-like)
+    (define-key map (kbd "v") #'nostr-timeline-view-reactions)
     (define-key map (kbd "m") #'nostr-ui-toggle-note-media)
     (define-key map (kbd "D") #'nostr-ui-show-publish-details)
     (define-key map (kbd "R") #'nostr-timeline-repost)
@@ -107,6 +109,7 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     ("o" "Open id" nostr-open-identifier)]
    ["Social"
     ("l" "React" nostr-timeline-like)
+    ("v" "View reactions" nostr-timeline-view-reactions)
     ("m" "Toggle media" nostr-ui-toggle-note-media)
     ("D" "Publish details" nostr-ui-show-publish-details)
     ("R" "Repost" nostr-timeline-repost)
@@ -315,6 +318,12 @@ When FORCE is non-nil, request a fresh provider/relay page."
   (interactive)
   (when-let* ((event (nostr-ui-selected-data)))
     (nostr-actions-react-menu event)))
+
+(defun nostr-timeline-view-reactions ()
+  "Show cached reactions for the selected timeline note."
+  (interactive)
+  (when-let* ((event (nostr-ui-selected-data)))
+    (nostr-reactions-open event)))
 
 (defun nostr-timeline-repost ()
   "Repost the selected timeline note."
