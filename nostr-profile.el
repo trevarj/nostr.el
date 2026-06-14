@@ -269,10 +269,11 @@
 (defun nostr-profile-open-at-point ()
   "Open the note or profile at point."
   (interactive)
-  (when-let* ((section (nostr-ui-section-at-point)))
-    (pcase (nostr-ui-section-type section)
-      ('note (nostr-thread-open (nostr-ui-section-data section)))
-      ('profile (message "Profile %s" (alist-get 'pubkey (nostr-ui-section-data section)))))))
+  (unless (nostr-ui-activate-button-at-point)
+    (when-let* ((section (nostr-ui-section-at-point)))
+      (pcase (nostr-ui-section-type section)
+        ('note (nostr-thread-open (nostr-ui-section-data section)))
+        ('profile (message "Profile %s" (alist-get 'pubkey (nostr-ui-section-data section))))))))
 
 (defun nostr-profile--refresh-buffer-after-action (buffer)
   "Return callback that refreshes profile BUFFER after an action succeeds."

@@ -333,9 +333,10 @@ When FORCE is non-nil, request a fresh provider/relay page."
 (defun nostr-timeline-open-thread ()
   "Open selected note thread."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (require 'nostr-thread)
-    (nostr-thread-open event)))
+  (unless (nostr-ui-activate-button-at-point)
+    (when-let* ((event (nostr-ui-selected-data)))
+      (require 'nostr-thread)
+      (nostr-thread-open event))))
 
 (provide 'nostr-timeline)
 ;;; nostr-timeline.el ends here

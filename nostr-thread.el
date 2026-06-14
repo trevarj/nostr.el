@@ -38,6 +38,7 @@
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
+    (define-key map (kbd "RET") #'nostr-thread-open-at-point)
     (define-key map (kbd "o") #'nostr-thread-open-embedded-nevent)
     (define-key map (kbd "r") #'nostr-thread-reply)
     (define-key map (kbd "l") #'nostr-thread-like)
@@ -62,6 +63,7 @@
     ("r" "Reply" nostr-thread-reply)
     ("a" "Open author" nostr-thread-open-author)]
    ["Thread"
+    ("RET" "Open selected" nostr-thread-open-at-point)
     ("g" "Refresh" nostr-thread-refresh)
     ("o" "Open embedded" nostr-thread-open-embedded-nevent)
     ("D" "Publish details" nostr-ui-show-publish-details)
@@ -205,6 +207,13 @@
                     (completing-read "Open embedded nevent: " nevents nil t))))
       (require 'nostr-dispatch)
       (nostr-open-identifier (string-remove-prefix "nostr:" choice)))))
+
+(defun nostr-thread-open-at-point ()
+  "Open an actionable item at point in a thread buffer."
+  (interactive)
+  (unless (nostr-ui-activate-button-at-point)
+    (when-let* ((event (nostr-ui-selected-data)))
+      (nostr-thread-open event))))
 
 (defun nostr-thread-open (event)
   "Open the conversation containing EVENT and focus EVENT."

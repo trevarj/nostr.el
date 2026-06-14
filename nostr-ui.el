@@ -137,6 +137,7 @@ Persists across renders so a repeated avatar is decoded once, not per note.")
 
 (declare-function nostr-relay-fetch-events-by-id "nostr-relay" (event-ids &optional limit))
 (declare-function nostr-relay-fetch-profile "nostr-relay" (pubkey &optional url))
+(declare-function nostr-profile-open "nostr-profile" (pubkey))
 
 (defcustom nostr-ui-show-avatars t
   "Whether note cards and profile headers show profile picture placeholders."
@@ -320,6 +321,13 @@ them, but timeline navigation should move between primary cards only."
   "Return data for the section at point."
   (when-let* ((section (nostr-ui-section-at-point)))
     (nostr-ui-section-data section)))
+
+(defun nostr-ui-activate-button-at-point ()
+  "Activate a text button at point, returning non-nil when one was handled."
+  (when-let* ((button (or (button-at (point))
+                          (button-at (max (point-min) (1- (point)))))))
+    (button-activate button)
+    t))
 
 (defun nostr-ui-update-selection ()
   "Highlight the section at point."
@@ -1071,6 +1079,14 @@ looked up from the memoized full counts alist for the event id."
       (substring value 6)
     value))
 
+(defun nostr-ui--strip-profile-reference (value)
+  "Return VALUE without profile mention prefixes."
+  (let ((text (nostr-ui--strip-nostr-uri value)))
+    (if (and (stringp text)
+             (string-prefix-p "@" text))
+        (substring text 1)
+      text)))
+
 (defun nostr-ui--short-id (value)
   "Return shortened display text for VALUE."
   (if (and (stringp value) (> (length value) 16))
@@ -1100,7 +1116,7 @@ looked up from the memoized full counts alist for the event id."
 
 (defun nostr-ui--decode-npub-pubkey (npub)
   "Return pubkey decoded from NPUB, caching the backend result."
-  (let* ((value (nostr-ui--strip-nostr-uri npub))
+  (let* ((value (nostr-ui--strip-profile-reference npub))
          (cached (gethash value nostr-ui--npub-decode-cache)))
     (cond
      ((eq cached 'invalid) nil)
@@ -1119,8 +1135,8 @@ looked up from the memoized full counts alist for the event id."
          (puthash value 'invalid nostr-ui--npub-decode-cache)
          nil))))))
 
-(defun nostr-ui--format-profile-mention (npub)
-  "Return compact mention text for NPUB."
+(defun nostr-ui--profile-mention-data (npub)
+  "Return display data for an NPUB profile mention."
   (let* ((pubkey (nostr-ui--decode-npub-pubkey npub))
          (profile (and pubkey (nostr-ui--cached-profile pubkey)))
          (name (nostr-ui--string-value
@@ -1129,12 +1145,35 @@ looked up from the memoized full counts alist for the event id."
                 (nostr-ui-format-nip05 (nth 5 profile) pubkey))))
     (when (and pubkey (not profile) (fboundp 'nostr-relay-fetch-profile))
       (nostr-relay-fetch-profile pubkey))
-    (cond
-     (name (concat "@" name))
-     (pubkey (format "@%s" (nostr-ui--shorten-identifier
-                            (or (nostr-ui--cached-npub pubkey)
-                                (nostr-ui--strip-nostr-uri npub)))))
-     (t npub))))
+    `((label . ,(cond
+                 (name (concat "@" name))
+                 (pubkey (format "@%s" (nostr-ui--shorten-identifier
+                                        (or (nostr-ui--cached-npub pubkey)
+                                            (nostr-ui--strip-profile-reference npub)))))
+                 (t npub)))
+      (pubkey . ,pubkey))))
+
+(defun nostr-ui--format-profile-mention (npub)
+  "Return compact mention text for NPUB."
+  (alist-get 'label (nostr-ui--profile-mention-data npub)))
+
+(defun nostr-ui--insert-profile-mention (npub)
+  "Insert NPUB as a clickable profile mention when it decodes."
+  (let* ((data (nostr-ui--profile-mention-data npub))
+         (label (alist-get 'label data))
+         (pubkey (alist-get 'pubkey data)))
+    (if pubkey
+        (insert-text-button
+         label
+         'follow-link t
+         'face 'button
+         'nostr-profile-pubkey pubkey
+         'help-echo "Open profile"
+         'action (lambda (button)
+                   (unless (fboundp 'nostr-profile-open)
+                     (require 'nostr-profile))
+                   (nostr-profile-open (button-get button 'nostr-profile-pubkey))))
+      (insert (propertize label 'face 'nostr-ui-content)))))
 
 (defun nostr-ui--content-with-profile-mentions (content)
   "Return CONTENT with NIP-19 npubs rendered as profile mentions."
@@ -1146,6 +1185,10 @@ looked up from the memoized full counts alist for the event id."
                     (nostr-ui--format-profile-mention npub))
                   text t t)))
     text))
+
+(defconst nostr-ui-profile-mention-regexp
+  (concat "\\(?:@\\)?" nostr-event-npub-regexp)
+  "Regexp matching npub profile references rendered as profile mentions.")
 
 (defun nostr-ui--event-by-id (event-id)
   "Return cached EVENT-ID as an event alist."
@@ -1277,9 +1320,27 @@ looked up from the memoized full counts alist for the event id."
         (let ((start (point))
               (fill-prefix prefix))
           (insert prefix)
-          (insert (propertize (string-trim paragraph) 'face 'nostr-ui-content))
+          (nostr-ui--insert-content-with-profile-mentions
+           (string-trim paragraph))
           (fill-region-as-paragraph start (point))
           (insert "\n"))))))
+
+(defun nostr-ui--insert-content-with-profile-mentions (content)
+  "Insert CONTENT, rendering npub references as profile buttons."
+  (let ((start 0)
+        (case-fold-search nil))
+    (while (string-match nostr-ui-profile-mention-regexp content start)
+      (let ((match-start (match-beginning 0))
+            (match-end (match-end 0))
+            (mention (match-string 0 content)))
+        (when (> match-start start)
+          (insert (propertize (substring content start match-start)
+                              'face 'nostr-ui-content)))
+        (nostr-ui--insert-profile-mention mention)
+        (setq start match-end)))
+    (when (< start (length content))
+      (insert (propertize (substring content start)
+                          'face 'nostr-ui-content)))))
 
 (defun nostr-ui--section-media-region (section)
   "Return cons of content bounds for SECTION."
@@ -1397,8 +1458,6 @@ thread/detail style uses exact dates."
          (represented-nevents (nostr-ui--represented-nevents event))
          (display-content (nostr-ui--content-without-nevents
                            content represented-nevents))
-         (display-content (nostr-ui--content-with-profile-mentions
-                           display-content))
          (picture (nostr-ui--event-picture event)))
     (insert indent)
     (insert (propertize "────────────────────────────────────────\n"

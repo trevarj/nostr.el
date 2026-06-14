@@ -975,6 +975,27 @@
       (should (equal (cdr (assoc "alice" pairs)) "alice-pubkey"))
       (should (equal (cdr (assoc "alice@example.test" pairs)) "alice-pubkey")))))
 
+(ert-deftest nostr-compose-mention-completion-yields-odell-for-at-o ()
+  "Compose mention completion offers ODELL after typing @O."
+  (nostr-test-with-db
+    (nostr-db-store-event
+     '((id . "odell-profile")
+       (pubkey . "odell-pubkey")
+       (created_at . 10)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"name\":\"ODELL\",\"display_name\":\"ODELL\"}")
+       (sig . "sig")))
+    (with-temp-buffer
+      (nostr-compose-mode)
+      (insert "@O")
+      (let* ((capf (nostr-compose-complete-mention))
+             (start (nth 0 capf))
+             (end (nth 1 capf))
+             (table (nth 2 capf)))
+        (should (equal (buffer-substring-no-properties start end) "O"))
+        (should (member "ODELL" (all-completions "O" table)))))))
+
 (ert-deftest nostr-compose-mention-completion-replaces-trigger-with-npub ()
   "Finished mention completion replaces @text with a NIP-19 profile reference."
   (nostr-test-with-db
@@ -1847,6 +1868,37 @@
         (goto-char (point-min))
         (nostr-timeline-open-author)))
     (should (equal opened "alice"))))
+
+(ert-deftest nostr-timeline-ret-on-profile-mention-opens-profile ()
+  "RET on an npub mention button opens the linked profile."
+  (let ((nostr-ui-show-avatars nil)
+        (nostr-ui--npub-decode-cache (make-hash-table :test #'equal))
+        opened)
+    (cl-letf (((symbol-function 'nostr-nip19-decode-sync)
+               (lambda (_value)
+                 '((ok . t) (entity . "npub") (pubkey . "profile-pubkey"))))
+              ((symbol-function 'nostr-ui--cached-profile)
+               (lambda (pubkey)
+                 (when (equal pubkey "profile-pubkey")
+                   '("profile-pubkey" "ODELL" "ODELL" nil nil nil nil nil))))
+              ((symbol-function 'nostr-profile-open)
+               (lambda (pubkey) (setq opened pubkey))))
+      (with-temp-buffer
+        (nostr-timeline-mode)
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           '((id . "mention-note")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . "hello @npub1q8g803ajr0lw3xngs0k6hn2q3mejf6dtgv05d06h6krqgv9uh97q5382kp")
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (goto-char (point-min))
+        (search-forward "@ODELL")
+        (nostr-timeline-open-thread)))
+    (should (equal opened "profile-pubkey"))))
 
 (ert-deftest nostr-timeline-mode-has-primary-navigation-keys ()
   (should (eq (lookup-key nostr-timeline-mode-map (kbd "/")) #'nostr-search-open))
