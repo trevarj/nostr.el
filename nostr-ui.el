@@ -1253,7 +1253,10 @@ may carry richer inline stats."
                 (nth 2 profile)
                 (nth 1 profile)
                 (nostr-ui-format-nip05 (nth 5 profile) pubkey))))
-    (when (and pubkey (not profile) (fboundp 'nostr-relay-fetch-profile))
+    (when (and pubkey
+               (not profile)
+               (bound-and-true-p nostr-db--connection)
+               (fboundp 'nostr-relay-fetch-profile))
       (nostr-relay-fetch-profile pubkey))
     `((label . ,(cond
                  (name (concat "@" name))
@@ -1404,7 +1407,11 @@ may carry richer inline stats."
      'action (lambda (button)
                (if (eq (button-get button 'nostr-media-type) 'video)
                    (nostr-media-play-video-at-point button)
-                 (nostr-media-load-at-point nil t))))
+                 (save-excursion
+                   ;; Button actions may run with point elsewhere, especially
+                   ;; when activated by mouse or tests.
+                   (goto-char (button-start button))
+                   (nostr-media-load-at-point nil t)))))
     (insert "\n")))
 
 (defun nostr-ui--insert-note-heading (section indent picture author)

@@ -440,6 +440,33 @@
         (should-not (string-match-p "\\[play video:"
                                     (buffer-string)))))))
 
+(ert-deftest nostr-ui-image-placeholder-action-uses-activated-button ()
+  "Image placeholder buttons load their own URL even when point is elsewhere."
+  (let ((first-url "https://example.test/first.png")
+        (second-url "https://example.test/second.png")
+        loaded-url)
+    (cl-letf (((symbol-function 'nostr-media-load-at-point)
+               (lambda (&rest _args)
+                 (setq loaded-url (nostr-media-url-at-point))
+                 loaded-url)))
+      (with-temp-buffer
+        (let ((inhibit-read-only t))
+          (nostr-ui-clear)
+          (nostr-ui-insert-note
+           `((id . "note-images")
+             (pubkey . "alice")
+             (created-at . 1736776800)
+             (content . ,(format "see %s and %s" first-url second-url))
+             (replies . 0)
+             (reactions . 0)
+             (reposts . 0))))
+        (goto-char (point-min))
+        (search-forward "[image: https://example.test/first.png]")
+        (let ((first-button (button-at (1- (point)))))
+          (search-forward "[image: https://example.test/second.png]")
+          (button-activate first-button))
+        (should (equal loaded-url first-url))))))
+
 (ert-deftest nostr-ui-toggle-note-media-plays-single-video ()
   "`m' on a single-video note opens that video without rendering a button."
   (let ((url "https://example.test/movie.mp4")
