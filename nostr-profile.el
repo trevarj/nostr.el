@@ -13,6 +13,7 @@
 
 (require 'cl-lib)
 (require 'emacsql)
+(require 'subr-x)
 (require 'nostr-actions)
 (require 'nostr-db)
 (require 'nostr-nip)
@@ -116,6 +117,31 @@
   (or (alist-get 'display-name profile)
       (alist-get 'name profile)
       (alist-get 'pubkey profile)))
+
+(defun nostr-profile--handle (profile)
+  "Return PROFILE's local handle, when distinct from its display name."
+  (let ((name (alist-get 'name profile))
+        (display-name (alist-get 'display-name profile)))
+    (when (and (stringp name)
+               (not (string-empty-p name))
+               (not (equal name display-name)))
+      (format "@%s" name))))
+
+(defun nostr-profile--identifier (profile)
+  "Return a compact verified identity, npub, or pubkey fallback for PROFILE."
+  (let* ((pubkey (alist-get 'pubkey profile))
+         (nip05 (alist-get 'nip05 profile)))
+    (or (nostr-ui-format-nip05 nip05 pubkey)
+        (when-let* ((npub (nostr-ui--cached-npub pubkey)))
+          (nostr-ui--shorten-identifier npub))
+        (nostr-ui--shorten-identifier pubkey))))
+
+(defun nostr-profile--about-preview (profile)
+  "Return a single-line about preview for PROFILE."
+  (when-let* ((about (alist-get 'about profile)))
+    (let ((text (string-trim (replace-regexp-in-string "[[:space:]\n]+" " " about))))
+      (unless (string-empty-p text)
+        (truncate-string-to-width text 140 nil nil "...")))))
 
 (defun nostr-profile--relay-summary (pubkey)
   "Return compact relay preference summary for PUBKEY."
@@ -346,16 +372,43 @@
     (_ nil)))
 
 (defun nostr-profile-list--insert-profile (profile)
-  "Insert one PROFILE row in a profile list buffer."
-  (let ((pubkey (alist-get 'pubkey profile)))
+  "Insert one PROFILE card in a profile list buffer."
+  (let* ((pubkey (alist-get 'pubkey profile))
+         (name (nostr-profile--display-name profile))
+         (handle (nostr-profile--handle profile))
+         (identifier (nostr-profile--identifier profile))
+         (about (nostr-profile--about-preview profile))
+         (followers (nostr-db-follower-count pubkey))
+         (following (nostr-db-following-count pubkey)))
     (nostr-ui-with-section 'profile pubkey profile
-        (format "%s" (nostr-profile--display-name profile))
-      (when-let* ((nip05 (alist-get 'nip05 profile)))
-        (insert (propertize "NIP-05     " 'face 'nostr-ui-meta))
-        (insert (nostr-ui-format-nip05 nip05 pubkey))
+        (lambda (section)
+          (insert (propertize "▾" 'nostr-ui-section section))
+          (insert " ")
+          (nostr-ui-insert-avatar (alist-get 'picture profile) nostr-ui-avatar-size)
+          (insert " ")
+          (insert (propertize name
+                              'face 'nostr-ui-author
+                              'nostr-ui-section section))
+          (when handle
+            (insert (propertize (format "  %s" handle)
+                                'face 'nostr-ui-meta
+                                'nostr-ui-section section)))
+          (insert "\n"))
+      (insert "  ")
+      (insert (propertize identifier 'face 'nostr-ui-meta))
+      (insert "\n")
+      (nostr-ui-insert-badge-line
+       (list (format "%d follower%s"
+                     followers
+                     (if (= followers 1) "" "s"))
+             (format "%d following" following)
+             (format "relays %s" (nostr-profile--relay-summary pubkey)))
+       "  ")
+      (when about
+        (insert "  ")
+        (insert (propertize about 'face 'nostr-ui-content))
         (insert "\n"))
-      (insert (propertize "Pubkey     " 'face 'nostr-ui-meta))
-      (insert (format "%s\n\n" pubkey)))))
+      (insert "\n"))))
 
 (defun nostr-profile-list-refresh ()
   "Refresh the current profile relationship list buffer."
