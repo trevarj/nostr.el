@@ -337,6 +337,10 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
            (alist-get 'reply-id event)
            (alist-get 'quote-id event)))
 
+(defun nostr-db-store-generic-event (event)
+  "Store cacheable non-special EVENT in the generic events table."
+  (nostr-db-store-text-event event))
+
 (defun nostr-db-store-event-relay (event)
   "Record the inbound relay that delivered EVENT, when known."
   (when-let* ((event-id (alist-get 'id event))
@@ -438,12 +442,13 @@ Rows include cached profile columns for the reactor when available."
   (pcase (alist-get 'kind event)
     (0 (nostr-db-store-profile-event event))
     (1 (nostr-db-store-text-event event))
-	    (3 (nostr-db-store-follows-event event))
-	    (6 (nostr-db-store-repost-event event))
-	    (7 (nostr-db-store-reaction-event event))
-	    (9735 (nostr-db-store-zap-event event))
-	    (10000 (nostr-db-store-mute-list-event event))
-	    (10002 (nostr-db-store-relay-list-event event))))
+    (3 (nostr-db-store-follows-event event))
+    (6 (nostr-db-store-repost-event event))
+    (7 (nostr-db-store-reaction-event event))
+    (9735 (nostr-db-store-zap-event event))
+    (10000 (nostr-db-store-mute-list-event event))
+    (10002 (nostr-db-store-relay-list-event event))
+    (_ (nostr-db-store-generic-event event))))
 
 (defun nostr-db-clear-discover-results (provider scope timeframe)
   "Clear cached Discover ordering for PROVIDER, SCOPE, and TIMEFRAME."
@@ -1030,6 +1035,28 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
                                (= events:reply_id $s1))
                     :order-by [(asc events:created_at)]]
                    root-id)))
+
+(defun nostr-db-select-addressable-event (kind pubkey identifier)
+  "Return newest cached addressable event matching KIND, PUBKEY, and IDENTIFIER."
+  (car
+   (seq-filter
+    (lambda (event)
+      (equal (or identifier "")
+             (or (nostr-event-first-tag-value (alist-get 'tags event) "d")
+                 "")))
+    (mapcar #'nostr-db--event-row-to-alist
+            (emacsql nostr-db--connection
+                     [:select
+                      [events:id events:pubkey events:created_at events:kind events:tags
+                                 events:content events:sig events:relay events:root_id events:reply_id
+                                 events:quote_id profiles:name profiles:display_name profiles:picture]
+                      :from events
+                      :left-join profiles :on (= events:pubkey profiles:pubkey)
+                      :where (and (= events:kind $s1)
+                                  (= events:pubkey $s2))
+                      :order-by [(desc events:created_at)]
+                      :limit 20]
+                     kind pubkey)))))
 
 (defun nostr-db-select-profile (pubkey)
   "Return profile for PUBKEY."

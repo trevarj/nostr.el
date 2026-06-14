@@ -42,7 +42,7 @@
     (define-key map (kbd "p") #'nostr-ui-prev-section)
     (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "RET") #'nostr-thread-open-at-point)
-    (define-key map (kbd "o") #'nostr-thread-open-embedded-nevent)
+    (define-key map (kbd "o") #'nostr-thread-open-embedded-reference)
     (define-key map (kbd "r") #'nostr-thread-reply)
     (define-key map (kbd "l") #'nostr-thread-like)
     (define-key map (kbd "v") #'nostr-thread-view-reactions)
@@ -70,7 +70,7 @@
     ("RET" "Open selected" nostr-thread-open-at-point)
     ("g" "Refresh" nostr-thread-refresh)
     ("i" "My profile" nostr-profile-open-self)
-    ("o" "Open embedded" nostr-thread-open-embedded-nevent)
+    ("o" "Open embedded" nostr-thread-open-embedded-reference)
     ("D" "Publish details" nostr-ui-show-publish-details)
     ("n" "Next note" nostr-ui-next-section)
     ("p" "Previous note" nostr-ui-prev-section)
@@ -206,19 +206,32 @@
     (require 'nostr-profile)
     (nostr-profile-open pubkey)))
 
-(defun nostr-thread-open-embedded-nevent ()
-  "Open an embedded nevent from the selected thread note."
+(defun nostr-thread-open-embedded-reference ()
+  "Open an embedded public NIP-19 reference from the selected thread note."
   (interactive)
   (let* ((event (or (nostr-ui-selected-data)
                     (user-error "No note selected")))
-         (nevents (nostr-event-nevents (alist-get 'content event))))
-    (unless nevents
-      (user-error "Selected note has no embedded nevent"))
-    (let ((choice (if (= (length nevents) 1)
-                      (car nevents)
-                    (completing-read "Open embedded nevent: " nevents nil t))))
+         (references (seq-filter
+                      (lambda (value)
+                        (let ((plain (string-remove-prefix
+                                      "nostr:"
+                                      (string-remove-prefix "@" value))))
+                          (or (string-prefix-p "note1" plain)
+                              (string-prefix-p "nevent1" plain)
+                              (string-prefix-p "naddr1" plain))))
+                      (nostr-event-public-identifiers
+                       (alist-get 'content event)))))
+    (unless references
+      (user-error "Selected note has no embedded note reference"))
+    (let ((choice (if (= (length references) 1)
+                      (car references)
+                    (completing-read "Open embedded reference: "
+                                     references nil t))))
       (require 'nostr-dispatch)
       (nostr-open-identifier (string-remove-prefix "nostr:" choice)))))
+
+(defalias 'nostr-thread-open-embedded-nevent
+  #'nostr-thread-open-embedded-reference)
 
 (defun nostr-thread-open-at-point ()
   "Open an actionable item at point in a thread buffer."

@@ -121,6 +121,18 @@
                  '("nostr:nevent1qqqqqqqqqqqqqq"
                    "nevent1qqqqqqqqqqqqqq"))))
 
+(ert-deftest nostr-event-public-identifiers-finds-supported-values ()
+  "Public NIP-19 extraction covers NIP-21 URI wrapped identifiers."
+  (should (equal (nostr-event-public-identifiers
+                  (concat "see nostr:nprofile1qqqq and @npub1aaaa "
+                          "note1qqqq nevent1cccc naddr1dddd "
+                          "nsec1eeee nrelay1ffff"))
+                 '("nostr:nprofile1qqqq"
+                   "@npub1aaaa"
+                   "note1qqqq"
+                   "nevent1cccc"
+                   "naddr1dddd"))))
+
 (ert-deftest nostr-event-parses-zap-receipt-target-and-amount ()
   "Zap receipts get their target from e-tags and amount from description JSON."
   (let* ((zap-request "{\"kind\":9734,\"tags\":[[\"e\",\"note-zapped\"],[\"p\",\"alice\"],[\"amount\",\"21000\"]]}")
@@ -2447,7 +2459,7 @@
            (sig . "sig"))))
         (should (equal requested '("missing-original"))))))
 
-(ert-deftest nostr-dispatch-opens-npub-note-and-search ()
+(ert-deftest nostr-dispatch-opens-public-nip19-and-search ()
   (let (opened)
     (cl-letf (((symbol-function 'nostr-profile-open)
                (lambda (pubkey) (push (list 'profile pubkey) opened)))
@@ -2455,25 +2467,39 @@
                (lambda (event) (push (list 'thread (alist-get 'id event)) opened)))
               ((symbol-function 'nostr-search-open)
                (lambda (query) (push (list 'search query) opened)))
+              ((symbol-function 'nostr-db-select-addressable-event)
+               (lambda (_kind _pubkey _identifier) nil))
+              ((symbol-function 'nostr-relay-fetch-addressable-event)
+               (lambda (kind pubkey identifier relays)
+                 (push (list 'fetch-naddr kind pubkey identifier relays) opened)))
               ((symbol-function 'nostr-nip19-decode-sync)
                (lambda (value)
                  (pcase value
                    ("npub1test" '((ok . t) (entity . "npub") (pubkey . "pubkey1")))
+                   ("nprofile1test" '((ok . t) (entity . "nprofile") (pubkey . "pubkey2")))
                    ("note1test" '((ok . t) (entity . "note") (event_id . "event1")))
                    ("nevent1test" '((ok . t) (entity . "nevent") (event_id . "event2")))
+                   ("naddr1test" '((ok . t) (entity . "naddr") (kind . 30023)
+                                    (pubkey . "pubkey3") (identifier . "article")
+                                    (relays . ("wss://relay.example"))))
                    (_ (error "unexpected value")))))
               ((symbol-function 'nostr-dispatch--event-by-id)
                (lambda (event-id)
                  (when (equal event-id "event1")
                    `((id . ,event-id))))))
       (nostr-open-identifier "npub1test")
+      (nostr-open-identifier "nostr:nprofile1test")
       (nostr-open-identifier "note1test")
       (nostr-open-identifier "nevent1test")
+      (nostr-open-identifier "naddr1test")
       (nostr-open-identifier "anything else"))
     (should (equal (nreverse opened)
                    '((profile "pubkey1")
+                     (profile "pubkey2")
                      (thread "event1")
                      (search "event2")
+                     (fetch-naddr 30023 "pubkey3" "article" ("wss://relay.example"))
+                     (search "30023:pubkey3:article")
                      (search "anything else"))))))
 
 (ert-deftest nostr-timeline-open-author-opens-selected-pubkey ()

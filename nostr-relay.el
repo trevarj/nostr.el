@@ -221,6 +221,9 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay--event-id-requests (make-hash-table :test #'equal)
   "Event ids recently requested directly by id.")
 
+(defvar nostr-relay--addressable-event-requests (make-hash-table :test #'equal)
+  "Addressable event coordinates recently requested directly.")
+
 (defvar nostr-relay--search-profile-queries (make-hash-table :test #'equal)
   "Search subscription ids to profile query strings.")
 
@@ -1505,6 +1508,46 @@ that opens after the UI render catch up without disturbing existing relays."
         (when (> sent 0)
           (dolist (event-id ids)
             (puthash event-id now nostr-relay--event-id-requests)))))
+    sent))
+
+(defun nostr-relay--addressable-request-key (kind pubkey identifier)
+  "Return a cache key for an addressable event request."
+  (format "%s:%s:%s" kind pubkey (or identifier "")))
+
+(defun nostr-relay-fetch-addressable-event (kind pubkey identifier &optional relays)
+  "Request addressable event KIND by PUBKEY and IDENTIFIER.
+RELAYS, when non-nil, are preferred over the currently connected relay set."
+  (let* ((key (nostr-relay--addressable-request-key kind pubkey identifier))
+         (now (float-time))
+         (last-requested (gethash key nostr-relay--addressable-event-requests))
+         (urls (delete-dups
+                (seq-filter #'stringp
+                            (or (copy-sequence relays)
+                                (let (connected)
+                                  (maphash (lambda (url _ws) (push url connected))
+                                           nostr-relay--connections)
+                                  connected)))))
+         (filter (delq nil
+                       `(("kinds" . (,kind))
+                         ("authors" . (,pubkey))
+                         ,(when (stringp identifier)
+                            `("#d" . (,identifier)))
+                         ("limit" . 1))))
+         (sub-id (nostr-relay--sub-id "naddr" (list key)))
+         (sent 0))
+    (when (and urls
+               (or (not last-requested)
+                   (> (- now last-requested) nostr-relay-event-metadata-request-ttl)))
+      (dolist (url urls)
+        (if (gethash url nostr-relay--connections)
+            (progn
+              (nostr-relay-subscribe url sub-id (list filter))
+              (setq sent (1+ sent)))
+          (nostr-relay--queue-subscription url sub-id (list filter))
+          (nostr-relay-open url (and (boundp 'nostr-current-pubkey)
+                                     nostr-current-pubkey))))
+      (when (> sent 0)
+        (puthash key now nostr-relay--addressable-event-requests)))
     sent))
 
 (provide 'nostr-relay)

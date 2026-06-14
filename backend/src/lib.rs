@@ -221,38 +221,49 @@ fn nip19_decode(input: &str) -> Result<Value, ProtocolError> {
     let request: Nip19DecodeRequest = parse_request(input)?;
     let value = request.value.as_str();
 
-    if let Ok(Nip19::Event(event)) = Nip19::from_bech32(value) {
-        return Ok(json!({
-            "entity": "nevent",
-            "event_id": event.event_id.to_hex(),
-            "pubkey": event.author.map(|author| author.to_hex()),
-            "kind": event.kind.map(|kind| kind.as_u16()),
-            "relays": event.relays
-                .iter()
-                .map(|relay| relay.to_string())
-                .collect::<Vec<String>>()
-        }));
-    }
-
-    if let Ok(public_key) = PublicKey::from_bech32(value) {
-        return Ok(json!({
-            "entity": "npub",
-            "pubkey": public_key.to_hex()
-        }));
-    }
-
-    if let Ok(secret_key) = SecretKey::from_bech32(value) {
-        return Ok(json!({
-            "entity": "nsec",
-            "secret_key": secret_key.to_secret_hex()
-        }));
-    }
-
-    if let Ok(event_id) = EventId::from_bech32(value) {
-        return Ok(json!({
-            "entity": "note",
-            "event_id": event_id.to_hex()
-        }));
+    if let Ok(nip19) = Nip19::from_bech32(value) {
+        return match nip19 {
+            Nip19::Event(event) => Ok(json!({
+                "entity": "nevent",
+                "event_id": event.event_id.to_hex(),
+                "pubkey": event.author.map(|author| author.to_hex()),
+                "kind": event.kind.map(|kind| kind.as_u16()),
+                "relays": event.relays
+                    .iter()
+                    .map(|relay| relay.to_string())
+                    .collect::<Vec<String>>()
+            })),
+            Nip19::Pubkey(public_key) => Ok(json!({
+                "entity": "npub",
+                "pubkey": public_key.to_hex()
+            })),
+            Nip19::Secret(secret_key) => Ok(json!({
+                "entity": "nsec",
+                "secret_key": secret_key.to_secret_hex()
+            })),
+            Nip19::EventId(event_id) => Ok(json!({
+                "entity": "note",
+                "event_id": event_id.to_hex()
+            })),
+            Nip19::Profile(profile) => Ok(json!({
+                "entity": "nprofile",
+                "pubkey": profile.public_key.to_hex(),
+                "relays": profile.relays
+                    .iter()
+                    .map(|relay| relay.to_string())
+                    .collect::<Vec<String>>()
+            })),
+            Nip19::Coordinate(coordinate) => Ok(json!({
+                "entity": "naddr",
+                "kind": coordinate.coordinate.kind.as_u16(),
+                "pubkey": coordinate.coordinate.public_key.to_hex(),
+                "identifier": coordinate.coordinate.identifier,
+                "relays": coordinate.relays
+                    .iter()
+                    .map(|relay| relay.to_string())
+                    .collect::<Vec<String>>()
+            })),
+        };
     }
 
     Err(ProtocolError::new(
@@ -555,6 +566,41 @@ mod tests {
             "97c70a44366a6535c145b333f973ea86dfdc2d7a99da618c40c64705ad98e322"
         );
         assert_eq!(decoded["kind"], 1);
+    }
+
+    #[test]
+    fn nip19_decodes_nprofile_entities() {
+        let decoded = response(
+            "nip19-decode",
+            json!({
+                "value": "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gppemhxue69uhhytnc9e3k7mf0qyt8wumn8ghj7er2vfshxtnnv9jxkc3wvdhk6tclr7lsh"
+            }),
+        );
+        assert_eq!(decoded["ok"], true);
+        assert_eq!(decoded["entity"], "nprofile");
+        assert_eq!(
+            decoded["pubkey"],
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+        );
+        assert_eq!(decoded["relays"][0], "wss://r.x.com/");
+    }
+
+    #[test]
+    fn nip19_decodes_naddr_entities() {
+        let decoded = response(
+            "nip19-decode",
+            json!({
+                "value": "naddr1qqxnzd3exgersv33xymnsve3qgs8suecw4luyht9ekff89x4uacneapk8r5dyk0gmn6uwwurf6u9rusrqsqqqa282m3gxt"
+            }),
+        );
+        assert_eq!(decoded["ok"], true);
+        assert_eq!(decoded["entity"], "naddr");
+        assert_eq!(decoded["kind"], 30023);
+        assert_eq!(
+            decoded["pubkey"],
+            "787338757fc25d65cd929394d5e7713cf43638e8d259e8dcf5c73b834eb851f2"
+        );
+        assert_eq!(decoded["identifier"], "1692282117831");
     }
 
     #[test]

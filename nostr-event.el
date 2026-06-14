@@ -167,9 +167,28 @@ so that is accepted as a fallback."
   "\\(?:nostr:\\)?nevent1[023456789acdefghjklmnpqrstuvwxyz]+"
   "Regexp matching NIP-19 nevent identifiers in note content.")
 
+(defconst nostr-event-note-regexp
+  "\\(?:nostr:\\)?note1[023456789acdefghjklmnpqrstuvwxyz]+"
+  "Regexp matching NIP-19 note identifiers in note content.")
+
 (defconst nostr-event-npub-regexp
   "\\(?:nostr:\\)?npub1[023456789acdefghjklmnpqrstuvwxyz]+"
   "Regexp matching NIP-19 npub identifiers in note content.")
+
+(defconst nostr-event-nprofile-regexp
+  "\\(?:nostr:\\)?nprofile1[023456789acdefghjklmnpqrstuvwxyz]+"
+  "Regexp matching NIP-19 nprofile identifiers in note content.")
+
+(defconst nostr-event-naddr-regexp
+  "\\(?:nostr:\\)?naddr1[023456789acdefghjklmnpqrstuvwxyz]+"
+  "Regexp matching NIP-19 naddr identifiers in note content.")
+
+(defconst nostr-event-public-identifier-regexp
+  (concat "\\(?:@\\)?\\(?:nostr:\\)?"
+          "\\(?:npub\\|nprofile\\|note\\|nevent\\|naddr\\)"
+          "1[023456789acdefghjklmnpqrstuvwxyz]+")
+  "Regexp matching public NIP-19 identifiers rendered in note content.
+This intentionally excludes nsec and deprecated nrelay values.")
 
 (defun nostr-event-media-type (url)
   "Return media type symbol for URL."
@@ -211,6 +230,16 @@ media and are not downloaded for inline image display."
         (push (match-string-no-properties 0) values)))
     (delete-dups (nreverse values))))
 
+(defun nostr-event-notes (content)
+  "Return NIP-19 note identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-note-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
+
 (defun nostr-event-npubs (content)
   "Return NIP-19 npub identifiers found in CONTENT."
   (let (values)
@@ -220,6 +249,42 @@ media and are not downloaded for inline image display."
       (while (re-search-forward nostr-event-npub-regexp nil t)
         (push (match-string-no-properties 0) values)))
     (delete-dups (nreverse values))))
+
+(defun nostr-event-nprofiles (content)
+  "Return NIP-19 nprofile identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-nprofile-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
+
+(defun nostr-event-naddrs (content)
+  "Return NIP-19 naddr identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-naddr-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
+
+(defun nostr-event-public-identifiers (content)
+  "Return public NIP-19 identifiers found in CONTENT."
+  (let (values)
+    (with-temp-buffer
+      (insert (or content ""))
+      (goto-char (point-min))
+      (while (re-search-forward nostr-event-public-identifier-regexp nil t)
+        (push (match-string-no-properties 0) values)))
+    (delete-dups (nreverse values))))
+
+(defun nostr-event-embedded-event-identifiers (content)
+  "Return NIP-19 event identifiers found in CONTENT."
+  (delete-dups
+   (append (nostr-event-nevents content)
+           (nostr-event-notes content))))
 
 (defun nostr-event-normalize (event relay)
   "Return EVENT alist with derived fields and RELAY."

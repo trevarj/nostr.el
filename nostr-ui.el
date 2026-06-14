@@ -135,7 +135,12 @@ Persists across renders so a repeated avatar is decoded once, not per note.")
 (defvar nostr-ui--npub-decode-cache (make-hash-table :test #'equal)
   "Cache of npub strings to decoded hex pubkeys or `invalid'.")
 
+(defvar nostr-ui--nip19-decode-cache (make-hash-table :test #'equal)
+  "Cache of public NIP-19 strings to decoded backend alists or `invalid'.")
+
 (declare-function nostr-relay-fetch-events-by-id "nostr-relay" (event-ids &optional limit))
+(declare-function nostr-relay-fetch-addressable-event "nostr-relay"
+                  (kind pubkey identifier &optional relays))
 (declare-function nostr-relay-fetch-profile "nostr-relay" (pubkey &optional url))
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
 
@@ -1197,57 +1202,88 @@ may carry richer inline stats."
         (substring text 1)
       text)))
 
+(defun nostr-ui--strip-public-identifier (value)
+  "Return VALUE without mention or NIP-21 URI prefixes."
+  (let ((text value))
+    (when (and (stringp text) (string-prefix-p "@" text))
+      (setq text (substring text 1)))
+    (nostr-ui--strip-nostr-uri text)))
+
 (defun nostr-ui--short-id (value)
   "Return shortened display text for VALUE."
   (if (and (stringp value) (> (length value) 16))
       (concat (substring value 0 8) "…" (substring value -8))
     (or value "")))
 
-(defun nostr-ui--decode-nevent-event-id (nevent)
-  "Return event id decoded from NEVENT, caching the backend result."
-  (let* ((value (nostr-ui--strip-nostr-uri nevent))
-         (cached (gethash value nostr-ui--nevent-cache)))
+(defun nostr-ui--decode-public-identifier (value)
+  "Return decoded public NIP-19 VALUE, caching backend results."
+  (let* ((identifier (nostr-ui--strip-public-identifier value))
+         (cached (gethash identifier nostr-ui--nip19-decode-cache)))
     (cond
      ((eq cached 'invalid) nil)
      (cached cached)
      (t
       (condition-case nil
-          (let* ((decoded (nostr-nip19-decode-sync value))
-                 (entity (alist-get 'entity decoded nil nil #'equal))
-                 (event-id (and (equal entity "nevent")
-                                (alist-get 'event_id decoded))))
-            (if (stringp event-id)
-                (puthash value event-id nostr-ui--nevent-cache)
-              (puthash value 'invalid nostr-ui--nevent-cache)
+          (let ((decoded (nostr-nip19-decode-sync identifier)))
+            (if (member (alist-get 'entity decoded nil nil #'equal)
+                        '("npub" "nprofile" "note" "nevent" "naddr"))
+                (puthash identifier decoded nostr-ui--nip19-decode-cache)
+              (puthash identifier 'invalid nostr-ui--nip19-decode-cache)
               nil))
         (error
-         (puthash value 'invalid nostr-ui--nevent-cache)
+         (puthash identifier 'invalid nostr-ui--nip19-decode-cache)
          nil))))))
+
+(defun nostr-ui--decode-event-reference-id (value)
+  "Return event id decoded from public event identifier VALUE."
+  (let* ((identifier (nostr-ui--strip-public-identifier value))
+         (cached (and (string-prefix-p "nevent1" identifier)
+                      (gethash identifier nostr-ui--nevent-cache))))
+    (cond
+     ((eq cached 'invalid) nil)
+     (cached cached)
+     (t
+      (let* ((decoded (nostr-ui--decode-public-identifier identifier))
+             (entity (alist-get 'entity decoded nil nil #'equal))
+             (event-id (and (member entity '("note" "nevent"))
+                            (alist-get 'event_id decoded))))
+        (when (string-prefix-p "nevent1" identifier)
+          (puthash identifier (or event-id 'invalid) nostr-ui--nevent-cache))
+        event-id)))))
+
+(defun nostr-ui--decode-nevent-event-id (nevent)
+  "Return event id decoded from NEVENT, caching the backend result."
+  (nostr-ui--decode-event-reference-id nevent))
+
+(defun nostr-ui--decode-profile-pubkey (value)
+  "Return pubkey decoded from NPUB or NPROFILE."
+  (let* ((identifier (nostr-ui--strip-profile-reference value))
+         (cached (and (string-prefix-p "npub1" identifier)
+                      (gethash identifier nostr-ui--npub-decode-cache))))
+    (cond
+     ((eq cached 'invalid) nil)
+     (cached cached)
+     (t
+      (let* ((decoded (nostr-ui--decode-public-identifier identifier))
+             (entity (alist-get 'entity decoded nil nil #'equal))
+             (pubkey (and (member entity '("npub" "nprofile"))
+                          (alist-get 'pubkey decoded))))
+        (when (string-prefix-p "npub1" identifier)
+          (puthash identifier (or pubkey 'invalid) nostr-ui--npub-decode-cache))
+        pubkey)))))
 
 (defun nostr-ui--decode-npub-pubkey (npub)
   "Return pubkey decoded from NPUB, caching the backend result."
-  (let* ((value (nostr-ui--strip-profile-reference npub))
-         (cached (gethash value nostr-ui--npub-decode-cache)))
-    (cond
-     ((eq cached 'invalid) nil)
-     (cached cached)
-     (t
-      (condition-case nil
-          (let* ((decoded (nostr-nip19-decode-sync value))
-                 (entity (alist-get 'entity decoded nil nil #'equal))
-                 (pubkey (and (equal entity "npub")
-                              (alist-get 'pubkey decoded))))
-            (if (stringp pubkey)
-                (puthash value pubkey nostr-ui--npub-decode-cache)
-              (puthash value 'invalid nostr-ui--npub-decode-cache)
-              nil))
-        (error
-         (puthash value 'invalid nostr-ui--npub-decode-cache)
-         nil))))))
+  (nostr-ui--decode-profile-pubkey npub))
 
-(defun nostr-ui--profile-mention-data (npub)
-  "Return display data for an NPUB profile mention."
-  (let* ((pubkey (nostr-ui--decode-npub-pubkey npub))
+(defun nostr-ui--profile-mention-data (reference)
+  "Return display data for a profile REFERENCE."
+  (let* ((decoded (nostr-ui--decode-public-identifier reference))
+         (pubkey (or (and (member (alist-get 'entity decoded nil nil #'equal)
+                                 '("npub" "nprofile"))
+                          (alist-get 'pubkey decoded))
+                     (nostr-ui--decode-profile-pubkey reference)))
+         (relays (alist-get 'relays decoded))
          (profile (and pubkey (nostr-ui--cached-profile pubkey)))
          (name (nostr-ui--string-value
                 (nth 2 profile)
@@ -1257,22 +1293,22 @@ may carry richer inline stats."
                (not profile)
                (bound-and-true-p nostr-db--connection)
                (fboundp 'nostr-relay-fetch-profile))
-      (nostr-relay-fetch-profile pubkey))
+      (nostr-relay-fetch-profile pubkey (car relays)))
     `((label . ,(cond
                  (name (concat "@" name))
                  (pubkey (format "@%s" (nostr-ui--shorten-identifier
                                         (or (nostr-ui--cached-npub pubkey)
-                                            (nostr-ui--strip-profile-reference npub)))))
-                 (t npub)))
+                                            (nostr-ui--strip-profile-reference reference)))))
+                 (t reference)))
       (pubkey . ,pubkey))))
 
-(defun nostr-ui--format-profile-mention (npub)
-  "Return compact mention text for NPUB."
-  (alist-get 'label (nostr-ui--profile-mention-data npub)))
+(defun nostr-ui--format-profile-mention (reference)
+  "Return compact mention text for profile REFERENCE."
+  (alist-get 'label (nostr-ui--profile-mention-data reference)))
 
-(defun nostr-ui--insert-profile-mention (npub)
-  "Insert NPUB as a clickable profile mention when it decodes."
-  (let* ((data (nostr-ui--profile-mention-data npub))
+(defun nostr-ui--insert-profile-mention (reference)
+  "Insert REFERENCE as a clickable profile mention when it decodes."
+  (let* ((data (nostr-ui--profile-mention-data reference))
          (label (alist-get 'label data))
          (pubkey (alist-get 'pubkey data)))
     (if pubkey
@@ -1288,20 +1324,93 @@ may carry richer inline stats."
                    (nostr-profile-open (button-get button 'nostr-profile-pubkey))))
       (insert (propertize label 'face 'nostr-ui-content)))))
 
-(defun nostr-ui--content-with-profile-mentions (content)
-  "Return CONTENT with NIP-19 npubs rendered as profile mentions."
-  (let ((text (or content "")))
-    (dolist (npub (nostr-event-npubs text))
-      (setq text (replace-regexp-in-string
-                  (regexp-quote npub)
-                  (lambda (_match)
-                    (nostr-ui--format-profile-mention npub))
-                  text t t)))
-    text))
-
 (defconst nostr-ui-profile-mention-regexp
-  (concat "\\(?:@\\)?" nostr-event-npub-regexp)
-  "Regexp matching npub profile references rendered as profile mentions.")
+  (concat "\\(?:@\\)?\\(?:" nostr-event-npub-regexp
+          "\\|" nostr-event-nprofile-regexp "\\)")
+  "Regexp matching profile references rendered as profile mentions.")
+
+(defun nostr-ui--event-reference-label (reference)
+  "Return compact label for an event REFERENCE."
+  (let* ((event-id (nostr-ui--decode-event-reference-id reference))
+         (event (and event-id (nostr-ui--event-by-id event-id))))
+    (if event
+        (format "note %s" (nostr-ui--short-id event-id))
+      (format "note %s" (nostr-ui--short-id
+                         (or event-id
+                             (nostr-ui--strip-public-identifier reference)))))))
+
+(defun nostr-ui--insert-event-reference (reference)
+  "Insert REFERENCE as a clickable note link."
+  (let ((event-id (nostr-ui--decode-event-reference-id reference))
+        (label (nostr-ui--event-reference-label reference)))
+    (when (and event-id
+               (not (nostr-ui--event-by-id event-id)))
+      (nostr-ui--maybe-fetch-embedded-event event-id))
+    (insert-text-button
+     label
+     'follow-link t
+     'face 'button
+     'nostr-identifier (nostr-ui--strip-public-identifier reference)
+     'help-echo "Open note"
+     'action (lambda (button)
+               (require 'nostr-dispatch)
+               (nostr-open-identifier
+                (button-get button 'nostr-identifier))))))
+
+(defun nostr-ui--address-reference-event (decoded)
+  "Return cached event matching decoded NADDR data."
+  (when (and (equal (alist-get 'entity decoded nil nil #'equal) "naddr")
+             (bound-and-true-p nostr-db--connection))
+    (nostr-db-select-addressable-event
+     (alist-get 'kind decoded)
+     (alist-get 'pubkey decoded)
+     (alist-get 'identifier decoded))))
+
+(defun nostr-ui--address-reference-label (reference)
+  "Return compact label for NADDR REFERENCE."
+  (let* ((decoded (nostr-ui--decode-public-identifier reference))
+         (event (nostr-ui--address-reference-event decoded)))
+    (cond
+     (event (format "address %s" (nostr-ui--embedded-event-summary event)))
+     (decoded
+      (format "kind %s by %s"
+              (alist-get 'kind decoded)
+              (nostr-ui--short-id (alist-get 'pubkey decoded))))
+     (t (nostr-ui--short-id (nostr-ui--strip-public-identifier reference))))))
+
+(defun nostr-ui--insert-address-reference (reference)
+  "Insert NADDR REFERENCE as a clickable addressable event link."
+  (let* ((decoded (nostr-ui--decode-public-identifier reference))
+         (label (nostr-ui--address-reference-label reference)))
+    (unless (nostr-ui--address-reference-event decoded)
+      (when (and (fboundp 'nostr-relay-fetch-addressable-event)
+                 (alist-get 'kind decoded)
+                 (alist-get 'pubkey decoded))
+        (nostr-relay-fetch-addressable-event
+         (alist-get 'kind decoded)
+         (alist-get 'pubkey decoded)
+         (alist-get 'identifier decoded)
+         (alist-get 'relays decoded))))
+    (insert-text-button
+     label
+     'follow-link t
+     'face 'button
+     'nostr-identifier (nostr-ui--strip-public-identifier reference)
+     'help-echo "Open addressable event"
+     'action (lambda (button)
+               (require 'nostr-dispatch)
+               (nostr-open-identifier
+                (button-get button 'nostr-identifier))))))
+
+(defun nostr-ui--insert-public-identifier (reference)
+  "Insert public NIP-19 REFERENCE with a friendly representation."
+  (let* ((decoded (nostr-ui--decode-public-identifier reference))
+         (entity (alist-get 'entity decoded nil nil #'equal)))
+    (pcase entity
+      ((or "npub" "nprofile") (nostr-ui--insert-profile-mention reference))
+      ((or "note" "nevent") (nostr-ui--insert-event-reference reference))
+      ("naddr" (nostr-ui--insert-address-reference reference))
+      (_ (insert (propertize reference 'face 'nostr-ui-content))))))
 
 (defun nostr-ui--event-by-id (event-id)
   "Return cached EVENT-ID as an event alist."
@@ -1323,10 +1432,11 @@ may carry richer inline stats."
              (when (not (string-empty-p content))
                (concat " · " (truncate-string-to-width content 72 nil nil "…")))))))
 
-(defun nostr-ui--insert-nevent-summaries (event indent)
-  "Insert compact nested nevent summaries for EVENT at INDENT."
-  (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
-    (let* ((event-id (nostr-ui--decode-nevent-event-id nevent))
+(defun nostr-ui--insert-event-reference-summaries (event indent)
+  "Insert compact nested event reference summaries for EVENT at INDENT."
+  (dolist (reference (nostr-event-embedded-event-identifiers
+                      (alist-get 'content event)))
+    (let* ((event-id (nostr-ui--decode-event-reference-id reference))
            (embedded (and event-id (nostr-ui--event-by-id event-id))))
       (insert indent)
       (insert (propertize "  ↳ " 'face 'nostr-ui-meta))
@@ -1334,38 +1444,53 @@ may carry richer inline stats."
                (if embedded
                    (format "Quoted %s" (nostr-ui--embedded-event-summary embedded))
                  (format "Quoted %s" (nostr-ui--short-id
-                                      (or event-id (nostr-ui--strip-nostr-uri nevent)))))
+                                      (or event-id
+                                          (nostr-ui--strip-public-identifier reference)))))
                'face 'nostr-ui-meta))
       (insert "\n")
       (unless embedded
         (nostr-ui--maybe-fetch-embedded-event event-id)))))
 
-(defun nostr-ui--represented-nevents (event)
-  "Return nevents from EVENT that already have cached note representation."
+(defun nostr-ui--insert-nevent-summaries (event indent)
+  "Insert compact nested event summaries for EVENT at INDENT."
+  (nostr-ui--insert-event-reference-summaries event indent))
+
+(defun nostr-ui--represented-event-identifiers (event)
+  "Return event refs from EVENT that already have cached cards."
   (let (represented)
-    (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
+    (dolist (reference (nostr-event-embedded-event-identifiers
+                        (alist-get 'content event)))
       ;; Only hide raw identifiers once the card can render the target.
-      (when-let* ((event-id (nostr-ui--decode-nevent-event-id nevent)))
+      (when-let* ((event-id (nostr-ui--decode-event-reference-id reference)))
         (when (nostr-ui--event-by-id event-id)
-          (push nevent represented))))
+          (push reference represented))))
     (nreverse represented)))
 
-(defun nostr-ui--content-without-nevents (content nevents)
-  "Return CONTENT with represented NEVENTS removed."
+(defun nostr-ui--represented-nevents (event)
+  "Return event refs from EVENT that already have cached cards."
+  (nostr-ui--represented-event-identifiers event))
+
+(defun nostr-ui--content-without-event-identifiers (content identifiers)
+  "Return CONTENT with represented IDENTIFIERS removed."
   (let ((text (or content "")))
-    (dolist (nevent nevents)
+    (dolist (identifier identifiers)
       (setq text (replace-regexp-in-string
-                  (regexp-quote nevent) "" text t t)))
+                  (regexp-quote identifier) "" text t t)))
     (string-join
      (mapcar (lambda (line)
                (string-trim (replace-regexp-in-string "[ \t]+" " " line)))
              (split-string text "\n"))
      "\n")))
 
-(defun nostr-ui--insert-nevent-embeds (event depth style embed-depth)
-  "Insert embedded nevent cards for EVENT."
-  (dolist (nevent (nostr-event-nevents (alist-get 'content event)))
-    (let* ((event-id (nostr-ui--decode-nevent-event-id nevent))
+(defun nostr-ui--content-without-nevents (content nevents)
+  "Return CONTENT with represented NEVENTS removed."
+  (nostr-ui--content-without-event-identifiers content nevents))
+
+(defun nostr-ui--insert-event-reference-embeds (event depth style embed-depth)
+  "Insert embedded event reference cards for EVENT."
+  (dolist (reference (nostr-event-embedded-event-identifiers
+                      (alist-get 'content event)))
+    (let* ((event-id (nostr-ui--decode-event-reference-id reference))
            (embedded (and event-id (nostr-ui--event-by-id event-id)))
            (indent (make-string (* (1+ depth) 2) ?\s)))
       (cond
@@ -1387,8 +1512,12 @@ may carry richer inline stats."
         (insert (propertize
                  (format "↳ Quoted %s could not be decoded.\n"
                          (nostr-ui--short-id
-                          (nostr-ui--strip-nostr-uri nevent)))
+                          (nostr-ui--strip-public-identifier reference)))
                  'face 'nostr-ui-meta)))))))
+
+(defun nostr-ui--insert-nevent-embeds (event depth style embed-depth)
+  "Insert embedded event reference cards for EVENT."
+  (nostr-ui--insert-event-reference-embeds event depth style embed-depth))
 
 (defun nostr-ui--insert-media-placeholder (item indent)
   "Insert media placeholder ITEM with INDENT."
@@ -1443,17 +1572,17 @@ may carry richer inline stats."
           (insert "\n"))))))
 
 (defun nostr-ui--insert-content-with-profile-mentions (content)
-  "Insert CONTENT, rendering npub references as profile buttons."
+  "Insert CONTENT, rendering public NIP-19 references as buttons."
   (let ((start 0)
         (case-fold-search nil))
-    (while (string-match nostr-ui-profile-mention-regexp content start)
+    (while (string-match nostr-event-public-identifier-regexp content start)
       (let ((match-start (match-beginning 0))
             (match-end (match-end 0))
-            (mention (match-string 0 content)))
+            (reference (match-string 0 content)))
         (when (> match-start start)
           (insert (propertize (substring content start match-start)
                               'face 'nostr-ui-content)))
-        (nostr-ui--insert-profile-mention mention)
+        (nostr-ui--insert-public-identifier reference)
         (setq start match-end)))
     (when (< start (length content))
       (insert (propertize (substring content start)
@@ -1572,9 +1701,9 @@ thread/detail style uses exact dates."
          (indent (make-string (* depth 2) ?\s))
          (author (nostr-ui-format-author event))
          (content (or (alist-get 'content event) ""))
-         (represented-nevents (nostr-ui--represented-nevents event))
-         (display-content (nostr-ui--content-without-nevents
-                           content represented-nevents))
+         (represented-identifiers (nostr-ui--represented-event-identifiers event))
+         (display-content (nostr-ui--content-without-event-identifiers
+                           content represented-identifiers))
          (picture (nostr-ui--event-picture event)))
     (insert indent)
     (insert (propertize "────────────────────────────────────────\n"
@@ -1593,8 +1722,8 @@ thread/detail style uses exact dates."
         (nostr-ui--insert-media-placeholder item indent))
       (nostr-ui--restore-note-media nostr-ui--current-parent)
       (if (> embed-depth 0)
-          (nostr-ui--insert-nevent-summaries event indent)
-        (nostr-ui--insert-nevent-embeds event depth style embed-depth))
+          (nostr-ui--insert-event-reference-summaries event indent)
+        (nostr-ui--insert-event-reference-embeds event depth style embed-depth))
       (nostr-ui--insert-note-footer event (concat indent "  "))
       (insert "\n")
       (insert "\n"))))
