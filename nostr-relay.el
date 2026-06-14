@@ -1306,20 +1306,25 @@ suppressed so frequent UI refreshes do not spam relays."
          (ids (nostr-relay--fresh-event-metadata-ids event-ids now))
          (sent 0))
     (when ids
-      (let ((sub-id (nostr-relay--sub-id "event-meta" ids))
-            (filter `(("kinds" . (,nostr-kind-text-note
-                                  ,nostr-kind-repost
-                                  ,nostr-kind-reaction
-                                  ,nostr-kind-zap-receipt))
-                      ("#e" . ,ids)
-                      ("limit" . ,(or limit (* 4 (length ids)))))))
-        (maphash (lambda (url _ws)
-                   (nostr-relay-subscribe url sub-id (list filter))
-                   (setq sent (1+ sent)))
-                 nostr-relay--connections)
+      ;; Keep interaction kinds in separate requests.  A single mixed filter
+      ;; with a shared limit can be filled by replies before reactions arrive,
+      ;; which leaves timeline reaction counts stale while Discover provider
+      ;; stats appear correct.
+      (dolist (kind (list nostr-kind-text-note
+                          nostr-kind-repost
+                          nostr-kind-reaction
+                          nostr-kind-zap-receipt))
+        (let ((sub-id (nostr-relay--sub-id (format "event-meta-%s" kind) ids))
+              (filter `(("kinds" . (,kind))
+                        ("#e" . ,ids)
+                        ("limit" . ,(or limit (* 4 (length ids)))))))
+          (maphash (lambda (url _ws)
+                     (nostr-relay-subscribe url sub-id (list filter))
+                     (setq sent (1+ sent)))
+                   nostr-relay--connections)))
         (when (> sent 0)
           (dolist (event-id ids)
-            (puthash event-id now nostr-relay--event-metadata-requests)))))
+            (puthash event-id now nostr-relay--event-metadata-requests))))
     sent))
 
 (defun nostr-relay--fresh-missing-event-ids (event-ids now)

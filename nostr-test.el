@@ -1924,19 +1924,24 @@
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
                (lambda (url sub-id filters)
                  (push (list url sub-id filters) sent))))
-      (should (= (nostr-relay-fetch-event-metadata '("note1" "note2" "note1" nil)) 2))
-      (should (= (length sent) 2))
-      (pcase-let ((`(,_url ,sub-id ,filters) (car sent)))
-        (should (string-prefix-p "event-meta-" sub-id))
-        (should (equal (alist-get "#e" (car filters) nil nil #'equal)
-                       '("note1" "note2")))
+      (should (= (nostr-relay-fetch-event-metadata '("note1" "note2" "note1" nil)) 8))
+      (should (= (length sent) 8))
+      (let (kinds)
+        (dolist (request sent)
+          (pcase-let ((`(,_url ,sub-id ,filters) request))
+            (should (string-prefix-p "event-meta-" sub-id))
+            (should (equal (alist-get "#e" (car filters) nil nil #'equal)
+                           '("note1" "note2")))
+            (let ((request-kinds (alist-get "kinds" (car filters) nil nil #'equal)))
+              (should (= (length request-kinds) 1))
+              (push (car request-kinds) kinds))))
         (dolist (kind (list nostr-kind-text-note
                             nostr-kind-repost
                             nostr-kind-reaction
                             nostr-kind-zap-receipt))
-          (should (member kind (alist-get "kinds" (car filters) nil nil #'equal)))))
+          (should (= 2 (cl-count kind kinds)))))
       (should (= (nostr-relay-fetch-event-metadata '("note1" "note2")) 0))
-      (should (= (length sent) 2)))))
+      (should (= (length sent) 8)))))
 
 (ert-deftest nostr-relay-fetch-events-by-id-requests-missing-context ()
   "Thread backfill requests missing root/parent events directly by id."
