@@ -23,8 +23,11 @@
 (defvar url-request-method)
 
 (defcustom nostr-media-cache-directory
-  (expand-file-name "nostr-media/" user-emacs-directory)
-  "Directory used to cache downloaded Nostr media."
+  (expand-file-name "nostr.el/media/" temporary-file-directory)
+  "Directory used to cache downloaded Nostr media.
+The default lives under `temporary-file-directory' so images and avatars are
+eligible for normal system temp cleanup.  Customize this only if you
+intentionally want downloaded media retained."
   :type 'directory
   :group 'nostr)
 

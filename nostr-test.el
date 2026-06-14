@@ -1237,6 +1237,19 @@
             (should (equal (nostr-compose--content) "newer draft"))))
       (delete-directory dir t))))
 
+(ert-deftest nostr-compose-drafts-default-to-temporary-directory ()
+  "Draft autosaves and history are temporary by default."
+  (should (file-in-directory-p nostr-compose-draft-directory
+                               temporary-file-directory))
+  (should (equal (nostr-compose--draft-history-path)
+                 (expand-file-name "history.el"
+                                   nostr-compose-draft-directory))))
+
+(ert-deftest nostr-media-cache-defaults-to-temporary-directory ()
+  "Downloaded media defaults to temporary storage."
+  (should (file-in-directory-p nostr-media-cache-directory
+                               temporary-file-directory)))
+
 (ert-deftest nostr-compose-mention-completion-uses-cached-profile-names ()
   "Compose mention completion offers cached display names and usernames."
   (nostr-test-with-db

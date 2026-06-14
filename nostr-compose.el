@@ -69,14 +69,19 @@
   "Hook run with the signed event after a public action is sent.")
 
 (defcustom nostr-compose-draft-directory
-  (expand-file-name "nostr-drafts/" user-emacs-directory)
-  "Directory where unsent compose drafts are autosaved."
+  (expand-file-name "nostr.el/drafts/" temporary-file-directory)
+  "Directory where unsent compose drafts are autosaved.
+The default lives under `temporary-file-directory' so abandoned drafts are
+eligible for normal system temp cleanup.  Customize this to a persistent
+directory only if you intentionally want drafts retained across temp cleanup."
   :type 'directory
   :group 'nostr)
 
 (defcustom nostr-compose-draft-history-file nil
   "File storing reusable compose draft history.
-When nil, use history.el inside `nostr-compose-draft-directory'."
+When nil, use history.el inside `nostr-compose-draft-directory'.  With the
+default draft directory this history is temporary, matching the privacy model
+for unsent compose text."
   :type '(choice (const :tag "Use draft directory history.el" nil) file)
   :group 'nostr)
 
