@@ -1136,12 +1136,14 @@ may carry richer inline stats."
     (dolist (buffer (buffer-list))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (when (and nostr-ui--sections
-                     (hash-table-p nostr-ui--event-counts-cache))
-            (remhash event-id nostr-ui--event-counts-cache))
-          (dolist (section nostr-ui--sections)
-            (when (equal (nostr-ui-section-id section) event-id)
-              (nostr-ui--refresh-section-note-footer section))))))))
+          (when nostr-ui--sections
+            (let ((position-state (nostr-ui-capture-position)))
+              (when (hash-table-p nostr-ui--event-counts-cache)
+                (remhash event-id nostr-ui--event-counts-cache))
+              (dolist (section nostr-ui--sections)
+                (when (equal (nostr-ui-section-id section) event-id)
+                  (nostr-ui--refresh-section-note-footer section)))
+              (nostr-ui-restore-position position-state))))))))
 
 (defun nostr-ui--note-badges (event style)
   "Return compact metadata badges for EVENT using STYLE."

@@ -911,6 +911,16 @@ nil on failure."
                              (when pubkey
                                (nostr-relay-subscribe-personal url pubkey)
                                (nostr-relay-subscribe-follows-feed url pubkey)))
+                  :on-error (lambda (_ws _type err)
+                              ;; HTTP upgrade failures such as relay-side 503s
+                              ;; should mark only that relay unhealthy, not emit
+                              ;; websocket.el's global callback warning.
+                              (when (timerp timeout-timer)
+                                (cancel-timer timeout-timer))
+                              (remhash url nostr-relay--connections)
+                              (nostr-db-store-relay-status
+                               url "error" (websocket-format-error err))
+                              (nostr-relay--update-mode-line))
                   :on-close (lambda (_ws)
                               (when (timerp timeout-timer)
                                 (cancel-timer timeout-timer))

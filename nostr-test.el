@@ -244,18 +244,26 @@
         (should (string-match-p "♥ 1" text))))))
 
 (ert-deftest nostr-ui-refresh-note-counts-updates-visible-footer ()
-  "Targeted count refresh updates the visible card footer without full redraw."
+  "Targeted count refresh updates the visible card footer without moving point."
   (nostr-test-with-db
     (nostr-test-store-text-note "reacted-note" "alice" 100 "hello")
+    (nostr-test-store-text-note "selected-note" "bob" 101 "stay here")
     (with-temp-buffer
       (nostr-ui-insert-note '((id . "reacted-note")
                               (pubkey . "alice")
                               (created-at . 100)
                               (kind . 1)
                               (content . "hello")))
+      (nostr-ui-insert-note '((id . "selected-note")
+                              (pubkey . "bob")
+                              (created-at . 101)
+                              (kind . 1)
+                              (content . "stay here")))
       (should (string-match-p "♥ 0"
                               (buffer-substring-no-properties
                                (point-min) (point-max))))
+      (goto-char (point-min))
+      (search-forward "stay here")
       (nostr-db-store-event
        '((id . "reaction-targeted")
          (pubkey . "me")
@@ -264,10 +272,46 @@
          (tags . (("e" "reacted-note")))
          (content . "+")
          (sig . "sig")))
+      (let ((selected-state (nostr-ui-capture-position)))
+        (should (equal (nostr-ui-section-id (nostr-ui-section-at-point))
+                       "selected-note"))
+        (nostr-ui-refresh-note-counts "reacted-note")
+        (let ((after-state (nostr-ui-capture-position)))
+          (should (equal (alist-get 'point after-state)
+                         (alist-get 'point selected-state)))))
       (nostr-ui-refresh-note-counts "reacted-note")
       (should (string-match-p "♥ 1"
                               (buffer-substring-no-properties
                                (point-min) (point-max)))))))
+
+(ert-deftest nostr-relay-websocket-error-records-relay-status ()
+  "Websocket upgrade errors are captured as relay status instead of warnings."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        captured-error-callback
+        statuses)
+    (cl-letf (((symbol-function 'websocket-open)
+               (lambda (url &rest args)
+                 (should (equal url "wss://relay.example"))
+                 (setq captured-error-callback (plist-get args :on-error))
+                 'nostr-test-websocket))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'nostr-db-store-relay-status)
+               (lambda (url state &optional message)
+                 (push (list url state message) statuses)))
+              ((symbol-function 'nostr-relay--update-mode-line)
+               (lambda () nil)))
+      (should (eq (nostr-relay--open-websocket "wss://relay.example" "me")
+                  'nostr-test-websocket))
+      (should (gethash "wss://relay.example" nostr-relay--connections))
+      (should (functionp captured-error-callback))
+      (funcall captured-error-callback
+               'nostr-test-websocket
+               'on-open
+               '(websocket-received-error-http-response 503))
+      (should-not (gethash "wss://relay.example" nostr-relay--connections))
+      (should (equal (cadar statuses) "error"))
+      (should (string-match-p "503" (caddar statuses))))))
 
 (ert-deftest nostr-timeline-primary-feeds-render-accumulated-reactions ()
   "Feed, Conversations, and My Posts cards show DB-backed reaction counts."
