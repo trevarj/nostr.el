@@ -76,9 +76,9 @@
   :group 'nostr)
 
 (defface nostr-ui-selected-section
-  '((((class color) (background light)) :background "gray90" :extend nil)
-    (((class color) (background dark)) :background "gray20" :extend nil)
-    (t :inverse-video t :extend nil))
+  '((((class color) (background light)) :background "gray90" :extend t)
+    (((class color) (background dark)) :background "gray20" :extend t)
+    (t :inverse-video t :extend t))
   "Face for the currently selected section."
   :group 'nostr)
 
