@@ -38,6 +38,21 @@
   (goto-char (point-min))
   (search-forward "▾"))
 
+(ert-deftest nostr-refresh-dispatch-covers-read-only-pages ()
+  "Every read-only Nostr page with a refresh command participates in refreshes."
+  (dolist (entry '((nostr-timeline-mode . nostr-timeline-refresh)
+                   (nostr-thread-mode . nostr-thread-refresh)
+                   (nostr-profile-mode . nostr-profile-refresh)
+                   (nostr-profile-list-mode . nostr-profile-list-refresh)
+                   (nostr-search-mode . nostr-search-refresh)
+                   (nostr-notifications-mode . nostr-notifications-refresh)
+                   (nostr-relays-mode . nostr-relays-refresh)
+                   (nostr-reactions-mode . nostr-reactions-refresh)
+                   (nostr-setup-mode . nostr-setup-status-refresh)))
+    (with-temp-buffer
+      (funcall (car entry))
+      (should (eq (nostr--buffer-refresh-function) (cdr entry))))))
+
 (ert-deftest nostr-notifications-render-and-select ()
   "Notifications render stored rows and expose data at point."
   (nostr-operational-test--with-db

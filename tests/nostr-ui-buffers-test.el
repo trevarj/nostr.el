@@ -194,6 +194,45 @@
           (nostr-profile-list-open-at-point)))
       (should (equal opened "bob-pubkey")))))
 
+(ert-deftest nostr-profile-list-refresh-preserves-selected-profile ()
+  "Profile list refreshes keep point on the selected profile row."
+  (nostr-ui-buffers-test-with-db
+    (nostr-ui-buffers-test-store-event
+     '((id . "bob-profile")
+       (pubkey . "bob-pubkey")
+       (created_at . 90)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"display_name\":\"Bob Example\"}")
+       (sig . "sig")))
+    (nostr-ui-buffers-test-store-event
+     '((id . "carol-profile")
+       (pubkey . "carol-pubkey")
+       (created_at . 91)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"display_name\":\"Carol Example\"}")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "alice-follows")
+       (pubkey . "alice-pubkey")
+       (created_at . 100)
+       (kind . 3)
+       (tags . (("p" "bob-pubkey") ("p" "carol-pubkey")))))
+    (cl-letf (((symbol-function 'nostr-relay-fetch-profile) (lambda (&rest _) nil)))
+      (with-temp-buffer
+        (nostr-profile-list-mode)
+        (setq-local nostr-profile-list-owner-pubkey "alice-pubkey")
+        (setq-local nostr-profile-list-kind 'following)
+        (nostr-profile-list-refresh)
+        (goto-char (point-min))
+        (search-forward "Carol Example")
+        (should (equal (alist-get 'pubkey (nostr-ui-selected-data))
+                       "carol-pubkey"))
+        (nostr-profile-list-refresh)
+        (should (equal (alist-get 'pubkey (nostr-ui-selected-data))
+                       "carol-pubkey"))))))
+
 (ert-deftest nostr-reactions-renders-and-opens-selected-profile ()
   "Reaction buffers render cached reactor profile cards."
   (nostr-ui-buffers-test-with-db
@@ -244,6 +283,63 @@
           (nostr-reactions-open-profile)))
       (should (equal fetched '("bob-pubkey")))
       (should (equal opened "bob-pubkey")))))
+
+(ert-deftest nostr-reactions-refresh-preserves-selected-profile ()
+  "Reaction detail refreshes keep point on the selected reactor."
+  (nostr-ui-buffers-test-with-db
+    (nostr-ui-buffers-test-store-event
+     '((id . "target")
+       (pubkey . "alice-pubkey")
+       (created_at . 100)
+       (kind . 1)
+       (tags . nil)
+       (content . "note")
+       (sig . "sig")))
+    (nostr-ui-buffers-test-store-event
+     '((id . "bob-profile")
+       (pubkey . "bob-pubkey")
+       (created_at . 101)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"display_name\":\"Bob Example\"}")
+       (sig . "sig")))
+    (nostr-ui-buffers-test-store-event
+     '((id . "carol-profile")
+       (pubkey . "carol-pubkey")
+       (created_at . 102)
+       (kind . 0)
+       (tags . nil)
+       (content . "{\"display_name\":\"Carol Example\"}")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "reaction-bob")
+       (pubkey . "bob-pubkey")
+       (created_at . 103)
+       (kind . 7)
+       (tags . (("e" "target")))
+       (content . "+")
+       (sig . "sig")))
+    (nostr-db-store-event
+     '((id . "reaction-carol")
+       (pubkey . "carol-pubkey")
+       (created_at . 104)
+       (kind . 7)
+       (tags . (("e" "target")))
+       (content . "🚀")
+       (sig . "sig")))
+    (cl-letf (((symbol-function 'nostr-relay-fetch-profile) (lambda (&rest _) nil)))
+      (with-temp-buffer
+        (nostr-reactions-mode)
+        (setq-local nostr-reactions-event
+                    '((id . "target") (pubkey . "alice-pubkey")))
+        (nostr-reactions-refresh)
+        (goto-char (point-min))
+        (search-forward "Bob Example")
+        (should (equal (alist-get 'pubkey (nostr-ui-selected-data))
+                       "bob-pubkey"))
+        (nostr-reactions-refresh)
+        (should (equal (alist-get 'pubkey (nostr-ui-selected-data))
+                       "bob-pubkey"))))))
 
 (ert-deftest nostr-reactions-open-uses-temporary-buffer ()
   "Reaction popups use hidden buffers and `q' kills them."

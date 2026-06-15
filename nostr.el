@@ -138,9 +138,12 @@ pending refresh longer than `nostr-refresh-max-wait-seconds'."
     ('nostr-timeline-mode #'nostr-timeline-refresh)
     ('nostr-thread-mode (and (fboundp 'nostr-thread-refresh) #'nostr-thread-refresh))
     ('nostr-profile-mode #'nostr-profile-refresh)
+    ('nostr-profile-list-mode #'nostr-profile-list-refresh)
     ('nostr-search-mode #'nostr-search-refresh)
     ('nostr-notifications-mode #'nostr-notifications-refresh)
-    ('nostr-relays-mode #'nostr-relays-refresh)))
+    ('nostr-relays-mode #'nostr-relays-refresh)
+    ('nostr-reactions-mode #'nostr-reactions-refresh)
+    ('nostr-setup-mode #'nostr-setup-status-refresh)))
 
 (defun nostr-visible-note-ids ()
   "Return rendered note ids from visible Nostr buffers."
