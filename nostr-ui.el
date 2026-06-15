@@ -76,7 +76,7 @@
   :group 'nostr)
 
 (defface nostr-ui-selected-section
-  '((t :inherit highlight :extend t))
+  '((t :inherit hl-line :extend nil))
   "Face for the currently selected section."
   :group 'nostr)
 

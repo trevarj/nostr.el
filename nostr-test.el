@@ -783,6 +783,7 @@
       (should (overlayp nostr-ui--selection-overlay))
       (should (eq (overlay-get nostr-ui--selection-overlay 'face)
                   'nostr-ui-selected-section))
+      (should-not (face-attribute 'nostr-ui-selected-section :extend nil 'default))
       (nostr-ui-toggle-section)
       (should (nostr-ui-section-folded (nostr-ui-section-at-point)))
       (nostr-ui-toggle-section)
