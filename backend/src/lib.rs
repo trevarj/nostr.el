@@ -586,6 +586,27 @@ mod tests {
     }
 
     #[test]
+    fn nip19_decodes_nprofile_with_short_relay_tlv() {
+        let decoded = response(
+            "nip19-decode",
+            json!({
+                "value": "nprofile1qqsvf82j54enveujhxnwfpg4slpgqshmyna9vfwx6eace9wgw5dv59gpp4mhxue69uhkummn9ekx7mqpz3mhxue69uhhyetvv9ujuerpd46hxtnfduszgpax"
+            }),
+        );
+
+        assert_eq!(decoded["ok"], true);
+        assert_eq!(decoded["entity"], "nprofile");
+        assert_eq!(
+            decoded["pubkey"],
+            "c49d52a573366792b9a6e4851587c28042fb24fa5625c6d67b8c95c8751aca15"
+        );
+        assert_eq!(
+            decoded["relays"],
+            json!(["wss://nos.lol", "wss://relay.damus.io"])
+        );
+    }
+
+    #[test]
     fn nip19_decodes_naddr_entities() {
         let decoded = response(
             "nip19-decode",

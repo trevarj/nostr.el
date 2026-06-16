@@ -1222,18 +1222,15 @@ may carry richer inline stats."
   (let* ((identifier (nostr-ui--strip-public-identifier value))
          (cached (gethash identifier nostr-ui--nip19-decode-cache)))
     (cond
-     ((eq cached 'invalid) nil)
-     (cached cached)
+     ((and cached (not (eq cached 'invalid))) cached)
      (t
       (condition-case nil
           (let ((decoded (nostr-nip19-decode-sync identifier)))
             (if (member (alist-get 'entity decoded nil nil #'equal)
                         '("npub" "nprofile" "note" "nevent" "naddr"))
                 (puthash identifier decoded nostr-ui--nip19-decode-cache)
-              (puthash identifier 'invalid nostr-ui--nip19-decode-cache)
               nil))
         (error
-         (puthash identifier 'invalid nostr-ui--nip19-decode-cache)
          nil))))))
 
 (defun nostr-ui--decode-event-reference-id (value)
