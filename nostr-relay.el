@@ -685,20 +685,17 @@ queued event) when the verification resolves."
             (nostr-relay-fetch-author-from-urls
              pubkey nostr-default-feed-limit nostr-relay-search-author-urls t)))))))
 
-(defun nostr-relay--primal-profile-search-event-p (url sub-id event)
-  "Return non-nil when EVENT is a Primal cache profile-search result."
-  (and (nostr-relay--primal-cache-url-p url)
-       (gethash sub-id nostr-relay--search-profile-queries)
-       (equal (alist-get 'kind event) nostr-kind-metadata)))
-
 (defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
-When `nostr-relay-verify-events' is non-nil, verification subprocesses are
-bounded by `nostr-relay-max-concurrent-verifications'.  Events arriving while
-at the cap are queued up to `nostr-relay-max-queued-verifications'."
+When `nostr-relay-verify-events' is non-nil, EVENT is signature-verified via
+the backend before storage; verification subprocesses are bounded by
+`nostr-relay-max-concurrent-verifications'.  Events arriving while at the cap
+are queued up to `nostr-relay-max-queued-verifications'.
+All relay-supplied events are verified the same way, including Primal cache
+profile-search hints, so a compromised relay cannot forge profile metadata by
+returning a kind-0 event with a bogus signature."
   (nostr-relay--maybe-fetch-profile-search-author sub-id event)
-  (if (or (not nostr-relay-verify-events)
-          (nostr-relay--primal-profile-search-event-p url sub-id event))
+  (if (not nostr-relay-verify-events)
       (nostr-relay--store-verified-event url event)
     (if (>= nostr-relay--verify-inflight
             nostr-relay-max-concurrent-verifications)

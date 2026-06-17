@@ -1878,23 +1878,71 @@
       (when (timerp nostr-search--refresh-timer)
         (cancel-timer nostr-search--refresh-timer)))))
 
-(ert-deftest nostr-search-primal-cache-profile-hints-bypass-verification ()
-  "Primal cache profile search hints are stored even when relay verification is on."
+(ert-deftest nostr-search-primal-cache-profile-hints-require-verification ()
+  "Primal cache profile search hints are signature-verified like other events.
+A compromised Primal cache returning a kind-0 profile with a bogus signature
+cannot bypass verification; only backend-verified hints are stored."
   (nostr-test-with-db
     (let ((nostr-relay-verify-events t)
-          (nostr-relay--search-profile-queries (make-hash-table :test #'equal)))
+          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+          (calls nil))
       (puthash "search-odell" "ODELL" nostr-relay--search-profile-queries)
-      (nostr-relay--handle-event
-       "wss://cache2.primal.net/v1"
-       "search-odell"
-       '((id . "profile-odell")
-         (pubkey . "odell-pubkey")
-         (created_at . 100)
-         (kind . 0)
-         (tags . nil)
-         (content . "{\"name\":\"ODELL\",\"display_name\":\"ODELL\"}")
-         (sig . "cache-sig")))
-      (should (nostr-db-select-profile "odell-pubkey")))))
+      (cl-letf (((symbol-function 'nostr-backend-call)
+                 (lambda (command payload success _error)
+                   (push (list command payload) calls)
+                   (funcall success '((ok . t) (valid . t)))
+                   :process))
+                ((symbol-function 'nostr-relay-fetch-author)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'nostr-relay-fetch-author-from-urls)
+                 (lambda (&rest _) nil)))
+        (should (eq (nostr-relay--handle-event
+                    "wss://cache2.primal.net/v1"
+                    "search-odell"
+                    '((id . "profile-odell")
+                      (pubkey . "odell-pubkey")
+                      (created_at . 100)
+                      (kind . 0)
+                      (tags . nil)
+                      (content . "{\"name\":\"ODELL\",\"display_name\":\"ODELL\"}")
+                      (sig . "cache-sig")))
+                   'pending-verification))
+        (should (equal (caar calls) "verify-event"))
+        (should (nostr-db-select-profile "odell-pubkey"))))))
+
+(ert-deftest nostr-search-primal-cache-rejects-forged-profile-hint ()
+  "A Primal cache kind-0 search hint with a bad signature is not stored.
+The former carve-out stored these unverified; they are now rejected like any
+forged relay event so a compromised relay cannot impersonate a pubkey."
+  (nostr-test-with-db
+    (let ((nostr-relay-verify-events t)
+          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+          (calls nil))
+      (puthash "search-odell" "ODELL" nostr-relay--search-profile-queries)
+      (cl-letf (((symbol-function 'nostr-backend-call)
+                 (lambda (command payload success _error)
+                   (push (list command payload) calls)
+                   (funcall success '((ok . t) (valid . nil)
+                                      (reason . "bad signature")))
+                   :process))
+                ((symbol-function 'nostr-relay-fetch-author)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'nostr-relay-fetch-author-from-urls)
+                 (lambda (&rest _) nil)))
+        (nostr-relay--handle-event
+         "wss://cache2.primal.net/v1"
+         "search-odell"
+         '((id . "profile-odell")
+           (pubkey . "odell-pubkey")
+           (created_at . 100)
+           (kind . 0)
+           (tags . nil)
+           (content . "{\"name\":\"Impostor\"}")
+           (sig . "forged-sig")))
+        (should (equal (caar calls) "verify-event"))
+        (should-not (nostr-db-select-profile "odell-pubkey"))))))
 
 (ert-deftest nostr-search-progress-appears-in-mode-line ()
   "Relay-backed search requests show and clear compact mode-line progress."

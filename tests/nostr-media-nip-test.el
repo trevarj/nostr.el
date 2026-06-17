@@ -6,6 +6,7 @@
 (require 'button)
 (require 'nostr-media)
 (require 'nostr-nip)
+(require 'nostr-url)
 
 (ert-deftest nostr-media-loads-placeholder-into-cache ()
   "Media placeholders can load an image and render cache metadata."
@@ -320,6 +321,90 @@
                           #'ignore))
     (should (equal (alist-get 'event_id decoded) "event-1"))
     (should (equal (alist-get 'value encoded) "note1test"))))
+
+(ert-deftest nostr-url-guard-blocks-private-and-allows-public ()
+  "The SSRF host guard blocks internal hosts and allows public ones."
+  ;; Deterministic checks only: no DNS, so the suite stays network-free.
+  (let ((nostr-url-resolve-hosts nil))
+    (dolist (url '("https://169.254.169.254/x.png"   ; cloud metadata
+                   "http://10.0.0.1/x.png"            ; private
+                   "https://192.168.1.1/x.png"       ; private
+                   "http://127.0.0.1/x.png"          ; loopback
+                   "https://172.16.0.1/x.png"        ; private
+                   "https://localhost/x.png"         ; blocked hostname
+                   "https://metadata.google.internal/x.png"
+                   "http://[::1]/x.png"              ; IPv6 loopback
+                   "http://[fe80::1]/x.png"          ; IPv6 link-local
+                   "http://[::ffff:169.254.169.254]/x.png" ; IPv4-mapped
+                   "file:///etc/passwd"              ; non-http scheme
+                   "ftp://example.com/x.png"))      ; non-http scheme
+      (should-not (nostr-url-public-host-p url)))
+    (should (nostr-url-public-host-p "https://1.1.1.1/x.png"))
+    (should (nostr-url-public-host-p "http://104.20.23.154/x.png"))
+    (should (nostr-url-public-host-p "https://example.com/x.png"))))
+
+(ert-deftest nostr-media-fetch-refuses-private-host ()
+  "Media fetch refuses relay URLs targeting private/link-local hosts."
+  (let ((nostr-media--in-flight (make-hash-table :test #'equal))
+        (nostr-media--recent-failures (make-hash-table :test #'equal))
+        (nostr-media-fetch-function
+         (lambda (&rest _)
+           (ert-fail "private media URL should not fetch")))
+        errors)
+    (dolist (url '("https://169.254.169.254/x.png"
+                   "http://10.0.0.1/x.png"
+                   "https://127.0.0.1/x.png"
+                   "https://localhost/x.png"
+                   "http://[::1]/x.png"
+                   "file:///etc/passwd"))
+      (nostr-media-fetch url
+                         (lambda (&rest _)
+                           (ert-fail "success on a blocked media URL"))
+                         (lambda (_message) (push url errors))))
+    (should (equal (length errors) 6))
+    (should (member "https://169.254.169.254/x.png" errors))))
+
+(ert-deftest nostr-media-video-play-refuses-private-host ()
+  "Video play refuses relay URLs targeting private/link-local hosts."
+  (cl-letf (((symbol-function 'executable-find)
+             (lambda (_command) "/fake/bin/mpv"))
+            ((symbol-function 'start-process)
+             (lambda (&rest _)
+               (ert-fail "private video URL should not launch a player")))
+            ((symbol-function 'browse-url)
+             (lambda (&rest _)
+               (ert-fail "private video URL should not browse"))))
+    (let ((nostr-media-video-player-command "mpv"))
+      (dolist (url '("https://169.254.169.254/x.mp4"
+                     "http://10.0.0.1/x.mp4"
+                     "https://localhost/x.mp4"))
+        (should (equal (nostr-media-play-video-url url) url))))))
+
+(ert-deftest nostr-media-open-refuses-private-host ()
+  "Opening media externally refuses private/link-local hosts."
+  (cl-letf (((symbol-function 'browse-url)
+             (lambda (&rest _)
+               (ert-fail "private media URL should not browse"))))
+    (with-temp-buffer
+      (insert-text-button "[image]"
+                          'nostr-media-url "https://169.254.169.254/x.png"
+                          'follow-link t)
+      (goto-char (point-min))
+      (should (equal (nostr-media-open-at-point)
+                     "https://169.254.169.254/x.png")))))
+
+(ert-deftest nostr-nip05-refuses-private-domain ()
+  "NIP-05 verification refuses identifiers whose domain is an internal host."
+  (let ((nostr-nip05-fetch-function
+         (lambda (&rest _)
+           (ert-fail "private NIP-05 domain should not fetch")))
+        failures)
+    (dolist (id '("trev@169.254.169.254" "trev@localhost" "trev@10.0.0.1"))
+      (nostr-nip05-verify id "pub"
+                         (lambda (&rest _)
+                           (ert-fail "success on a blocked NIP-05 host"))
+                         (lambda (_message) (push id failures))))
+    (should (equal (length failures) 3))))
 
 (provide 'nostr-media-nip-test)
 ;;; nostr-media-nip-test.el ends here

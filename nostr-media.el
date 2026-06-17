@@ -18,6 +18,7 @@
 (require 'url)
 (require 'url-http)
 (require 'url-parse)
+(require 'nostr-url)
 
 (defvar url-http-end-of-headers)
 (defvar url-request-method)
@@ -225,8 +226,19 @@ binary DATA.  ERROR receives a human-readable message.")
 
 (defun nostr-media-fetch (url success error &optional force)
   "Fetch URL and call SUCCESS with headers/data or ERROR with a message.
-When FORCE is non-nil, bypass recent failure suppression."
+When FORCE is non-nil, bypass recent failure suppression.
+Always refuse URLs whose host targets a private, loopback, or link-local
+address (SSRF guard for relay-controlled media URLs); real fetches resolve
+hostnames via `nostr-url-public-host-p'."
   (cond
+   ;; SSRF guard runs first and is never bypassed by FORCE.  When a test
+   ;; fetch hook is in use, skip hostname resolution so batch tests stay
+   ;; network-free; production (hook nil) still resolves to catch
+   ;; DNS-rebinding to internal hosts.
+   ((not (nostr-url-public-host-p url (not nostr-media-fetch-function)))
+    (funcall error (format "Refusing to fetch %s: host is not a public address"
+                           url))
+    nil)
    ((and (not force)
          (nostr-media--failure-cooling-down-p url))
     nil)
@@ -325,20 +337,25 @@ When FORCE is non-nil, bypass recent failure suppression."
     text))
 
 (defun nostr-media-play-video-url (url)
-  "Play video URL with the configured player."
-  (if-let* ((command (and (stringp nostr-media-video-player-command)
-                          (not (string-empty-p nostr-media-video-player-command))
-                          (executable-find nostr-media-video-player-command))))
-      (let ((process (apply #'start-process
-                            "nostr-media-video"
-                            nil
-                            command
-                            (append nostr-media-video-player-args
-                                    (list url)))))
-        (set-process-query-on-exit-flag process nil)
-        (message "Playing video with %s" nostr-media-video-player-command))
-    (browse-url url)
-    (message "Video player not found; opened video in browser"))
+  "Play video URL with the configured player.
+Refuses relay-controlled URLs that target a private, loopback, or link-local
+host, since the player (or browser fallback) fetches the URL from the user's
+machine."
+  (if (not (nostr-url-public-host-p url))
+      (message "Refusing to play %s: host is not a public address" url)
+    (if-let* ((command (and (stringp nostr-media-video-player-command)
+                            (not (string-empty-p nostr-media-video-player-command))
+                            (executable-find nostr-media-video-player-command))))
+        (let ((process (apply #'start-process
+                              "nostr-media-video"
+                              nil
+                              command
+                              (append nostr-media-video-player-args
+                                      (list url)))))
+          (set-process-query-on-exit-flag process nil)
+          (message "Playing video with %s" nostr-media-video-player-command))
+      (browse-url url)
+      (message "Video player not found; opened video in browser")))
   url)
 
 (defun nostr-media-play-video-at-point (&optional button)
@@ -445,11 +462,15 @@ suppression."
 
 ;;;###autoload
 (defun nostr-media-open-at-point ()
-  "Open the media URL at point externally."
+  "Open the media URL at point externally.
+Refuses relay-controlled URLs that target a private, loopback, or link-local
+host, since the external browser fetches the URL from the user's machine."
   (interactive)
   (let ((url (or (nostr-media-url-at-point)
                  (user-error "No Nostr media URL at point"))))
-    (browse-url url)
+    (if (not (nostr-url-public-host-p url))
+        (message "Refusing to open %s: host is not a public address" url)
+      (browse-url url))
     url))
 
 (provide 'nostr-media)

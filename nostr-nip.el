@@ -18,6 +18,7 @@
 (require 'url-http)
 (require 'url-util)
 (require 'nostr-backend)
+(require 'nostr-url)
 
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
@@ -117,27 +118,34 @@ text.  ERROR receives a human-readable message.")
 (defun nostr-nip05-verify (identifier pubkey success error)
   "Verify IDENTIFIER resolves to PUBKEY.
 SUCCESS receives an alist with identifier, pubkey, verified, and url.  ERROR
-receives a human-readable message."
+receives a human-readable message.
+Refuses to fetch NIP-05 verification URLs whose host targets a private,
+loopback, or link-local address (SSRF guard for relay-controlled NIP-05
+domains); real fetches resolve hostnames via `nostr-url-public-host-p'."
   (let ((url (nostr-nip05-url identifier)))
-    (nostr-nip05--fetch
-     url
-     (lambda (json-text)
-       (condition-case err
-           (let ((resolved (progn
-                             (nostr-nip05--validate-response-size
-                              identifier
-                              json-text)
-                             (nostr-nip05--response-pubkey
-                              identifier
-                              json-text))))
-             (funcall success
-                      `((identifier . ,identifier)
-                        (pubkey . ,pubkey)
-                        (resolved-pubkey . ,resolved)
-                        (verified . ,(equal resolved pubkey))
-                        (url . ,url))))
-         (error (funcall error (error-message-string err)))))
-     error)))
+    (if (not (nostr-url-public-host-p url (not nostr-nip05-fetch-function)))
+        (funcall error
+                 (format "Refusing NIP-05 fetch %s: host is not a public address"
+                         url))
+      (nostr-nip05--fetch
+       url
+       (lambda (json-text)
+         (condition-case err
+             (let ((resolved (progn
+                               (nostr-nip05--validate-response-size
+                                identifier
+                                json-text)
+                               (nostr-nip05--response-pubkey
+                                identifier
+                                json-text))))
+               (funcall success
+                        `((identifier . ,identifier)
+                          (pubkey . ,pubkey)
+                          (resolved-pubkey . ,resolved)
+                          (verified . ,(equal resolved pubkey))
+                          (url . ,url))))
+           (error (funcall error (error-message-string err)))))
+       error))))
 
 (defun nostr-nip05-verify-sync (identifier pubkey)
   "Synchronously verify IDENTIFIER resolves to PUBKEY.
