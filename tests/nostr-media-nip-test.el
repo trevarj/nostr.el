@@ -343,6 +343,31 @@
     (should (nostr-url-public-host-p "http://104.20.23.154/x.png"))
     (should (nostr-url-public-host-p "https://example.com/x.png"))))
 
+(ert-deftest nostr-url-guard-blocks-dns-rebinding ()
+  "The resolve path rejects public hostnames that resolve to internal IPs."
+  ;; Stub DNS so a public-looking host resolves to a private/metadata IP.
+  (cl-letf (((symbol-function 'dns-query)
+             (lambda (host type)
+               (cond
+                ((string= host "rebind.example")
+                 (and (eq type 'A) "169.254.169.254"))   ; metadata via rebind
+                ((string= host "public.example")
+                 (and (eq type 'A) "1.1.1.1"))
+                (t nil)))))
+    (let ((nostr-url-resolve-hosts t))
+      ;; resolve=t must follow DNS and refuse the rebound internal address.
+      (should-not (nostr-url-public-host-p "https://rebind.example/x.png" t))
+      ;; A host resolving only to a public IP is still allowed.
+      (should (nostr-url-public-host-p "https://public.example/x.png" t))
+      ;; resolve=nil skips DNS entirely, so the same host is allowed.
+      (should (nostr-url-public-host-p "https://rebind.example/x.png" nil)))
+    ;; With resolution disabled the guard must not perform any lookup.
+    (let ((nostr-url-resolve-hosts nil))
+      (cl-letf (((symbol-function 'dns-query)
+                 (lambda (&rest _)
+                   (ert-fail "dns-query called while resolution disabled"))))
+        (should (nostr-url-public-host-p "https://rebind.example/x.png" t))))))
+
 (ert-deftest nostr-media-fetch-refuses-private-host ()
   "Media fetch refuses relay URLs targeting private/link-local hosts."
   (let ((nostr-media--in-flight (make-hash-table :test #'equal))
