@@ -1121,5 +1121,39 @@
                     (nip05 . :null)))
                  "alice-pubkey")))
 
+(ert-deftest nostr-ui-primary-nav-marks-active-and-filters-global ()
+  "Active nav item uses brackets and `nostr-ui-show-global' gates Global."
+  (let ((items '((feed "f" "Feed" ignore) (global "g" "Global" ignore))))
+    (let ((nostr-ui-show-global nil))
+      (with-temp-buffer
+        (nostr-ui-insert-primary-nav items 'feed)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "Views" text))
+          (should (string-match-p "\\[f Feed\\]" text))
+          (should-not (string-match-p "Global" text)))))
+    (let ((nostr-ui-show-global t))
+      (with-temp-buffer
+        (nostr-ui-insert-primary-nav items 'feed)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "Global" text))
+          (should (string-match-p " g Global " text)))))))
+
+(ert-deftest nostr-ui-primary-nav-buttons-have-action-and-face ()
+  "Nav buttons carry the right face, help-echo, and invoke their command."
+  (let* ((hit nil)
+         (items `((feed "f" "Feed" ,(lambda (&rest _) (setq hit t)))
+                  (global "g" "Global" ignore)))
+         (nostr-ui-show-global t))
+    (with-temp-buffer
+      (nostr-ui-insert-primary-nav items 'feed)
+      (let* ((active (next-button (point-min)))
+             (inactive (next-button (button-end active))))
+        (should (eq (button-get active 'face) 'nostr-ui-nav-active))
+        (should (equal (button-get active 'help-echo) "Show Feed"))
+        (should (eq (button-get inactive 'face) 'nostr-ui-nav-inactive))
+        (should (equal (button-get inactive 'help-echo) "Show Global"))
+        (funcall (button-get active 'action) active)
+        (should hit)))))
+
 (provide 'nostr-ui-card-test)
 ;;; nostr-ui-card-test.el ends here
