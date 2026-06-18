@@ -773,6 +773,27 @@ seen-set does not leak verified ids between tests."
                 (should (equal nostr-thread-focus-id "reply-2")))
             (kill-buffer (current-buffer))))))))
 
+(ert-deftest nostr-thread-depth-terminates-on-reply-id-cycles ()
+  "`nostr-thread--depth' returns a finite depth despite cyclic reply ids."
+  ;; Self-referential reply-id: must be caught immediately, depth 0.
+  (let ((events '(((id . "self") (reply-id . "self")))))
+    (should (integerp (nostr-thread--depth (car events) events)))
+    (should (= 0 (nostr-thread--depth (car events) events))))
+  ;; Two-event mutual cycle: walk stops once a parent id repeats.
+  (let* ((a '((id . "a") (reply-id . "b")))
+         (b '((id . "b") (reply-id . "a")))
+         (events (list a b))
+         (depth (nostr-thread--depth a events)))
+    (should (integerp depth))
+    (should (<= depth nostr-thread-max-depth)))
+  ;; Normal linear chain still yields the expected depth.
+  (let* ((events '(((id . "root"))
+                   ((id . "r1") (reply-id . "root"))
+                   ((id . "r2") (reply-id . "r1")))))
+    (should (= 0 (nostr-thread--depth (nth 0 events) events)))
+    (should (= 1 (nostr-thread--depth (nth 1 events) events)))
+    (should (= 2 (nostr-thread--depth (nth 2 events) events)))))
+
 (ert-deftest nostr-thread-open-embedded-nevent-dispatches-selected-note-link ()
   "Thread drill-in opens an embedded nevent from the selected note."
   (let (opened)

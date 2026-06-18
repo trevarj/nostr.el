@@ -86,12 +86,25 @@
     ("y" "Copy raw id" nostr-share-copy-raw-id)
     ("b" "Browse" nostr-share-browse)]])
 
+(defconst nostr-thread-max-depth 32
+  "Maximum display nesting depth when walking reply ancestry.
+Caps runaway indentation from pathologically deep threads.")
+
 (defun nostr-thread--depth (event events)
-  "Return display depth for EVENT in EVENTS."
+  "Return display depth for EVENT in EVENTS.
+Walks the `reply-id' ancestry, stopping on cycles (a parent id that
+repeats, including self-replies) and clamping at `nostr-thread-max-depth'
+so untrusted relay data cannot cause an unbounded loop."
   (let ((depth 0)
+        ;; Seed with EVENT's own id so a self-referential reply-id is
+        ;; caught immediately rather than looping forever.
+        (visited (list (alist-get 'id event)))
         (parent (alist-get 'reply-id event)))
-    (while parent
+    (while (and parent
+                (< depth nostr-thread-max-depth)
+                (not (member parent visited)))
       (setq depth (1+ depth))
+      (push parent visited)
       (setq parent
             (alist-get 'reply-id
                        (cl-find parent events
