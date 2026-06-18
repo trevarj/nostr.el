@@ -1412,8 +1412,12 @@ may carry richer inline stats."
       (_ (insert (propertize reference 'face 'nostr-ui-content))))))
 
 (defun nostr-ui--event-by-id (event-id)
-  "Return cached EVENT-ID as an event alist."
-  (car (nostr-db-select-thread event-id)))
+  "Return cached EVENT-ID as an event alist.
+Uses `nostr-db-select-event' (a primary-key lookup) rather than
+`nostr-db-select-thread', so rendering a note with N embedded
+references costs N index lookups instead of N full-thread scans
+that join, sort, and return every reply in each referenced thread."
+  (nostr-db-select-event event-id))
 
 (defun nostr-ui--maybe-fetch-embedded-event (event-id)
   "Request EVENT-ID from relays when the relay module is loaded."

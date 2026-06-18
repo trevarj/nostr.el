@@ -1044,6 +1044,25 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
                     :order-by [(asc events:created_at)]]
                    root-id)))
 
+(defun nostr-db-select-event (event-id)
+  "Return the single cached event alist for EVENT-ID, or nil.
+Uses the primary-key index for an O(log N) lookup instead of
+`nostr-db-select-thread', which scans id/root_id/reply_id, joins
+profiles, sorts the whole thread, and returns every matching row.
+This is the right query for the render path, which only needs to test
+whether one embedded reference is cached and render its summary."
+  (car (mapcar #'nostr-db--event-row-to-alist
+               (emacsql nostr-db--connection
+                        [:select
+                         [events:id events:pubkey events:created_at events:kind events:tags
+                                    events:content events:sig events:relay events:root_id events:reply_id
+                                    events:quote_id profiles:name profiles:display_name profiles:picture]
+                         :from events
+                         :left-join profiles :on (= events:pubkey profiles:pubkey)
+                         :where (= events:id $s1)
+                         :limit 1]
+                        event-id))))
+
 (defun nostr-db-select-addressable-event (kind pubkey identifier)
   "Return newest cached addressable event matching KIND, PUBKEY, and IDENTIFIER."
   (car

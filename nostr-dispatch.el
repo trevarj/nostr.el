@@ -24,7 +24,7 @@
 
 (defun nostr-dispatch--event-by-id (event-id)
   "Return cached EVENT-ID as an event alist."
-  (car (nostr-db-select-thread event-id)))
+  (nostr-db-select-event event-id))
 
 (defun nostr-dispatch-open-hex (value)
   "Open hex VALUE as a cached note or profile."
