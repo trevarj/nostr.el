@@ -289,10 +289,18 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
 
 (defun nostr-db-store-profile-event (event)
   "Store kind 0 metadata EVENT."
-  (let ((content (alist-get 'content event))
-        (pubkey (alist-get 'pubkey event))
-        (created-at (or (alist-get 'created_at event) 0)))
-  (emacsql nostr-db--connection
+  (let* ((content (alist-get 'content event))
+         (pubkey (alist-get 'pubkey event))
+         (created-at (or (alist-get 'created_at event) 0))
+         ;; Kind 0 is replaceable (NIP-01): keep only the newest event.
+         (existing (caar (emacsql nostr-db--connection
+                                  [:select [updated_at] :from profiles
+                                           :where (= pubkey $s1)]
+                                  pubkey))))
+    ;; Skip stale events arriving after a newer one (relays deliver out of
+    ;; order). Use >= so a re-delivered identical-timestamp event still refreshes.
+    (when (or (null existing) (>= created-at existing))
+      (emacsql nostr-db--connection
              [:insert-or-replace :into profiles
                                  [pubkey name display_name about picture nip05 lud16 content updated_at]
                                  :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7 $s8 $s9]]
@@ -304,7 +312,7 @@ in `event_id'.  Rebuild the table when that legacy order is detected."
              (nostr-db--profile-name-from-json content 'nip05)
              (nostr-db--profile-name-from-json content 'lud16)
              content
-             created-at)))
+             created-at))))
 
 (defun nostr-db-store-follows-event (event)
   "Store kind 3 follows EVENT."

@@ -489,6 +489,29 @@ seen-set does not leak verified ids between tests."
       (should (equal (nth 7 profile)
                      "{\"name\":\"alice\",\"website\":\"https://example.test\"}")))))
 
+(ert-deftest nostr-db-profile-metadata-honors-created-at-ordering ()
+  "Replaceable kind-0 profiles keep only the newest event (NIP-01)."
+  (nostr-test-with-db
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 200)
+       (kind . 0)
+       (content . "{\"name\":\"new\"}")))
+    ;; Older event must not clobber the newer profile.
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 100)
+       (kind . 0)
+       (content . "{\"name\":\"old\"}")))
+    (should (equal (nth 1 (nostr-db-select-profile "alice")) "new"))
+    ;; Newer event does replace it.
+    (nostr-db-store-profile-event
+     '((pubkey . "alice")
+       (created_at . 300)
+       (kind . 0)
+       (content . "{\"name\":\"newest\"}")))
+    (should (equal (nth 1 (nostr-db-select-profile "alice")) "newest"))))
+
 (ert-deftest nostr-db-counts-unread-notifications ()
   "Unread notification counts use cached seen state."
   (nostr-test-with-db
