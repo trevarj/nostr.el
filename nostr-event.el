@@ -159,6 +159,23 @@ so that is accepted as a fallback."
   `(("e" ,(alist-get 'id repost) ,(or (alist-get 'relay repost) primary-relay))
     ("p" ,(alist-get 'pubkey repost))))
 
+(defun nostr-event-canonical-alist (event)
+  "Return EVENT reduced to canonical Nostr event fields.
+NIP-18 repost content must be a JSON-encoded string of the reposted event,
+containing only the canonical fields (id, pubkey, created_at, kind, tags,
+content, sig).  UI/cache event alists carry derived and joined fields
+(`relay', `root-id', `reply-id', `quote-id', `author', `picture', `reactions',
+`reposts', `replies', etc.) that must not leak into the embedded event JSON.
+The returned alist preserves field order for stable serialization."
+  `((id . ,(alist-get 'id event))
+    (pubkey . ,(alist-get 'pubkey event))
+    (created_at . ,(or (alist-get 'created_at event)
+                       (alist-get 'created-at event)))
+    (kind . ,(alist-get 'kind event))
+    (tags . ,(alist-get 'tags event))
+    (content . ,(alist-get 'content event))
+    (sig . ,(alist-get 'sig event))))
+
 (defconst nostr-event-media-url-regexp
   "\\bhttps?://[^][(){}<>[:space:]\"]+\\.\\(png\\|jpe?g\\|gif\\|webp\\|mp4\\)\\(?:?[^\n[:space:]]*\\)?"
   "Regexp matching media URLs that can be represented in note cards.")

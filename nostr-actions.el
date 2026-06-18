@@ -189,8 +189,15 @@
   (nostr-actions--send
    nostr-kind-repost
    (nostr-event-build-repost-tags event (car nostr-relay-urls))
-   (json-encode event)
+   (nostr-actions--repost-content event)
    "Nostr repost sent"))
+
+(defun nostr-actions--repost-content (event)
+  "Return NIP-18 repost content JSON for EVENT.
+Encodes only the canonical Nostr event fields, with tags vectorized so the
+embedded event serializes as an array of arrays rather than an alist object."
+  (json-encode
+   (nostr-backend--event-to-json-data (nostr-event-canonical-alist event))))
 
 (defun nostr-actions-quote (event)
   "Open compose buffer for a quote post of EVENT."
