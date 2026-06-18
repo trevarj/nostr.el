@@ -73,6 +73,32 @@
                     (nip05 . "_@trevs.site")))
                  "Alice · ✓ trevs.site")))
 
+(ert-deftest nostr-ui-nip05-checkmark-requires-exact-pubkey-and-identifier ()
+  "Verified checkmark renders only for the exact verified pubkey+identifier pair.
+Guards the trust signal against cache keys collapsing to pubkey or identifier
+alone, which would let a forged checkmark render on an unverified profile."
+  (clrhash nostr-ui--verified-nip05-cache)
+  (nostr-ui-record-nip05-verification "alice" "_@trevs.site")
+  ;; Positive control: the exact verified pair shows the checkmark.
+  (should (equal (nostr-ui-format-nip05 "_@trevs.site" "alice") "✓ trevs.site"))
+  ;; Wrong pubkey gets no checkmark.
+  (should (equal (nostr-ui-format-nip05 "_@trevs.site" "mallory") "trevs.site"))
+  ;; Wrong identifier gets no checkmark.
+  (should (equal (nostr-ui-format-nip05 "_@evil.site" "alice") "evil.site"))
+  ;; Missing pubkey gets no checkmark.
+  (should (equal (nostr-ui-format-nip05 "_@trevs.site" nil) "trevs.site"))
+  ;; Predicate is scoped to the exact pair.
+  (should (nostr-ui-nip05-verified-p "alice" "_@trevs.site"))
+  (should-not (nostr-ui-nip05-verified-p "mallory" "_@trevs.site"))
+  (should-not (nostr-ui-nip05-verified-p "alice" "_@evil.site"))
+  (should-not (nostr-ui-nip05-verified-p nil "_@trevs.site"))
+  ;; A forged event reusing alice's identifier renders without the checkmark.
+  (should (equal (nostr-ui-format-author
+                  '((pubkey . "mallory")
+                    (author . "Mallory")
+                    (nip05 . "_@trevs.site")))
+                 "Mallory · trevs.site")))
+
 (ert-deftest nostr-ui-avatar-image-props-center-inline ()
   "Avatar image props vertically center the image on the author line."
   (should (equal (plist-get (nostr-ui--image-display-props 32) :ascent)
