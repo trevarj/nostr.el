@@ -40,9 +40,13 @@ Core Elisp modules:
 - `nostr-relay.el`: websocket relay IO and subscription handling.
 - `nostr-db.el`: SQLite schema and query helpers.
 - `nostr-event.el`: Nostr event/tag normalization helpers.
+- `nostr-url.el`: SSRF host-safety guards for outbound HTTP(S) from relay-supplied URLs; used by `nostr-media` and `nostr-nip`.
 - `nostr-ui.el`: custom section rendering and navigation.
 - `nostr-timeline.el`, `nostr-thread.el`, `nostr-profile.el`, `nostr-search.el`, `nostr-notifications.el`, `nostr-relays.el`: user-facing buffers.
-- `nostr-compose.el`, `nostr-actions.el`, `nostr-share.el`, `nostr-media.el`, `nostr-nip.el`, `nostr-setup.el`: workflow helpers.
+- `nostr-discover.el`: server-ranked provider-backed discovery feeds (e.g. Primal Explore).
+- `nostr-dispatch.el`: public NIP-19 / hex identifier open dispatcher.
+- `nostr-reactions.el`: reaction detail buffers (accounts that reacted to a note).
+- `nostr-compose.el`, `nostr-actions.el`, `nostr-share.el`, `nostr-upload.el`, `nostr-media.el`, `nostr-nip.el`, `nostr-setup.el`: workflow helpers (`nostr-upload.el` is the shared Blossom upload backend used by compose and profile editing).
 
 Backend:
 
