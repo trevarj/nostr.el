@@ -299,7 +299,9 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
 (defun nostr-reset-db ()
   "Reset the Nostr cache database."
   (interactive)
-  (nostr-db-reset nostr-db-path))
+  (nostr-db-reset nostr-db-path)
+  ;; Drop already-verified ids so a fresh cache re-stores events.
+  (nostr-relay--reset-seen-events))
 
 (defalias 'nostr-create-note #'nostr-compose-open)
 (defalias 'nostr-refresh #'nostr-refresh-visible-buffers)

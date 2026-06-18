@@ -188,6 +188,17 @@ Keys are URL+sub-id strings for personal/follows subscriptions.  The client is
 (defvar nostr-relay-sync-finished-hook nil
   "Hook run with no arguments when the initial-sync EOSE burst completes.")
 
+(defvar nostr-relay--verified-event-ids (make-hash-table :test #'equal)
+  "Ids of events already verified and stored this session.
+Used to skip redundant verification subprocesses and re-store work when the
+same event id arrives from multiple overlapping relay subscriptions.")
+
+(defun nostr-relay--reset-seen-events ()
+  "Clear the set of already-verified event ids.
+Call after the cache database is reset so stale ids do not suppress
+re-storage of events."
+  (clrhash nostr-relay--verified-event-ids))
+
 (defvar nostr-relay--verify-inflight 0
   "Number of event-signature verifications currently in flight.")
 
@@ -561,6 +572,9 @@ Unit tests use t as a lightweight connection sentinel."
   "Store verified EVENT from URL and run follow-up cache workflows."
   (let ((normalized (nostr-event-normalize event url)))
     (nostr-db-store-event normalized)
+    ;; Mark the (content-hashed) id as verified+stored so future duplicate
+    ;; arrivals skip the verification subprocess and re-store work.
+    (puthash (alist-get 'id normalized) t nostr-relay--verified-event-ids)
     (nostr-relay--note-ingested-event)
     (nostr-relay--maybe-store-notification normalized)
     (when (equal (alist-get 'kind normalized) nostr-kind-repost)
@@ -685,7 +699,7 @@ queued event) when the verification resolves."
             (nostr-relay-fetch-author-from-urls
              pubkey nostr-default-feed-limit nostr-relay-search-author-urls t)))))))
 
-(defun nostr-relay--handle-event (url sub-id event)
+(cl-defun nostr-relay--handle-event (url sub-id event)
   "Handle EVENT from URL without blocking relay IO.
 When `nostr-relay-verify-events' is non-nil, EVENT is signature-verified via
 the backend before storage; verification subprocesses are bounded by
@@ -693,8 +707,18 @@ the backend before storage; verification subprocesses are bounded by
 are queued up to `nostr-relay-max-queued-verifications'.
 All relay-supplied events are verified the same way, including Primal cache
 profile-search hints, so a compromised relay cannot forge profile metadata by
-returning a kind-0 event with a bogus signature."
+returning a kind-0 event with a bogus signature.
+Event ids already verified and stored this session are short-circuited: only
+relay provenance is recorded so per-note relay counts stay correct, while the
+expensive verify subprocess and full store path are skipped."
   (nostr-relay--maybe-fetch-profile-search-author sub-id event)
+  ;; Event ids are content hashes, so a repeated id is byte-identical to the
+  ;; already-verified copy; re-verifying or re-storing it is pure waste.
+  (when-let* ((id (alist-get 'id event)))
+    (when (gethash id nostr-relay--verified-event-ids)
+      ;; Still record provenance so per-note relay-count stays correct.
+      (nostr-db-store-event-relay (nostr-event-normalize event url))
+      (cl-return-from nostr-relay--handle-event 'already-verified)))
   (if (not nostr-relay-verify-events)
       (nostr-relay--store-verified-event url event)
     (if (>= nostr-relay--verify-inflight

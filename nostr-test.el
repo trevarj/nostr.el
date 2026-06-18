@@ -19,9 +19,12 @@
 (require 'nostr)
 
 (defmacro nostr-test-with-db (&rest body)
-  "Run BODY with an isolated in-memory Nostr database."
+  "Run BODY with an isolated in-memory Nostr database.
+Also binds a fresh `nostr-relay--verified-event-ids' so that the session
+seen-set does not leak verified ids between tests."
   (declare (indent 0))
-  `(let ((nostr-db--connection (emacsql-sqlite-open nil)))
+  `(let ((nostr-db--connection (emacsql-sqlite-open nil))
+         (nostr-relay--verified-event-ids (make-hash-table :test #'equal)))
      (unwind-protect
          (progn
            (nostr-db-init)
@@ -1943,6 +1946,79 @@ forged relay event so a compromised relay cannot impersonate a pubkey."
            (sig . "forged-sig")))
         (should (equal (caar calls) "verify-event"))
         (should-not (nostr-db-select-profile "odell-pubkey"))))))
+
+(ert-deftest nostr-relay-skips-verification-for-seen-event-id ()
+  "A repeated event id is not re-verified via the backend subprocess.
+Because event ids are content hashes, a duplicate is byte-identical to the
+already-verified copy, so only the first arrival spawns a verify subprocess."
+  (nostr-test-with-db
+    (let ((nostr-relay-verify-events t)
+          (nostr-relay--verified-event-ids (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+          (event '((id . "dup-note")
+                   (pubkey . "alice")
+                   (created_at . 100)
+                   (kind . 1)
+                   (tags . nil)
+                   (content . "hello")
+                   (sig . "sig")))
+          (calls nil))
+      (cl-letf (((symbol-function 'nostr-backend-call)
+                 (lambda (command payload success _error)
+                   (push (list command payload) calls)
+                   (funcall success '((ok . t) (valid . t)))
+                   :process))
+                ((symbol-function 'nostr-relay-fetch-profile)
+                 (lambda (&rest _) nil)))
+        (nostr-relay--handle-event "wss://relay-a.example" "feed" event)
+        ;; Second arrival of the same id from a different relay.
+        (should (eq (nostr-relay--handle-event
+                     "wss://relay-b.example" "feed" event)
+                    'already-verified))
+        ;; Only the first arrival spawned a verify subprocess.
+        (should (= (length calls) 1))
+        (should (equal (caar calls) "verify-event"))))))
+
+(ert-deftest nostr-relay-seen-event-records-provenance-without-full-store ()
+  "A duplicate event still records relay provenance but skips the full store.
+Even with verification disabled, the second arrival records the delivering
+relay so per-note relay counts stay correct, while the expensive
+`nostr-db-store-event' path runs only once."
+  (nostr-test-with-db
+    (let ((nostr-relay-verify-events nil)
+          (nostr-relay--verified-event-ids (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
+          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
+          (event '((id . "dup-note")
+                   (pubkey . "alice")
+                   (created_at . 100)
+                   (kind . 1)
+                   (tags . nil)
+                   (content . "hello")
+                   (sig . "sig")))
+          (store-calls 0)
+          (relay-calls 0)
+          (orig-store (symbol-function 'nostr-db-store-event))
+          (orig-relay (symbol-function 'nostr-db-store-event-relay)))
+      (cl-letf (((symbol-function 'nostr-db-store-event)
+                 (lambda (e) (cl-incf store-calls) (funcall orig-store e)))
+                ((symbol-function 'nostr-db-store-event-relay)
+                 (lambda (e) (cl-incf relay-calls) (funcall orig-relay e)))
+                ((symbol-function 'nostr-relay-fetch-profile)
+                 (lambda (&rest _) nil)))
+        (nostr-relay--handle-event "wss://relay-a.example" "feed" event)
+        (should (eq (nostr-relay--handle-event
+                     "wss://relay-b.example" "feed" event)
+                    'already-verified))
+        ;; Full store ran once; provenance recorded for both arrivals.
+        (should (= store-calls 1))
+        (should (= relay-calls 2))
+        ;; Both delivering relays are recorded for the note.
+        (should (= 2 (caar (emacsql nostr-db--connection
+                                    [:select [(funcall count *)]
+                                             :from event_relays
+                                             :where (= event_id "dup-note")]))))))))
 
 (ert-deftest nostr-search-progress-appears-in-mode-line ()
   "Relay-backed search requests show and clear compact mode-line progress."
