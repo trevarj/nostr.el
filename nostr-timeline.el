@@ -224,8 +224,14 @@ When FORCE is non-nil, request a fresh provider/relay page."
                                    (kind kind)))
     (let ((events (nostr-timeline--select-events)))
       (nostr-ui-prime-caches events)
-      (nostr-timeline--backfill-missing-reposts)
-      (nostr-timeline--backfill-visible-metadata events)
+      ;; The initial-sync REQs already cover followed-author metadata and
+      ;; the feed itself; re-issuing profile/event-metadata/reaction backfill
+      ;; subscriptions on every burst refresh just spawns more relay traffic
+      ;; that feeds straight back into verify -> store -> refresh.  Defer it
+      ;; until the sync settles, then run once on the first post-sync refresh.
+      (unless (nostr-relay-syncing-p)
+        (nostr-timeline--backfill-missing-reposts)
+        (nostr-timeline--backfill-visible-metadata events))
       (if events
           (dolist (event events)
             (let ((nostr-media-auto-preview

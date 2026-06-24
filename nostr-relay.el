@@ -106,6 +106,23 @@ floods the client faster than signatures can be checked."
   :type 'integer
   :group 'nostr)
 
+(defcustom nostr-relay-ingestion-batch-size 32
+  "Maximum number of verified events stored per background ingestion tick.
+Verified events are not stored synchronously in the verification-completion
+callback; they are queued and drained in batches from a timer so the main
+thread stays responsive during the initial-sync EOSE burst.  Each tick yields
+to the command loop, letting redisplay and user input interleave with storage."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-relay-ingestion-interval 0.08
+  "Seconds between background ingestion drain ticks.
+Pending verified events are stored in batches of
+`nostr-relay-ingestion-batch-size' at this cadence.  Short enough that the queue
+keeps up with the burst, long enough that each batch yields to the command loop."
+  :type 'number
+  :group 'nostr)
+
 (defcustom nostr-relay-sync-timeout-seconds 12
   "Maximum seconds to treat the client as still doing its initial sync.
 While syncing, UI refreshes are throttled (see `nostr--schedule-refresh').
@@ -207,6 +224,16 @@ re-storage of events."
 
 (defvar nostr-relay--verify-drain-timer nil
   "Pending timer that drains queued event verifications.")
+
+(defvar nostr-relay--ingestion-queue nil
+  "FIFO queue of verified (URL . EVENT) pairs awaiting background ingestion.
+Verification completes asynchronously; instead of storing each event
+synchronously in the completion callback (which would pile work on the main
+thread during the initial-sync burst), verified events are queued here and
+drained in bounded batches by `nostr-relay--drain-ingestion-queue'.")
+
+(defvar nostr-relay--ingestion-drain-timer nil
+  "Pending timer that drains `nostr-relay--ingestion-queue' in batches.")
 
 (defvar nostr-relay--profile-requests (make-hash-table :test #'equal)
   "Pubkeys with in-flight profile metadata requests.")
@@ -568,8 +595,11 @@ Unit tests use t as a lightweight connection sentinel."
            (or (alist-get 'id event) "(unknown event)")
            (or message "signature verification failed"))))
 
-(defun nostr-relay--store-verified-event (url event)
-  "Store verified EVENT from URL and run follow-up cache workflows."
+(defun nostr-relay--ingest-event (url event)
+  "Store verified EVENT from URL and run follow-up cache workflows.
+This is the synchronous per-event ingestion step, run from the background drain
+(`nostr-relay--drain-ingestion-queue') so the verification-completion callback
+stays cheap.  `nostr-relay--store-verified-event' delegates here."
   (let ((normalized (nostr-event-normalize event url)))
     (nostr-db-store-event normalized)
     ;; Mark the (content-hashed) id as verified+stored so future duplicate
@@ -599,6 +629,70 @@ Unit tests use t as a lightweight connection sentinel."
       (nostr-relay-connect-recommended-deferred nostr-current-pubkey))
     (run-hook-with-args 'nostr-relay-event-hook normalized)
     normalized))
+
+(defun nostr-relay--store-verified-event (url event)
+  "Store verified EVENT from URL synchronously and run follow-up workflows.
+Thin wrapper over `nostr-relay--ingest-event' kept for direct callers and tests
+that want storage to happen immediately rather than via the background queue."
+  (nostr-relay--ingest-event url event))
+
+(defun nostr-relay--enqueue-ingestion (url event)
+  "Queue verified EVENT from URL for background ingestion.
+Marks the event id verified immediately so a duplicate arriving before the
+drain short-circuits via `nostr-relay--handle-event's fast path instead of
+re-verifying, then appends (URL . EVENT) to `nostr-relay--ingestion-queue' and
+arms the drain timer.  Keeps the verification-completion callback cheap."
+  (when-let* ((id (alist-get 'id event)))
+    (puthash id t nostr-relay--verified-event-ids))
+  (setq nostr-relay--ingestion-queue
+        (nconc nostr-relay--ingestion-queue (list (cons url event))))
+  (nostr-relay--schedule-ingestion-drain))
+
+(defun nostr-relay--schedule-ingestion-drain ()
+  "Schedule a background ingestion drain tick if one is not already pending."
+  (unless (timerp nostr-relay--ingestion-drain-timer)
+    (setq nostr-relay--ingestion-drain-timer
+          (run-at-time nostr-relay-ingestion-interval nil
+                       #'nostr-relay--drain-ingestion-queue))))
+
+(defun nostr-relay--drain-ingestion-queue ()
+  "Store up to `nostr-relay-ingestion-batch-size' queued events, then reschedule.
+Each event is ingested inside a `condition-case' so one bad event does not
+abort the batch.  If the queue is not empty after the batch, arm another tick;
+otherwise clear the timer.  Each tick returns to the command loop so redisplay
+and user input interleave with the initial-sync burst."
+  (setq nostr-relay--ingestion-drain-timer nil)
+  (let ((remaining nostr-relay-ingestion-batch-size))
+    (while (and nostr-relay--ingestion-queue (> remaining 0))
+      (let ((next (pop nostr-relay--ingestion-queue)))
+        (cl-decf remaining)
+        (condition-case err
+            (nostr-relay--ingest-event (car next) (cdr next))
+          (error
+           (nostr-relay--log-ingestion-error err))))))
+  (when nostr-relay--ingestion-queue
+    (nostr-relay--schedule-ingestion-drain)))
+
+(defun nostr-relay--flush-ingestion ()
+  "Drain the entire ingestion queue synchronously, with no batch limit.
+Used at teardown and before the final sync render so the UI reflects every
+ingested event.  Cancels any pending drain timer first."
+  (when (timerp nostr-relay--ingestion-drain-timer)
+    (cancel-timer nostr-relay--ingestion-drain-timer)
+    (setq nostr-relay--ingestion-drain-timer nil))
+  (while nostr-relay--ingestion-queue
+    (let ((next (pop nostr-relay--ingestion-queue)))
+      (condition-case err
+          (nostr-relay--ingest-event (car next) (cdr next))
+        (error
+         (nostr-relay--log-ingestion-error err))))))
+
+(defun nostr-relay--log-ingestion-error (err)
+  "Log ingestion ERR when debug logging is enabled.
+`nostr-debug-logging' lives in `nostr.el', which is loaded after this module, so
+gate on `bound-and-true-p' rather than calling `nostr-debug-message' directly."
+  (when (bound-and-true-p nostr-debug-logging)
+    (message "[nostr] ingestion failed: %s" (error-message-string err))))
 
 (defun nostr-relay--schedule-verify-drain ()
   "Schedule queued event verification work outside the current callback stack."
@@ -637,7 +731,7 @@ queued event) when the verification resolves."
        (lambda (response)
          (unwind-protect
              (if (alist-get 'valid response)
-                 (nostr-relay--store-verified-event url event)
+                 (nostr-relay--enqueue-ingestion url event)
                (nostr-relay--invalid-event
                 url event (alist-get 'reason response)))
            (nostr-relay--verify-finished)))
@@ -921,6 +1015,9 @@ timer also marks an in-progress session)."
     (setq nostr-relay--sync-timeout-timer nil)
     (clrhash nostr-relay--syncing-subs)
     (when was-syncing
+      ;; Drain any verified events still queued in the background so the final
+      ;; refresh (scheduled by the hook below) reflects every ingested event.
+      (nostr-relay--flush-ingestion)
       (run-hooks 'nostr-relay-sync-finished-hook))))
 
 (defun nostr-relay--note-feed-subscription (url sub-id)

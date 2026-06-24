@@ -21,14 +21,20 @@
 (defmacro nostr-test-with-db (&rest body)
   "Run BODY with an isolated in-memory Nostr database.
 Also binds a fresh `nostr-relay--verified-event-ids' so that the session
-seen-set does not leak verified ids between tests."
+seen-set does not leak verified ids between tests, and a fresh
+`nostr-relay--syncing-subs'/`nostr-relay--sync-timeout-timer' so initial-sync
+state set by one test does not bleed into another (e.g. backfill gating)."
   (declare (indent 0))
   `(let ((nostr-db--connection (emacsql-sqlite-open nil))
-         (nostr-relay--verified-event-ids (make-hash-table :test #'equal)))
+         (nostr-relay--verified-event-ids (make-hash-table :test #'equal))
+         (nostr-relay--syncing-subs (make-hash-table :test #'equal))
+         (nostr-relay--sync-timeout-timer nil))
      (unwind-protect
          (progn
            (nostr-db-init)
            ,@body)
+       (when (timerp nostr-relay--sync-timeout-timer)
+         (cancel-timer nostr-relay--sync-timeout-timer))
        (emacsql-close nostr-db--connection))))
 
 (defconst nostr-test-root-event
@@ -1783,6 +1789,9 @@ seen-set does not leak verified ids between tests."
       (should (equal (caar calls) "verify-event"))
       (should (equal (alist-get 'id (alist-get 'event (cadar calls)))
                      "verified-note"))
+      ;; Verified events are ingested via the background queue; flush it so the
+      ;; store is observable in this synchronous test context.
+      (nostr-relay--flush-ingestion)
       (should (equal (nostr-db-event-pubkey "verified-note") "alice")))))
 
 (ert-deftest nostr-relay-rejects-invalid-events ()
@@ -1956,6 +1965,9 @@ cannot bypass verification; only backend-verified hints are stored."
                       (sig . "cache-sig")))
                    'pending-verification))
         (should (equal (caar calls) "verify-event"))
+        ;; Profile hints are ingested via the background queue; flush it so the
+        ;; stored profile is observable in this synchronous test context.
+        (nostr-relay--flush-ingestion)
         (should (nostr-db-select-profile "odell-pubkey"))))))
 
 (ert-deftest nostr-search-primal-cache-rejects-forged-profile-hint ()

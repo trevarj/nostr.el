@@ -76,24 +76,27 @@ The buffer is repainted the next time it becomes visible.")
 (defvar nostr--open-generation 0
   "Generation counter used to ignore stale async `nostr-open' callbacks.")
 
-(defcustom nostr-refresh-debounce-seconds 0.4
+(defcustom nostr-refresh-debounce-seconds 0.8
   "Seconds to debounce UI refresh after relay events."
   :type 'number
   :group 'nostr)
 
-(defcustom nostr-refresh-max-wait-seconds 1.5
+(defcustom nostr-refresh-max-wait-seconds 3.0
   "Maximum seconds a pending UI refresh may be deferred by a steady event stream.
 Once a refresh has been pending this long, the next event lets it fire instead
 of pushing it out again, so a continuous stream cannot starve the refresh."
   :type 'number
   :group 'nostr)
 
-(defcustom nostr-sync-refresh-interval 2.0
-  "Seconds between UI refreshes while the client is doing its initial sync.
-During the EOSE burst of `nostr-open', hundreds of events arrive; refreshing on
-each one re-renders the whole buffer repeatedly.  Instead the buffer is
-refreshed at most once per this interval until `nostr-relay-syncing-p' clears,
-at which point a final refresh runs."
+(defcustom nostr-sync-refresh-interval 8.0
+  "Long-interval partial-progress fallback during the initial sync.
+While `nostr-relay-syncing-p' is non-nil, `nostr--schedule-refresh' does not
+rebuild on every arriving event: the EOSE burst would just thrash the buffer.
+The authoritative render happens once at sync-finished
+(`nostr-relay-sync-finished-hook'); this interval is only the safety valve so a
+slow or never-EOSE relay still paints partial progress periodically.  Verified
+events are drained from a background ingestion queue regardless, so a slower
+render here loses no data: `nostr-relay--clear-syncing' flushes the queue first."
   :type 'number
   :group 'nostr)
 
@@ -108,18 +111,22 @@ at which point a final refresh runs."
 
 (defun nostr--schedule-refresh (&rest _ignored)
   "Schedule a refresh of visible Nostr buffers, throttled during initial sync.
-While syncing, refresh at most once per `nostr-sync-refresh-interval'.  In
-steady state, debounce by `nostr-refresh-debounce-seconds' but never defer a
-pending refresh longer than `nostr-refresh-max-wait-seconds'."
+While syncing, do not rebuild per event: arm one wall-clock fallback timer at
+`nostr-sync-refresh-interval' so a slow/never-EOSE relay still paints partial
+progress; the authoritative render runs at sync-finished.  In steady state,
+debounce by `nostr-refresh-debounce-seconds' of *idle* time (so a refresh never
+interrupts typing/scrolling) but never defer a pending refresh longer than
+`nostr-refresh-max-wait-seconds'."
   (if (nostr--syncing-p)
       ;; Initial-sync burst: leave any pending timer alone so it fires once per
-      ;; interval; only arm a new one when none is pending.
+      ;; fallback interval; only arm a new one when none is pending.
       (unless (timerp nostr--refresh-timer)
         (setq nostr--refresh-pending-since (float-time))
         (setq nostr--refresh-timer
               (run-at-time nostr-sync-refresh-interval nil
                            #'nostr-refresh-visible-buffers)))
-    ;; Steady state: debounce, but coalesce so a steady stream still refreshes.
+    ;; Steady state: debounce on idle time so redisplay/input interleave, but
+    ;; coalesce so a steady stream still refreshes (max-wait backstop).
     (let ((now (float-time)))
       (unless (timerp nostr--refresh-timer)
         (setq nostr--refresh-pending-since now))
@@ -129,8 +136,8 @@ pending refresh longer than `nostr-refresh-max-wait-seconds'."
         (when (timerp nostr--refresh-timer)
           (cancel-timer nostr--refresh-timer))
         (setq nostr--refresh-timer
-              (run-at-time nostr-refresh-debounce-seconds nil
-                           #'nostr-refresh-visible-buffers))))))
+              (run-with-idle-timer nostr-refresh-debounce-seconds nil
+                                   #'nostr-refresh-visible-buffers))))))
 
 (defun nostr--buffer-refresh-function ()
   "Return the refresh command for the current buffer's Nostr mode, or nil."
@@ -292,6 +299,10 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
   (remove-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
   (cl-incf nostr--open-generation)
+  ;; Flush any verified events still queued for background ingestion before
+  ;; closing the DB, so nothing is dropped and no drain fires after teardown.
+  (when (fboundp 'nostr-relay--flush-ingestion)
+    (nostr-relay--flush-ingestion))
   (nostr-relay-disconnect-all)
   (nostr-db-close))
 

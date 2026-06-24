@@ -185,6 +185,46 @@
       (should (timerp nostr--refresh-timer))
       (should-not (eq nostr--refresh-timer first)))))
 
+(ert-deftest nostr-timeline-refresh-defers-backfill-during-sync ()
+  "Relay backfill subscriptions are deferred until the initial sync settles."
+  (nostr-perf-test--with-clean-sync
+    (let ((profiles 0) (metadata 0) (reactions 0) (repost-fetches 0))
+      (cl-letf (((symbol-function 'nostr-db-select-account-feed)
+                 (lambda (&rest _)
+                   '(((id . "n1") (pubkey . "alice") (kind . 1)
+                      (content . "hi")))))
+                ((symbol-function 'nostr-db-select-missing-repost-targets)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'nostr-relay-fetch-profile)
+                 (lambda (&rest _) (cl-incf profiles)))
+                ((symbol-function 'nostr-relay-fetch-event-metadata)
+                 (lambda (&rest _) (cl-incf metadata)))
+                ((symbol-function 'nostr-relay-subscribe-visible-reactions)
+                 (lambda (&rest _) (cl-incf reactions)))
+                ((symbol-function 'nostr-relay-fetch-events-by-id)
+                 (lambda (&rest _) (cl-incf repost-fetches)))
+                ((symbol-function 'nostr-relay-close-global) #'ignore)
+                ((symbol-function 'nostr-ui-insert-note) #'ignore))
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey "alice"
+                      nostr-timeline-feed-kind 'feed)
+          ;; While syncing the burst already covers authors; no backfill is
+          ;; issued so it cannot re-fuel verify -> store -> refresh.
+          (puthash "k" t nostr-relay--syncing-subs)
+          (nostr-timeline-refresh)
+          (should (= profiles 0))
+          (should (= metadata 0))
+          (should (= reactions 0))
+          (should (= repost-fetches 0))
+          ;; Once the sync settles, the next refresh runs backfill once.
+          (clrhash nostr-relay--syncing-subs)
+          (nostr-timeline-refresh)
+          (should (> profiles 0))
+          (should (> metadata 0))
+          (should (> reactions 0))
+          (should (> repost-fetches 0)))))))
+
 (ert-deftest nostr-open-refreshes-after-local-actions ()
   "Opening Nostr wires locally sent actions into the refresh scheduler."
   (let ((nostr-actions-after-send-hook nil)
@@ -349,7 +389,86 @@
                               "dropped verification queue full"))))))
       (emacsql-close nostr-db--connection))))
 
-(ert-deftest nostr-close-subscription-all-tracks-relay-local-state ()
+(defmacro nostr-perf-test--with-clean-ingestion (&rest body)
+  "Run BODY with an isolated, empty ingestion queue and no stray drain timer."
+  (declare (indent 0))
+  `(let ((nostr-relay--ingestion-queue nil)
+         (nostr-relay--ingestion-drain-timer nil))
+     (unwind-protect
+         (progn ,@body)
+       (when (timerp nostr-relay--ingestion-drain-timer)
+         (cancel-timer nostr-relay--ingestion-drain-timer)
+         (setq nostr-relay--ingestion-drain-timer nil))
+       (setq nostr-relay--ingestion-queue nil))))
+
+(ert-deftest nostr-ingestion-queue-defers-store ()
+  "A successful verify enqueues; storage happens on the drain, not immediately."
+  (nostr-perf-test--with-clean-ingestion
+    (let (ingested)
+      (cl-letf (((symbol-function 'nostr-relay--ingest-event)
+                 (lambda (url event) (push (cons url event) ingested))))
+        (nostr-relay--enqueue-ingestion "wss://r" '((id . "e1")))
+        ;; Enqueue does not ingest synchronously.
+        (should (null ingested))
+        (should (= (length nostr-relay--ingestion-queue) 1))
+        (should (timerp nostr-relay--ingestion-drain-timer))
+        ;; The id is marked verified so a duplicate short-circuits re-verify.
+        (should (gethash "e1" nostr-relay--verified-event-ids))
+        (nostr-relay--drain-ingestion-queue)
+        (should (equal (reverse ingested)
+                       '(("wss://r" . ((id . "e1"))))))
+        (should (null nostr-relay--ingestion-queue))
+        (should-not (timerp nostr-relay--ingestion-drain-timer))))))
+
+(ert-deftest nostr-ingestion-drain-is-batched ()
+  "Each drain tick stores at most `nostr-relay-ingestion-batch-size' events."
+  (nostr-perf-test--with-clean-ingestion
+    (let ((nostr-relay-ingestion-batch-size 2)
+          ingested)
+      (cl-letf (((symbol-function 'nostr-relay--ingest-event)
+                 (lambda (url event) (push (cons url event) ingested))))
+        (dolist (id '("a" "b" "c"))
+          (nostr-relay--enqueue-ingestion "wss://r" `((id . ,id))))
+        (should (= (length nostr-relay--ingestion-queue) 3))
+        (nostr-relay--drain-ingestion-queue)
+        ;; Only the batch was ingested; one remains and the timer rescheduled.
+        (should (= (length ingested) 2))
+        (should (equal (reverse ingested)
+                       '(("wss://r" . ((id . "a")))
+                         ("wss://r" . ((id . "b"))))))
+        (should (= (length nostr-relay--ingestion-queue) 1))
+        (should (timerp nostr-relay--ingestion-drain-timer))
+        (when (timerp nostr-relay--ingestion-drain-timer)
+          (cancel-timer nostr-relay--ingestion-drain-timer)
+          (setq nostr-relay--ingestion-drain-timer nil))
+        (nostr-relay--drain-ingestion-queue)
+        (should (= (length ingested) 3))
+        (should (null nostr-relay--ingestion-queue))))))
+
+(ert-deftest nostr-ingestion-flushes-before-sync-finished ()
+  "Clearing syncing flushes the ingestion queue before the finished hook runs."
+  (nostr-perf-test--with-clean-sync
+    (nostr-perf-test--with-clean-ingestion
+      (let (ingested
+            (queue-at-hook-time 'unset))
+        (cl-letf (((symbol-function 'nostr-relay--ingest-event)
+                   (lambda (_url _event) (push 1 ingested))))
+          (add-hook 'nostr-relay-sync-finished-hook
+                    (lambda ()
+                      (setq queue-at-hook-time
+                            (null nostr-relay--ingestion-queue))))
+          (nostr-relay--note-feed-subscription "wss://r" "personal-abc")
+          (should (nostr-relay-syncing-p))
+          (dolist (id '("x" "y"))
+            (nostr-relay--enqueue-ingestion "wss://r" `((id . ,id))))
+          (should (= (length nostr-relay--ingestion-queue) 2))
+          ;; EOSE empties the syncing set and triggers clear-syncing, which
+          ;; flushes ingestion before running the finished hook.
+          (nostr-relay--note-feed-eose "wss://r" "personal-abc")
+          (should (eq queue-at-hook-time t))
+          (should (= (length ingested) 2))
+          (should (null nostr-relay--ingestion-queue))))))
+
   "A CLOSED from one relay does not hide the same sub-id on another relay."
   (let ((nostr-db--connection (emacsql-sqlite-open nil))
         (nostr-relay--connections (make-hash-table :test #'equal))
