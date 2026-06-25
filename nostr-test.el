@@ -743,7 +743,9 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       "relay"))
     (let ((thread (nostr-db-select-thread "root")))
       (should (equal (mapcar (lambda (event) (alist-get 'id event)) thread)
-                     '("root" "reply"))))))
+                     '("root" "reply"))))
+    ;; The reply badge counts only the note, not the reaction.
+    (should (= (alist-get 'replies (nostr-db-event-counts "root")) 1))))
 
 (ert-deftest nostr-thread-open-reply-loads-root-thread-and-focuses-reply ()
   "Opening a reply shows the full cached root thread and selects the reply."

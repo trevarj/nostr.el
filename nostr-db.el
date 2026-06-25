@@ -799,9 +799,13 @@ reaction/repost/reply tables for rows that may never be rendered."
                          (emacsql nostr-db--connection
                                   [:select [id reply_id root_id]
                                            :from events
-                                           :where (or (in reply_id $v1)
-                                                      (in root_id $v1))]
-                                  vids))
+                                           ;; Only text notes are replies; a
+                                           ;; reaction/repost/zap e-tag also lands
+                                           ;; in root_id and would inflate the count.
+                                           :where (and (= kind $s2)
+                                                       (or (in reply_id $v1)
+                                                           (in root_id $v1)))]
+                                  vids nostr-kind-text-note))
             (dolist (target (delete-dups (delq nil (list reply-id root-id))))
               (when (gethash target result)
                 (let ((set (or (gethash target reply-sets)
