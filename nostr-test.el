@@ -2719,13 +2719,20 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
                    (,nostr-search-mode-map . nostr-search-actions)
                    (,nostr-notifications-mode-map . nostr-notifications-actions)
                    (,nostr-relays-mode-map . nostr-relays-actions)
-                   (,nostr-compose-mode-map . nostr-compose-actions)
                    (,nostr-setup-mode-map . nostr-setup-actions)))
     (let ((map (car entry))
           (command (cdr entry)))
       (should (fboundp command))
       (should (commandp command))
       (should (eq (lookup-key map (kbd "?")) command)))))
+
+(ert-deftest nostr-compose-binds-actions-off-question-mark ()
+  "Compose buffers expose their menu on `C-c ?' so `?' self-inserts."
+  (should (commandp #'nostr-compose-actions))
+  (should (eq (lookup-key nostr-compose-mode-map (kbd "C-c ?"))
+             #'nostr-compose-actions))
+  (should-not (eq (lookup-key nostr-compose-mode-map (kbd "?"))
+                  #'nostr-compose-actions)))
 
 ;;;; Relay daemon driver
 

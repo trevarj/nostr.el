@@ -104,7 +104,7 @@ smaller frames."
     (define-key map (kbd "M-p") #'nostr-compose-previous-draft)
     (define-key map (kbd "M-n") #'nostr-compose-next-draft)
     (define-key map (kbd "@") #'nostr-compose-insert-mention-trigger)
-    (define-key map (kbd "?") #'nostr-compose-actions)
+    (define-key map (kbd "C-c ?") #'nostr-compose-actions)
     map)
   "Keymap for `nostr-compose-mode'.")
 
