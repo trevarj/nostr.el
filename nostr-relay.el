@@ -540,12 +540,17 @@ daemon owns the socket, so this only translates intent."
     (dolist (key keys)
       (remhash key nostr-relay--subscriptions))))
 
-(defun nostr-relay-subscribe (url sub-id filters)
-  "Subscribe to URL with SUB-ID and FILTERS."
+(defun nostr-relay-subscribe (url sub-id filters &optional close-on-eose)
+  "Subscribe to URL with SUB-ID and FILTERS.
+With CLOSE-ON-EOSE, the relay subscription auto-closes after EOSE.  Use it for
+one-shot fetches (profiles, event metadata, missing events) so they free the
+relay's subscription slot instead of staying open and exhausting the relay's
+concurrent-subscription limit."
   (puthash (nostr-relay--subscription-key url sub-id)
            t
            nostr-relay--subscriptions)
-  (nostr-relay--send url (vconcat `["REQ" ,sub-id] filters)))
+  (when (nostr-daemon-running-p)
+    (nostr-daemon-subscribe sub-id filters (list url) close-on-eose)))
 
 (defun nostr-relay--connection-open-p (url)
   "Return non-nil when URL is registered as connected with the daemon."
@@ -602,9 +607,12 @@ and UI count refreshes the old ingestion step performed."
         (nostr-ui-refresh-note-counts target)))
     (when (equal kind nostr-kind-metadata)
       (nostr-relay--complete-profile-request pubkey))
-    (when (memq kind (list nostr-kind-text-note nostr-kind-repost
-                           nostr-kind-reaction nostr-kind-zap-receipt))
-      (nostr-relay-fetch-profile pubkey))
+    ;; Author profiles are NOT fetched per stored event: that fired a profile
+    ;; subscription for every event in a sync burst, flooding relays'
+    ;; subscription slots (which then dropped the feed and stalled avatars).
+    ;; Followed-author metadata arrives via the follows-feed metadata filter, and
+    ;; the timeline render backfills missing profiles only for visible notes,
+    ;; bounded and deferred until the sync settles.
     (when (and (equal kind nostr-kind-relay-list)
                (boundp 'nostr-current-pubkey)
                (equal pubkey nostr-current-pubkey))
@@ -728,11 +736,13 @@ filters or kind-0 metadata will never match."
           ("limit" . ,nostr-default-feed-limit))))
 
 (defun nostr-relay--follow-metadata-filter (pubkeys)
-  "Return conservative followed-account metadata filter for PUBKEYS."
+  "Return followed-account metadata filter for PUBKEYS.
+Kind-0 is a replaceable event: the current profile may be months old, so this
+must NOT carry a `since' bound or most avatars never load.  The limit covers one
+profile per followed author."
   `(("kinds" . (,nostr-kind-metadata))
     ("authors" . ,pubkeys)
-    ("since" . ,(nostr-relay--since-for-pubkeys pubkeys))
-    ("limit" . ,nostr-relay-follow-metadata-limit)))
+    ("limit" . ,(max nostr-relay-follow-metadata-limit (length pubkeys)))))
 
 (defun nostr-relay--global-sub-id ()
   "Return the stable Global timeline subscription id."
@@ -1119,7 +1129,7 @@ open relays.  Otherwise publish to every open relay."
                             url query profile-query limit)))
         (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
-            (nostr-relay-subscribe url sub-id filters)
+            (nostr-relay-subscribe url sub-id filters t)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
@@ -1143,7 +1153,7 @@ open relays.  Otherwise publish to every open relay."
   (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
         (filters (nostr-relay--author-filters pubkey (or limit 50))))
     (maphash (lambda (url _ws)
-               (nostr-relay-subscribe url sub-id filters))
+               (nostr-relay-subscribe url sub-id filters t))
              nostr-relay--connections)
     sub-id))
 
@@ -1158,7 +1168,7 @@ When TRACK-PROGRESS is non-nil, show the request as search progress."
       (when (and (stringp url) (not (string-empty-p url)))
         (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
-            (nostr-relay-subscribe url sub-id filters)
+            (nostr-relay-subscribe url sub-id filters t)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
@@ -1180,10 +1190,10 @@ Return the number of relay subscriptions started."
           (sent 0))
       (if url
           (when (gethash url nostr-relay--connections)
-            (nostr-relay-subscribe url sub-id (list filter))
+            (nostr-relay-subscribe url sub-id (list filter) t)
             (setq sent 1))
         (maphash (lambda (relay-url _ws)
-                   (nostr-relay-subscribe relay-url sub-id (list filter))
+                   (nostr-relay-subscribe relay-url sub-id (list filter) t)
                    (setq sent (1+ sent)))
                  nostr-relay--connections))
       (nostr-relay--track-profile-request pubkey sub-id sent)
@@ -1221,7 +1231,7 @@ suppressed so frequent UI refreshes do not spam relays."
                         ("#e" . ,ids)
                         ("limit" . ,(or limit (* 4 (length ids)))))))
           (maphash (lambda (url _ws)
-                     (nostr-relay-subscribe url sub-id (list filter))
+                     (nostr-relay-subscribe url sub-id (list filter) t)
                      (setq sent (1+ sent)))
                    nostr-relay--connections)))
         (when (> sent 0)
@@ -1300,7 +1310,7 @@ that opens after the UI render catch up without disturbing existing relays."
             (filter `(("ids" . ,ids)
                       ("limit" . ,(or limit (length ids))))))
         (maphash (lambda (url _ws)
-                   (nostr-relay-subscribe url sub-id (list filter))
+                   (nostr-relay-subscribe url sub-id (list filter) t)
                    (setq sent (1+ sent)))
                  nostr-relay--connections)
         (when (> sent 0)
@@ -1339,7 +1349,7 @@ RELAYS, when non-nil, are preferred over the currently connected relay set."
       (dolist (url urls)
         (if (gethash url nostr-relay--connections)
             (progn
-              (nostr-relay-subscribe url sub-id (list filter))
+              (nostr-relay-subscribe url sub-id (list filter) t)
               (setq sent (1+ sent)))
           (nostr-relay--queue-subscription url sub-id (list filter))
           (nostr-relay-open url (and (boundp 'nostr-current-pubkey)

@@ -1732,7 +1732,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
 (ert-deftest nostr-search-relay-subscribes-connected-relays ()
   (let (sent)
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (push (list url sub-id filters) sent))))
       (let ((nostr-relay--connections (make-hash-table :test #'equal))
             (nostr-relay-search-urls nil))
@@ -1921,7 +1921,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
   "Author identifiers use author subscriptions instead of NIP-50 text search."
   (let (sent)
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (push (list url sub-id filters) sent)))
               ((symbol-function 'nostr-nip19-decode-sync)
                (lambda (value)
@@ -1990,7 +1990,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
          (kind . 3)
          (tags . (("p" "alice") ("p" "bob")))))
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
-                 (lambda (url sub-id filters)
+                 (lambda (url sub-id filters &optional _close-on-eose)
                    (push (list url sub-id filters) sent))))
         (nostr-relay--handle-eose "wss://relay.example" "personal-abc"))
       (should (= (length sent) 1))
@@ -2006,7 +2006,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
     (cl-letf (((symbol-function 'nostr-relay--since-for-pubkey)
                (lambda (&rest _) 123))
               ((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (setq sent (list url sub-id filters)))))
       (nostr-relay-subscribe-personal "wss://relay.example" "me"))
     (pcase-let ((`(,url ,sub-id ,filters) sent))
@@ -2034,33 +2034,46 @@ relays answer; Emacs only seeds the pending rows and dispatches."
                  "wss://relay.damus.io"))
     (should (member url nostr-relay-urls))))
 
-(ert-deftest nostr-relay-received-notes-backfill-author-profile ()
-  "A daemon-stored note requests missing kind-0 author metadata."
+(ert-deftest nostr-relay-stored-event-does-not-spam-profile-fetches ()
+  "A stored event must not fetch its author profile (that flooded relays).
+Profile backfill is bounded and deferred to the visible-notes render path."
   (nostr-test-with-db
     (let ((nostr-relay--connections (make-hash-table :test #'equal))
           (nostr-relay--profile-requests (make-hash-table :test #'equal))
           sent)
       (puthash "wss://relay.example" t nostr-relay--connections)
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
-                 (lambda (url sub-id filters)
-                   (push (list url sub-id filters) sent))))
+                 (lambda (_url _sub-id _filters &optional _close-on-eose)
+                   (setq sent (1+ (or sent 0))))))
         (nostr-relay--on-stored-event
          "sub"
-         '((id . "note1")
-           (pubkey . "alice-pubkey")
-           (created_at . 100)
-           (kind . 1)
-           (tags . nil)
-           (content . "hello")
-           (sig . "sig"))))
-        (should (= (length sent) 1))
-        (pcase-let ((`(,url ,sub-id ,filters) (car sent)))
-          (should (equal url "wss://relay.example"))
-          (should (string-prefix-p "profile-" sub-id))
-          (should (equal (alist-get "authors" (car filters) nil nil #'equal)
-                         '("alice-pubkey")))
-          (should (equal (alist-get "kinds" (car filters) nil nil #'equal)
-                         (list nostr-kind-metadata)))))))
+         '((id . "note1") (pubkey . "alice-pubkey") (created_at . 100)
+           (kind . 1) (tags . nil) (content . "hello") (sig . "sig"))))
+      (should (null sent)))))
+
+(ert-deftest nostr-timeline-backfill-fetches-visible-author-profiles ()
+  "The render path backfills missing kind-0 metadata for visible authors.
+Profiles are fetched with auto-closing one-shot subscriptions so they free the
+relay's subscription slot."
+  (nostr-test-with-db
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
+          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          sent)
+      (puthash "wss://relay.example" t nostr-relay--connections)
+      (cl-letf (((symbol-function 'nostr-relay-subscribe)
+                 (lambda (url sub-id filters &optional close-on-eose)
+                   (push (list url sub-id filters close-on-eose) sent))))
+        (nostr-timeline--backfill-profiles
+         '(((id . "note1") (pubkey . "alice-pubkey") (kind . 1)))))
+      (should (= (length sent) 1))
+      (pcase-let ((`(,url ,sub-id ,filters ,close) (car sent)))
+        (should (equal url "wss://relay.example"))
+        (should (string-prefix-p "profile-" sub-id))
+        (should close)
+        (should (equal (alist-get "authors" (car filters) nil nil #'equal)
+                       '("alice-pubkey")))
+        (should (equal (alist-get "kinds" (car filters) nil nil #'equal)
+                       (list nostr-kind-metadata)))))))
 
 (ert-deftest nostr-relay-mode-line-shows-ingestion-and-profile-backfill ()
   "Relay ingestion updates a compact global mode-line loading spinner."
@@ -2078,7 +2091,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
           (progn
             (puthash "wss://relay.example" t nostr-relay--connections)
             (cl-letf (((symbol-function 'nostr-relay-subscribe)
-                       (lambda (_url _sub-id _filters) t)))
+                       (lambda (_url _sub-id _filters &optional _close-on-eose) t)))
               (nostr-relay--on-stored-event
                "sub"
                '((id . "note1")
@@ -2118,7 +2131,7 @@ relays answer; Emacs only seeds the pending rows and dispatches."
           (global-mode-string nil))
       (puthash "wss://relay.example" t nostr-relay--connections)
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
-                 (lambda (_url _sub-id _filters) t)))
+                 (lambda (_url _sub-id _filters &optional _close-on-eose) t)))
         (should (= (nostr-relay-fetch-profile "alice-pubkey") 1)))
       (let ((sub-id (nostr-relay--profile-sub-id "alice-pubkey")))
         (should (gethash "alice-pubkey" nostr-relay--profile-requests))
@@ -2161,6 +2174,18 @@ relays answer; Emacs only seeds the pending rows and dispatches."
       (let ((filter (nostr-relay--feed-filter '("alice" "bob"))))
         (should (equal (alist-get "since" filter nil nil #'equal) 95))))))
 
+(ert-deftest nostr-relay-follow-metadata-filter-has-no-since ()
+  "Kind-0 metadata is replaceable; a since bound would hide month-old profiles.
+The filter must omit since and size its limit to cover every followed author."
+  (let ((nostr-relay-follow-metadata-limit 25)
+        (pubkeys (mapcar #'number-to-string (number-sequence 1 40))))
+    (let ((filter (nostr-relay--follow-metadata-filter pubkeys)))
+      (should-not (assoc "since" filter))
+      (should (equal (alist-get "kinds" filter nil nil #'equal)
+                     (list nostr-kind-metadata)))
+      ;; limit grows to cover all 40 follows, not the smaller default.
+      (should (equal (alist-get "limit" filter nil nil #'equal) 40)))))
+
 (ert-deftest nostr-relay-feed-since-backfills-when-author-uncached ()
   "A followed author with no cached events forces the full backfill window.
 Otherwise a few recently-cached events (e.g. mentions) collapse the feed since to
@@ -2185,7 +2210,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
     (puthash "wss://relay-a.example" t nostr-relay--connections)
     (puthash "wss://relay-b.example" t nostr-relay--connections)
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (push (list url sub-id filters) sent))))
       (should (= (nostr-relay-fetch-event-metadata '("note1" "note2" "note1" nil)) 8))
       (should (= (length sent) 8))
@@ -2222,7 +2247,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
     (puthash "wss://relay-b.example" t nostr-relay--connections)
     (cl-letf (((symbol-function 'float-time) (lambda () now))
               ((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (puthash sub-id t nostr-relay--subscriptions)
                  (push (list url sub-id filters) sent))))
       (should (= (nostr-relay-fetch-event-metadata '("note1")) 0))
@@ -2259,7 +2284,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
               ((symbol-function 'nostr-db-store-relay-status)
                (lambda (&rest _args) nil))
               ((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (push (list url sub-id filters) sent)))
               ((symbol-function 'nostr-visible-note-ids)
                (lambda () '("note1"))))
@@ -2288,7 +2313,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
     (puthash "wss://relay-a.example" t nostr-relay--connections)
     (puthash "wss://relay-b.example" t nostr-relay--connections)
     (cl-letf (((symbol-function 'nostr-relay-subscribe)
-               (lambda (url sub-id filters)
+               (lambda (url sub-id filters &optional _close-on-eose)
                  (push (list url sub-id filters) sent)))
               ((symbol-function 'nostr-relay-close-subscription-all)
                (lambda (sub-id)
@@ -2315,7 +2340,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
     (puthash "wss://relay.example" t nostr-relay--connections)
     (cl-letf (((symbol-function 'float-time) (lambda () now))
               ((symbol-function 'nostr-relay-subscribe)
-               (lambda (_url _sub-id filters)
+               (lambda (_url _sub-id filters &optional _close-on-eose)
                  (push filters sent))))
       (should (= (nostr-relay-subscribe-visible-reactions '("note1")) 1))
       (should (= (alist-get "since" (caar sent) nil nil #'equal) 700)))))
@@ -2331,7 +2356,7 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
       (puthash "wss://relay-a.example" t nostr-relay--connections)
       (puthash "wss://relay-b.example" t nostr-relay--connections)
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
-                 (lambda (url sub-id filters)
+                 (lambda (url sub-id filters &optional _close-on-eose)
                    (push (list url sub-id filters) sent))))
         (should (= (nostr-relay-fetch-events-by-id
                     '("cached-note" "missing-root" "missing-parent" "missing-root"))
