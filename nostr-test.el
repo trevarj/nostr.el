@@ -2161,6 +2161,21 @@ relays answer; Emacs only seeds the pending rows and dispatches."
       (let ((filter (nostr-relay--feed-filter '("alice" "bob"))))
         (should (equal (alist-get "since" filter nil nil #'equal) 95))))))
 
+(ert-deftest nostr-relay-feed-since-backfills-when-author-uncached ()
+  "A followed author with no cached events forces the full backfill window.
+Otherwise a few recently-cached events (e.g. mentions) collapse the feed since to
+~now and the initial backfill of the other follows never happens."
+  (nostr-test-with-db
+    (let ((nostr-relay-startup-window-seconds 1000))
+      ;; alice has a very recent event; bob has none.
+      (nostr-test-store-text-note "alice-recent" "alice" (floor (float-time)) "hi")
+      (should (null (nostr-db-oldest-latest-event-time '("alice" "bob"))))
+      (let* ((now (floor (float-time)))
+             (since (alist-get "since" (nostr-relay--feed-filter '("alice" "bob"))
+                               nil nil #'equal)))
+        ;; Falls back to ~now - startup-window, not alice's recent timestamp.
+        (should (<= (abs (- since (- now 1000))) 2))))))
+
 (ert-deftest nostr-relay-fetch-event-metadata-filters-and-dedupes ()
   "Visible note metadata fetches batch #e filters and suppress repeats."
   (let ((nostr-relay--connections (make-hash-table :test #'equal))

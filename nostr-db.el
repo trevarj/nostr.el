@@ -709,17 +709,24 @@ Rows include cached profile columns for the reactor when available."
                    [:select [(funcall max created_at)] :from events]))))
 
 (defun nostr-db-oldest-latest-event-time (pubkeys)
-  "Return the oldest per-author latest event timestamp for PUBKEYS."
+  "Return the oldest per-author latest event timestamp for PUBKEYS.
+Return nil unless EVERY pubkey already has at least one cached event.  An
+author with no cached events has an unbounded gap, so the incremental since
+window would be wrong; callers then fall back to a full backfill window.  This
+keeps a few recently-cached events (e.g. mentions) from collapsing the feed
+since to ~now and starving the initial backfill of the other follows."
   (when pubkeys
-    (let ((latest-times
-           (mapcar #'cadr
-                   (emacsql nostr-db--connection
-                            [:select [pubkey (funcall max created_at)]
-                             :from events
-                             :where (in pubkey $v1)
-                             :group-by [pubkey]]
-                            (vconcat pubkeys)))))
-      (when latest-times
+    (let* ((latest-times
+            (mapcar #'cadr
+                    (emacsql nostr-db--connection
+                             [:select [pubkey (funcall max created_at)]
+                              :from events
+                              :where (in pubkey $v1)
+                              :group-by [pubkey]]
+                             (vconcat pubkeys)))))
+      ;; Only trust an incremental window once all authors are represented.
+      (when (and latest-times
+                 (= (length latest-times) (length pubkeys)))
         (seq-min latest-times)))))
 
 (defun nostr-db--zero-counts ()
