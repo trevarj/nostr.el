@@ -28,6 +28,30 @@ pub fn prin1_string(s: &str) -> String {
     out
 }
 
+/// Decode an Emacs-Lisp `prin1` string literal back to its contents.
+///
+/// Inverse of [`prin1_string`]: unwraps the surrounding quotes and unescapes
+/// `\"` and `\\`. Returns `None` when `s` is not a quoted string literal (e.g. a
+/// SQL value that was stored as a bare symbol or integer). Used to read a stored
+/// pubkey back out of the cache for in-daemon comparisons.
+pub fn read_string(s: &str) -> Option<String> {
+    let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            // `prin1` only escapes `"` and `\`; keep any other pair verbatim.
+            match chars.next() {
+                Some(next) => out.push(next),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
 /// Encode a JSON tags array as an Emacs-Lisp list of string lists.
 ///
 /// Returns `None` for an empty array so the caller binds SQL NULL, matching
@@ -56,4 +80,23 @@ pub fn prin1_tags(tags: &Value) -> Option<String> {
     }
     out.push(')');
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prin1_string_round_trips_through_read_string() {
+        for s in ["", "alice", "hello\nworld", "a\"b\\c", "wss://relay.example/x"] {
+            assert_eq!(read_string(&prin1_string(s)).as_deref(), Some(s));
+        }
+    }
+
+    #[test]
+    fn read_string_rejects_non_string_literals() {
+        // Bare symbols/integers (e.g. an unencoded value) are not string literals.
+        assert_eq!(read_string("mention"), None);
+        assert_eq!(read_string("42"), None);
+    }
 }

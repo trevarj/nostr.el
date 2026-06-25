@@ -144,7 +144,7 @@ pub fn store_event_relay(
     let now = unix_now();
     conn.execute(
         "insert or replace into event_relays (event_id, url, seen_at) values (?, ?, ?)",
-        params![id, relay, now],
+        params![lisp_text(id), lisp_text(relay), now],
     )?;
     Ok(())
 }
@@ -155,19 +155,19 @@ pub fn store_text_event(
     event: &Value,
     relay_url: Option<&str>,
 ) -> rusqlite::Result<()> {
-    let id = as_str_or_empty(event["id"].as_str());
-    let pubkey = as_str_or_empty(event["pubkey"].as_str());
+    let id = lisp_text(event["id"].as_str().unwrap_or(""));
+    let pubkey = lisp_text(event["pubkey"].as_str().unwrap_or(""));
     let created_at = event["created_at"].as_u64().unwrap_or(0) as i64;
     let kind = event["kind"].as_u64().unwrap_or(0) as i64;
     let tags = lisp::prin1_tags(&event["tags"]);
     let content = lisp::prin1_string(event["content"].as_str().unwrap_or(""));
     let sig = lisp::prin1_string(event["sig"].as_str().unwrap_or(""));
-    let relay = relay_url.map(lisp::prin1_string).unwrap_or_else(|| "nil".into());
-    // emacsql stores missing `nil` columns as SQL NULL (read back as nil). Bind
-    // Option<String> None for absent root/reply/quote ids.
-    let root_id = root_id(event).map(|s| s.to_string());
-    let reply_id = reply_id(event).map(|s| s.to_string());
-    let quote_id = quote_id(event).map(|s| s.to_string());
+    // emacsql stores a missing `nil` column as SQL NULL (read back as nil), so
+    // bind None (not a literal "nil") for an absent relay/root/reply/quote.
+    let relay = lisp_opt(relay_url);
+    let root_id = lisp_opt(root_id(event));
+    let reply_id = lisp_opt(reply_id(event));
+    let quote_id = lisp_opt(quote_id(event));
 
     conn.execute(
         "insert or replace into events
@@ -202,7 +202,7 @@ pub fn store_profile_event(conn: &Connection, event: &Value) -> rusqlite::Result
     let existing: Option<i64> = conn
         .query_row(
             "select updated_at from profiles where pubkey = ?",
-            params![pubkey],
+            params![lisp_text(pubkey)],
             |r| r.get(0),
         )
         .optional()?;
@@ -225,13 +225,15 @@ pub fn store_profile_event(conn: &Connection, event: &Value) -> rusqlite::Result
          (pubkey, name, display_name, about, picture, nip05, lud16, content, updated_at)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
-            pubkey,
-            name,
-            display_name,
-            about,
-            picture,
-            nip05,
-            lud16,
+            lisp_text(pubkey),
+            // Missing fields are stored as SQL NULL (read back as nil) so the UI's
+            // `(or name display_name)` fallback works, matching `nostr-db`.
+            lisp_opt(name.as_deref()),
+            lisp_opt(display_name.as_deref()),
+            lisp_opt(about.as_deref()),
+            lisp_opt(picture.as_deref()),
+            lisp_opt(nip05.as_deref()),
+            lisp_opt(lud16.as_deref()),
             lisp::prin1_string(content),
             created_at,
         ],
@@ -246,17 +248,21 @@ pub fn store_follows_event(conn: &Connection, event: &Value) -> rusqlite::Result
         None => return Ok(()),
     };
     let tx = conn.unchecked_transaction()?;
-    tx.execute("delete from follows where pubkey = ?", params![pubkey])?;
+    tx.execute(
+        "delete from follows where pubkey = ?",
+        params![lisp_text(pubkey)],
+    )?;
     for tag in tags_by_name(event, "p") {
         if tag.len() < 2 {
             continue;
         }
         let contact = tag[1].as_str().unwrap_or("");
-        let relay = tag.get(2).and_then(|v| v.as_str()).unwrap_or("");
-        let petname = tag.get(3).and_then(|v| v.as_str()).unwrap_or("");
+        // Absent relay/petname are nil (SQL NULL) like `nostr-db`'s (nth N tag).
+        let relay = tag.get(2).and_then(|v| v.as_str());
+        let petname = tag.get(3).and_then(|v| v.as_str());
         tx.execute(
             "insert or ignore into follows (pubkey, contact, relay, petname) values (?, ?, ?, ?)",
-            params![pubkey, contact, relay, petname],
+            params![lisp_text(pubkey), lisp_text(contact), lisp_opt(relay), lisp_opt(petname)],
         )?;
     }
     tx.commit()?;
@@ -268,14 +274,20 @@ pub fn store_reaction_event(conn: &Connection, event: &Value) -> rusqlite::Resul
     let Some(target) = reaction_event_id(event) else {
         return Ok(());
     };
-    let id = as_str_or_empty(event["id"].as_str());
-    let pubkey = as_str_or_empty(event["pubkey"].as_str());
+    let id = event["id"].as_str().unwrap_or("");
+    let pubkey = event["pubkey"].as_str().unwrap_or("");
     let content = event["content"].as_str().unwrap_or("");
     let created_at = event["created_at"].as_u64().unwrap_or(0) as i64;
     conn.execute(
         "insert or ignore into reactions (id, event_id, pubkey, content, created_at)
          values (?, ?, ?, ?, ?)",
-        params![id, target, pubkey, content, created_at],
+        params![
+            lisp_text(id),
+            lisp_text(target),
+            lisp_text(pubkey),
+            lisp_text(content),
+            created_at
+        ],
     )?;
     Ok(())
 }
@@ -285,12 +297,12 @@ pub fn store_repost_event(conn: &Connection, event: &Value) -> rusqlite::Result<
     let Some(target) = repost_event_id(event) else {
         return Ok(());
     };
-    let id = as_str_or_empty(event["id"].as_str());
-    let pubkey = as_str_or_empty(event["pubkey"].as_str());
+    let id = event["id"].as_str().unwrap_or("");
+    let pubkey = event["pubkey"].as_str().unwrap_or("");
     let created_at = event["created_at"].as_u64().unwrap_or(0) as i64;
     conn.execute(
         "insert or ignore into reposts (id, event_id, pubkey, created_at) values (?, ?, ?, ?)",
-        params![id, target, pubkey, created_at],
+        params![lisp_text(id), lisp_text(target), lisp_text(pubkey), created_at],
     )?;
     Ok(())
 }
@@ -300,14 +312,20 @@ pub fn store_zap_event(conn: &Connection, event: &Value) -> rusqlite::Result<()>
     let Some(target) = zap_target_event_id(event) else {
         return Ok(());
     };
-    let id = as_str_or_empty(event["id"].as_str());
-    let pubkey = as_str_or_empty(event["pubkey"].as_str());
+    let id = event["id"].as_str().unwrap_or("");
+    let pubkey = event["pubkey"].as_str().unwrap_or("");
     let amount = zap_amount_msats(event).unwrap_or(0);
     let created_at = event["created_at"].as_u64().unwrap_or(0) as i64;
     conn.execute(
         "insert or ignore into zaps (id, event_id, pubkey, amount_msats, created_at)
          values (?, ?, ?, ?, ?)",
-        params![id, target, pubkey, amount, created_at],
+        params![
+            lisp_text(id),
+            lisp_text(&target),
+            lisp_text(pubkey),
+            amount,
+            created_at
+        ],
     )?;
     Ok(())
 }
@@ -319,7 +337,10 @@ pub fn store_relay_list_event(conn: &Connection, event: &Value) -> rusqlite::Res
         None => return Ok(()),
     };
     let tx = conn.unchecked_transaction()?;
-    tx.execute("delete from relay_preferences where pubkey = ?", params![pubkey])?;
+    tx.execute(
+        "delete from relay_preferences where pubkey = ?",
+        params![lisp_text(pubkey)],
+    )?;
     for tag in tags_by_name(event, "r") {
         let Some(url) = tag.get(1).and_then(|v| v.as_str()) else {
             continue;
@@ -332,7 +353,7 @@ pub fn store_relay_list_event(conn: &Connection, event: &Value) -> rusqlite::Res
         tx.execute(
             "insert or replace into relay_preferences (pubkey, url, marker, read, write)
              values (?, ?, ?, ?, ?)",
-            params![pubkey, url, marker, read, write],
+            params![lisp_text(pubkey), lisp_text(url), lisp_text(marker), read, write],
         )?;
     }
     tx.commit()?;
@@ -346,13 +367,16 @@ pub fn store_mute_list_event(conn: &Connection, event: &Value) -> rusqlite::Resu
         None => return Ok(()),
     };
     let tx = conn.unchecked_transaction()?;
-    tx.execute("delete from mutes where pubkey = ?", params![pubkey])?;
+    tx.execute(
+        "delete from mutes where pubkey = ?",
+        params![lisp_text(pubkey)],
+    )?;
     for tag in tags_by_name(event, "p") {
         if let Some(muted) = tag.get(1).and_then(|v| v.as_str()) {
             if !muted.is_empty() {
                 tx.execute(
                     "insert or ignore into mutes (pubkey, muted_pubkey) values (?, ?)",
-                    params![pubkey, muted],
+                    params![lisp_text(pubkey), lisp_text(muted)],
                 )?;
             }
         }
@@ -385,7 +409,15 @@ pub fn maybe_store_notification(
             "insert or ignore into notifications
              (id, type, event_id, actor_pubkey, target_pubkey, created_at, seen) \
              values (?, ?, ?, ?, ?, ?, 0)",
-            params![id, t, event_id, pubkey, target.unwrap_or(""), created_at],
+            params![
+                lisp_text(&id),
+                lisp_text(t),
+                lisp_text(event_id),
+                lisp_text(&pubkey),
+                // The notification targets the local account, as in `nostr-db`.
+                lisp_text(target.unwrap_or(me)),
+                created_at
+            ],
         )
     };
 
@@ -440,7 +472,7 @@ pub fn store_relay_status(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "insert or replace into relay_status (url, state, message, updated_at) values (?, ?, ?, ?)",
-        params![url, state, message.unwrap_or(""), unix_now()],
+        params![lisp_text(url), lisp_text(state), lisp_opt(message), unix_now()],
     )?;
     Ok(())
 }
@@ -456,7 +488,13 @@ pub fn store_publish_receipt(
     conn.execute(
         "insert or replace into publish_receipts (event_id, url, state, message, updated_at)
          values (?, ?, ?, ?, ?)",
-        params![event_id, url, state, message.unwrap_or(""), unix_now()],
+        params![
+            lisp_text(event_id),
+            lisp_text(url),
+            lisp_text(state),
+            lisp_opt(message),
+            unix_now()
+        ],
     )?;
     Ok(())
 }
@@ -465,21 +503,23 @@ pub fn store_publish_receipt(
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     conn.execute(
         "insert or replace into meta (key, value) values (?, ?)",
-        params![key, value],
+        params![lisp_text(key), lisp_text(value)],
     )?;
     Ok(())
 }
 
 /// Return the pubkey that authored `event_id`, or None when not cached.
 pub fn event_pubkey(conn: &Connection, event_id: &str) -> rusqlite::Result<Option<String>> {
+    // Both the stored id and the stored pubkey are prin1 strings: bind the
+    // prin1-encoded id to match, then decode the prin1 pubkey on the way out.
     let pk: Option<String> = conn
         .query_row(
             "select pubkey from events where id = ?",
-            params![event_id],
+            params![lisp_text(event_id)],
             |r| r.get(0),
         )
         .optional()?;
-    Ok(pk)
+    Ok(pk.as_deref().and_then(lisp::read_string))
 }
 
 // ----- tag extraction, mirroring `nostr-event.el` ----------------------------
@@ -624,22 +664,36 @@ fn relay_list_policy(marker: &str) -> (i64, i64) {
     }
 }
 
-fn profile_field(meta: &Option<Value>, keys: &[&str]) -> String {
-    let Some(m) = meta else {
-        return String::new();
-    };
+/// First non-empty string among `keys` in the metadata JSON, or None. Mirrors
+/// `nostr-db--profile-name-from-json`, which yields nil for missing/empty.
+fn profile_field(meta: &Option<Value>, keys: &[&str]) -> Option<String> {
+    let m = meta.as_ref()?;
     for k in keys {
         if let Some(s) = m[*k].as_str() {
             if !s.is_empty() {
-                return s.to_string();
+                return Some(s.to_string());
             }
         }
     }
-    String::new()
+    None
 }
 
 fn as_str_or_empty(s: Option<&str>) -> String {
     s.unwrap_or("").to_string()
+}
+
+/// prin1-encode a text column value. `emacsql-sqlite` stores every value as its
+/// `prin1-to-string` form and reads it back with `read`, so a bare string would
+/// come back interned as a symbol. All text columns and all text WHERE-clause
+/// bindings must pass through this (or [`lisp_opt`]) to round-trip.
+fn lisp_text(s: &str) -> String {
+    lisp::prin1_string(s)
+}
+
+/// prin1-encode an optional text column; `None` binds SQL NULL, matching how
+/// `emacsql` stores a `nil` value (read back as `nil`).
+fn lisp_opt(s: Option<&str>) -> Option<String> {
+    s.map(lisp::prin1_string)
 }
 
 fn unix_now() -> i64 {
@@ -682,10 +736,13 @@ mod tests {
         );
         store_event(&conn, &ev, Some("wss://relay.example")).unwrap();
 
-        let row: (String, String, i64, String, Option<String>, Option<String>) = conn
+        // Every text column is stored in its `emacsql` prin1 form, so the lookup
+        // key must be prin1-encoded too.
+        let row: (String, String, String, i64, String, Option<String>, Option<String>) = conn
             .query_row(
-                "select content, relay, kind, tags, root_id, reply_id from events where id = ?",
-                params![format!("id-1-pk")],
+                "select id, content, relay, kind, tags, root_id, reply_id \
+                 from events where id = ?",
+                params![lisp_text("id-1-pk")],
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -694,20 +751,37 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .unwrap();
-        // prin1 form: newline emitted literally, relay and tags quoted.
-        assert_eq!(row.0, "\"hello\nworld\"");
-        assert_eq!(row.1, "\"wss://relay.example\"");
-        assert_eq!(row.2, 1);
+        // prin1 form: id/content/relay/tags quoted, newline emitted literally.
+        assert_eq!(row.0, "\"id-1-pk\"");
+        assert_eq!(row.1, "\"hello\nworld\"");
+        assert_eq!(row.2, "\"wss://relay.example\"");
+        assert_eq!(row.3, 1);
         assert_eq!(
-            row.3,
+            row.4,
             "((\"e\" \"root-id\" \"\" \"root\") (\"e\" \"reply-id\" \"\" \"reply\"))"
         );
-        assert_eq!(row.4, Some("root-id".to_string()));
-        assert_eq!(row.5, Some("reply-id".to_string()));
+        // Root/reply ids are prin1 strings (None binds SQL NULL).
+        assert_eq!(row.5, Some("\"root-id\"".to_string()));
+        assert_eq!(row.6, Some("\"reply-id\"".to_string()));
+    }
+
+    #[test]
+    fn event_pubkey_round_trips_through_prin1() {
+        let conn = in_memory();
+        let ev = event(1, "alice-hex", "hi", vec![]);
+        store_event(&conn, &ev, None).unwrap();
+        // The stored id and pubkey are prin1; `event_pubkey` must bind the
+        // prin1 id and decode the prin1 pubkey so notification author checks work.
+        assert_eq!(
+            event_pubkey(&conn, "id-1-alice-hex").unwrap(),
+            Some("alice-hex".to_string())
+        );
+        assert_eq!(event_pubkey(&conn, "missing").unwrap(), None);
     }
 
     #[test]
@@ -725,9 +799,14 @@ mod tests {
         store_event(&conn, &newer, None).unwrap();
 
         let name: String = conn
-            .query_row("select name from profiles where pubkey = ?", params!["pk"], |r| r.get(0))
+            .query_row(
+                "select name from profiles where pubkey = ?",
+                params![lisp_text("pk")],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(name, "new");
+        // Stored prin1; decodes back to the newest event's name.
+        assert_eq!(crate::lisp::read_string(&name), Some("new".to_string()));
     }
 
     #[test]
@@ -736,11 +815,13 @@ mod tests {
         let ev = event(7, "pk", "+", vec![vec!["e", "first"], vec!["e", "reacted"]]);
         store_event(&conn, &ev, None).unwrap();
         let target: String = conn
-            .query_row("select event_id from reactions where id = ?", params!["id-7-pk"], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select event_id from reactions where id = ?",
+                params![lisp_text("id-7-pk")],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(target, "reacted");
+        assert_eq!(crate::lisp::read_string(&target), Some("reacted".to_string()));
     }
 
     #[test]
@@ -750,12 +831,20 @@ mod tests {
         // exercise the mention path which only needs a `p` tag mentioning `me`.
         let ev = event(1, "alice", "hi", vec![vec!["p", "me"]]);
         maybe_store_notification(&conn, &ev, Some("me")).unwrap();
-        let count: i64 = conn
-            .query_row("select count(*) from notifications where type = 'mention'", [], |r| {
-                r.get(0)
-            })
+        let row: (String, String, String) = conn
+            .query_row(
+                "select type, event_id, target_pubkey from notifications where type = ?",
+                params![lisp_text("mention")],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
-        assert_eq!(count, 1);
+        // All notification text columns are prin1; the target is the local account.
+        assert_eq!(crate::lisp::read_string(&row.0), Some("mention".to_string()));
+        assert_eq!(
+            crate::lisp::read_string(&row.1),
+            Some("id-1-alice".to_string())
+        );
+        assert_eq!(crate::lisp::read_string(&row.2), Some("me".to_string()));
     }
 
     #[test]
@@ -763,8 +852,12 @@ mod tests {
         let conn = in_memory();
         set_meta(&conn, "syncing", "1").unwrap();
         let val: String = conn
-            .query_row("select value from meta where key = 'syncing'", [], |r| r.get(0))
+            .query_row(
+                "select value from meta where key = ?",
+                params![lisp_text("syncing")],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(val, "1");
+        assert_eq!(crate::lisp::read_string(&val), Some("1".to_string()));
     }
 }
