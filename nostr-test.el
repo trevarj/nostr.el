@@ -725,6 +725,26 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       (should (equal (mapcar (lambda (event) (alist-get 'id event)) thread)
                      '("root" "reply"))))))
 
+(ert-deftest nostr-db-select-thread-excludes-reactions ()
+  "Reactions targeting a note must not surface as thread replies."
+  (nostr-test-with-db
+    (nostr-test-store-text-note "root" "alice" 100 "root note")
+    (nostr-test-store-text-note "reply" "bob" 101 "a reply" "root" "root")
+    ;; Kind-7 reaction whose e-tag makes its root_id point at the note.
+    (nostr-db-store-event
+     (nostr-event-normalize
+      `((id . "react")
+        (pubkey . "carol")
+        (created_at . 102)
+        (kind . 7)
+        (tags . (("e" "root")))
+        (content . "+")
+        (sig . ""))
+      "relay"))
+    (let ((thread (nostr-db-select-thread "root")))
+      (should (equal (mapcar (lambda (event) (alist-get 'id event)) thread)
+                     '("root" "reply"))))))
+
 (ert-deftest nostr-thread-open-reply-loads-root-thread-and-focuses-reply ()
   "Opening a reply shows the full cached root thread and selects the reply."
   (nostr-test-with-db

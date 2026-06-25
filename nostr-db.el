@@ -1045,11 +1045,17 @@ Compatibility alias for `nostr-db-select-conversations-feed'."
                                events:quote_id profiles:name profiles:display_name profiles:picture]
                     :from events
                     :left-join profiles :on (= events:pubkey profiles:pubkey)
-                    :where (or (= events:id $s1)
-                               (= events:root_id $s1)
-                               (= events:reply_id $s1))
+                    ;; Only text notes belong in a conversation.  Reactions,
+                    ;; reposts, and zaps carry an e-tag to the note that lands
+                    ;; in root_id/reply_id, so without the kind guard they would
+                    ;; render as bogus replies.  The root note itself is kind 1,
+                    ;; so the id match stays covered.
+                    :where (and (= events:kind $s2)
+                                (or (= events:id $s1)
+                                    (= events:root_id $s1)
+                                    (= events:reply_id $s1)))
                     :order-by [(asc events:created_at)]]
-                   root-id)))
+                   root-id nostr-kind-text-note)))
 
 (defun nostr-db-select-event (event-id)
   "Return the single cached event alist for EVENT-ID, or nil.
