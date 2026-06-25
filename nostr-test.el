@@ -1169,6 +1169,51 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       (should (eq nostr-timeline-feed-kind 'feed))
       (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))))
 
+(ert-deftest nostr-relay-relay-list-filter-targets-kind-10002 ()
+  "NIP-65 discovery queries kind-10002 for the given authors."
+  (let ((filter (nostr-relay--relay-list-filter '("a" "b"))))
+    (should (equal (alist-get "kinds" filter nil nil #'equal)
+                   (list nostr-kind-relay-list)))
+    (should (equal (alist-get "authors" filter nil nil #'equal) '("a" "b")))))
+
+(ert-deftest nostr-relays-relay-list-tags-advertise-configured-relays ()
+  "Publishing a relay list advertises each configured relay as an r-tag."
+  (let ((nostr-relay-urls '("wss://a.example" "" "wss://b.example")))
+    (should (equal (nostr-relays--relay-list-tags)
+                   '(("r" "wss://a.example") ("r" "wss://b.example"))))))
+
+(ert-deftest nostr-db-popular-write-relays-ranks-by-frequency ()
+  "Discovered write relays are ranked by how many accounts advertise them."
+  (nostr-test-with-db
+    ;; two accounts write to relay-a, one to relay-b, relay-c is read-only.
+    (nostr-db-store-relay-list-event
+     '((pubkey . "p1") (created_at . 1) (kind . 10002)
+       (tags . (("r" "wss://a") ("r" "wss://b")))))
+    (nostr-db-store-relay-list-event
+     '((pubkey . "p2") (created_at . 1) (kind . 10002)
+       (tags . (("r" "wss://a") ("r" "wss://c" "read")))))
+    (let ((popular (nostr-db-select-popular-write-relays 8)))
+      ;; relay-a (2 writers) first; relay-c is read-only so excluded.
+      (should (equal (car popular) "wss://a"))
+      (should (member "wss://b" popular))
+      (should-not (member "wss://c" popular)))))
+
+(ert-deftest nostr-relay-connect-discovered-opens-popular-write-relays ()
+  "Discovery connects the most-advertised write relays not already open."
+  (nostr-test-with-db
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
+          (nostr-relay-max-discovered-relays 8)
+          opened)
+      (puthash "wss://already" t nostr-relay--connections)
+      (nostr-db-store-relay-list-event
+       '((pubkey . "p1") (created_at . 1) (kind . 10002)
+         (tags . (("r" "wss://new") ("r" "wss://already")))))
+      (cl-letf (((symbol-function 'nostr-relay-open)
+                 (lambda (url &rest _) (push url opened))))
+        (nostr-relay-connect-discovered))
+      ;; only the not-yet-connected discovered relay is opened.
+      (should (equal opened '("wss://new"))))))
+
 (ert-deftest nostr-relay-my-posts-filter-has-no-since-and-pages-with-until ()
   "My Posts backfills full authored history: no since, optional until paging."
   (let ((filter (nostr-relay--my-posts-filter "me")))

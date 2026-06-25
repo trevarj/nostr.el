@@ -13,8 +13,10 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'nostr-actions)
 (require 'nostr-daemon)
 (require 'nostr-db)
+(require 'nostr-event)
 (require 'nostr-relay)
 (require 'nostr-share)
 (require 'nostr-ui)
@@ -64,6 +66,7 @@
     (define-key map (kbd "c") #'nostr-relays-connect)
     (define-key map (kbd "d") #'nostr-relays-disconnect)
     (define-key map (kbd "k") #'nostr-relays-remove)
+    (define-key map (kbd "P") #'nostr-relays-publish-relay-list)
     (define-key map (kbd "w") #'nostr-relays-copy-url)
     (define-key map (kbd "?") #'nostr-relays-actions)
     map)
@@ -81,7 +84,8 @@
     ("a" "Add" nostr-relays-add)
     ("c" "Connect" nostr-relays-connect)
     ("d" "Disconnect" nostr-relays-disconnect)
-    ("k" "Remove" nostr-relays-remove)]
+    ("k" "Remove" nostr-relays-remove)
+    ("P" "Publish relay list" nostr-relays-publish-relay-list)]
    ["Navigation"
     ("n" "Next relay" nostr-ui-next-section)
     ("p" "Previous relay" nostr-ui-prev-section)
@@ -256,6 +260,28 @@
     (remhash url nostr-relay--connections)
     (nostr-db-store-relay-status url "closed" "Disconnected locally")
     (nostr-relays-refresh)))
+
+(defun nostr-relays--relay-list-tags ()
+  "Return NIP-65 r-tags for `nostr-relay-urls'.
+Each configured relay is advertised as both read and write (no marker)."
+  (mapcar (lambda (url) (list "r" url))
+          (seq-filter (lambda (url) (and (stringp url) (not (string-empty-p url))))
+                      nostr-relay-urls)))
+
+(defun nostr-relays-publish-relay-list ()
+  "Publish a NIP-65 relay list (kind 10002) built from `nostr-relay-urls'.
+This is how other clients -- and this one on a fresh machine -- discover which
+relays you read from and write to.  Publish it after settling on your relays so
+your posts become findable from the indexer relays."
+  (interactive)
+  (let ((tags (nostr-relays--relay-list-tags)))
+    (unless tags
+      (user-error "No relays configured in `nostr-relay-urls'"))
+    (when (yes-or-no-p
+           (format "Publish a relay list advertising %d relay%s? "
+                   (length tags) (if (= (length tags) 1) "" "s")))
+      (nostr-actions--send nostr-kind-relay-list tags ""
+                           "Relay list published"))))
 
 ;;;###autoload
 (defun nostr-relays-open ()

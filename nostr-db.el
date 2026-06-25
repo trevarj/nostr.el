@@ -1168,5 +1168,19 @@ Rows are PUBKEY, NAME, DISPLAY_NAME, NIP05, PETNAME ordered by follow label."
                             :order-by [(asc url) (asc marker)]]
                    pubkey)))
 
+(defun nostr-db-select-popular-write-relays (limit)
+  "Return up to LIMIT most-frequently-advertised NIP-65 write relay URLs.
+Aggregates cached relay_preferences so the client can connect the relays where
+followed accounts actually publish (gossip-style discovery)."
+  (mapcar #'car
+          (emacsql nostr-db--connection
+                   [:select [url (as (funcall count *) n)]
+                            :from relay_preferences
+                            :where (= write 1)
+                            :group-by [url]
+                            :order-by [(desc n)]
+                            :limit $s1]
+                   limit)))
+
 (provide 'nostr-db)
 ;;; nostr-db.el ends here

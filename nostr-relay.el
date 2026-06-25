@@ -30,6 +30,22 @@
   :type '(repeat string)
   :group 'nostr)
 
+(defcustom nostr-relay-indexer-urls '("wss://purplepag.es"
+                                      "wss://relay.nostr.band")
+  "Relays queried to discover authors' NIP-65 relay lists (kind 10002).
+These index relay-list events broadly, so the client can learn which relays an
+account actually reads from and writes to even when that account is not present
+on the configured relays."
+  :type '(repeat string)
+  :group 'nostr)
+
+(defcustom nostr-relay-max-discovered-relays 8
+  "Maximum number of NIP-65-discovered write relays to auto-connect.
+Bounds gossip-style discovery so following many accounts does not open a
+connection to every relay any of them uses."
+  :type 'integer
+  :group 'nostr)
+
 (defcustom nostr-default-feed-limit 100
   "Default relay limit for feed subscriptions."
   :type 'integer
@@ -633,6 +649,12 @@ and UI count refreshes the old ingestion step performed."
                (boundp 'nostr-current-pubkey)
                (equal pubkey nostr-current-pubkey))
       (nostr-relay-connect-recommended-deferred nostr-current-pubkey))
+    ;; Once the account's own contact list lands, the follow set is known, so
+    ;; discover and connect the relays those follows publish to (NIP-65).
+    (when (and (equal kind nostr-kind-contacts)
+               (boundp 'nostr-current-pubkey)
+               (equal pubkey nostr-current-pubkey))
+      (nostr-relay-discover-and-connect nostr-current-pubkey))
     (run-hook-with-args 'nostr-relay-event-hook event)
     event))
 
@@ -938,9 +960,12 @@ issues the personal/follows/visible-reaction subscriptions the websocket
           (run-at-time 0 nil #'nostr-relay--drain-connect-queue))))
 
 (defun nostr-relay-connect-all-deferred (pubkey)
-  "Queue all configured relays for PUBKEY without blocking the caller."
+  "Queue all configured relays for PUBKEY without blocking the caller.
+Also kicks off NIP-65 discovery so the account's own relays (and any followed
+relays already cached) get connected even when absent from `nostr-relay-urls'."
   (nostr-relay--enqueue-connections (nostr-relay-urls-for-pubkey pubkey) pubkey)
-  (nostr-relay--ensure-connect-timer))
+  (nostr-relay--ensure-connect-timer)
+  (nostr-relay-discover-and-connect pubkey))
 
 (defun nostr-relay-connect-recommended (pubkey)
   "Connect missing cached NIP-65 relays for PUBKEY."
@@ -952,6 +977,46 @@ issues the personal/follows/visible-reaction subscriptions the websocket
   "Queue missing cached NIP-65 relays for PUBKEY without blocking."
   (nostr-relay--enqueue-connections (nostr-relay--preference-urls pubkey nil) pubkey)
   (nostr-relay--ensure-connect-timer))
+
+(defun nostr-relay--relay-list-filter (pubkeys)
+  "Return a NIP-65 relay-list (kind 10002) filter for PUBKEYS."
+  `(("kinds" . (,nostr-kind-relay-list))
+    ("authors" . ,pubkeys)))
+
+(defun nostr-relay-discover-relays (pubkeys)
+  "Discover NIP-65 relay lists for PUBKEYS via the indexer relays.
+Connects `nostr-relay-indexer-urls' if needed, then issues a windowed kind-10002
+fetch so the daemon caches PUBKEYS' relay preferences.  Returns the relays the
+query was sent to."
+  (let ((pubkeys (delete-dups (seq-filter #'stringp (copy-sequence pubkeys)))))
+    (when pubkeys
+      (dolist (url nostr-relay-indexer-urls)
+        (unless (gethash url nostr-relay--connections)
+          (nostr-relay-open url (and (boundp 'nostr-current-pubkey)
+                                     nostr-current-pubkey))))
+      (nostr-relay--fetch (nostr-relay--sub-id "relay-lists" pubkeys)
+                          (list (nostr-relay--relay-list-filter pubkeys))))))
+
+(defun nostr-relay-connect-discovered ()
+  "Connect the most-advertised NIP-65 write relays, bounded and deduped.
+Lets followed accounts' notes load from the relays where they actually publish,
+even when those relays are not configured."
+  (dolist (url (nostr-db-select-popular-write-relays
+                nostr-relay-max-discovered-relays))
+    (when (and (stringp url) (not (string-empty-p url))
+               (not (gethash url nostr-relay--connections)))
+      (nostr-relay-open url (and (boundp 'nostr-current-pubkey)
+                                 nostr-current-pubkey)))))
+
+(defun nostr-relay-discover-and-connect (pubkey)
+  "Discover relay lists for PUBKEY and its follows, then connect their relays.
+The discovery query runs first; connecting the discovered write relays is
+deferred until the fetch window has had time to populate relay preferences."
+  (when pubkey
+    (let ((pubkeys (cons pubkey (nostr-db-select-follows pubkey))))
+      (when (nostr-relay-discover-relays pubkeys)
+        (run-at-time (1+ nostr-relay-fetch-window-seconds) nil
+                     #'nostr-relay-connect-discovered)))))
 
 (defun nostr-relay-disconnect-all ()
   "Disconnect all active relays."
