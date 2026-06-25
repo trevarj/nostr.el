@@ -762,15 +762,19 @@ filters or kind-0 metadata will never match."
     ("authors" . (,pubkey))
     ("limit" . 10)))
 
-(defun nostr-relay--feed-filter (pubkeys)
-  "Return follows feed filter for PUBKEYS."
+(defun nostr-relay--feed-filter (pubkeys &optional until)
+  "Return follows feed filter for PUBKEYS.
+With UNTIL, page back through history: drop the incremental `since' bound and
+fetch events older than UNTIL instead."
   (delq nil
         `(("kinds" . (,nostr-kind-text-note
                       ,nostr-kind-repost
                       ,nostr-kind-reaction))
           ("authors" . ,pubkeys)
-          ,(when-let* ((since (nostr-relay--since-for-pubkeys pubkeys)))
-             `("since" . ,since))
+          ,(if until
+               `("until" . ,until)
+             (when-let* ((since (nostr-relay--since-for-pubkeys pubkeys)))
+               `("since" . ,since)))
           ("limit" . ,nostr-default-feed-limit))))
 
 (defun nostr-relay--follow-metadata-filter (pubkeys)
@@ -786,12 +790,17 @@ profile per followed author."
   "Return the stable Global timeline subscription id."
   "global-recent")
 
-(defun nostr-relay--global-filter ()
-  "Return the conservative Global timeline relay filter."
-  `(("kinds" . (,nostr-kind-text-note))
-    ("since" . ,(max 0 (- (floor (float-time))
-                          nostr-relay-global-window-seconds)))
-    ("limit" . ,nostr-relay-global-limit)))
+(defun nostr-relay--global-filter (&optional until)
+  "Return the conservative Global timeline relay filter.
+With UNTIL, page back: fetch events older than UNTIL instead of the recent
+window."
+  (delq nil
+        `(("kinds" . (,nostr-kind-text-note))
+          ,(if until
+               `("until" . ,until)
+             `("since" . ,(max 0 (- (floor (float-time))
+                                    nostr-relay-global-window-seconds))))
+          ("limit" . ,nostr-relay-global-limit))))
 
 (defun nostr-relay-subscribe-global (&optional force)
   "Request recent Global timeline events from connected relays.

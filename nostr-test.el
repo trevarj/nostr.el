@@ -1225,6 +1225,39 @@ state set by one test does not bleed into another (e.g. backfill gating)."
   (let ((filter (nostr-relay--my-posts-filter "me" 1234)))
     (should (equal (alist-get "until" filter nil nil #'equal) 1234))))
 
+(ert-deftest nostr-timeline-load-older-grows-window-and-pages-history ()
+  "Loading older grows the render window and fetches events before the cursor."
+  (nostr-test-with-db
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
+          (nostr-timeline-limit 100)
+          fetched)
+      (puthash "wss://relay.example" t nostr-relay--connections)
+      (cl-letf (((symbol-function 'nostr-db-select-follows)
+                 (lambda (&rest _) '("alice")))
+                ((symbol-function 'nostr-relay--fetch)
+                 (lambda (_sub-id filters) (setq fetched (car filters)) 1))
+                ((symbol-function 'nostr-relay-fetch-profiles-batch) #'ignore)
+                ((symbol-function 'nostr-relay-fetch-event-metadata) #'ignore)
+                ((symbol-function 'nostr-relay-subscribe-visible-reactions) #'ignore)
+                ((symbol-function 'nostr-relay-subscribe-global) #'ignore)
+                ((symbol-function 'nostr-relay-close-global) #'ignore))
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey "me")
+          (setq-local nostr-timeline-feed-kind 'feed)
+          (setq-local nostr-timeline--oldest-rendered 5000)
+          (nostr-timeline-load-older)
+          ;; render window grew by one page
+          (should (= (nostr-timeline--limit) 200))
+          ;; fetched older-than-cursor history (until = oldest - 1, no since)
+          (should (equal (alist-get "until" fetched nil nil #'equal) 4999))
+          (should-not (assoc "since" fetched))
+          ;; cursor recorded; a repeat with the same cursor is a no-op
+          (should (equal nostr-timeline--last-page-until 5000))
+          (setq fetched nil)
+          (nostr-timeline-load-older)
+          (should-not fetched))))))
+
 (ert-deftest nostr-timeline-my-posts-backfills-once-on-entry ()
   "Entering My Posts backfills own history; refreshing in place does not respawn."
   (nostr-test-with-db

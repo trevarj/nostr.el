@@ -40,10 +40,25 @@
 (defvar-local nostr-timeline-feed-kind 'feed
   "Feed kind displayed in the current timeline buffer.")
 
+(defvar-local nostr-timeline--render-limit nil
+  "Buffer-local render cap; grows as the user pages back through history.
+Defaults to `nostr-timeline-limit'.")
+
+(defvar-local nostr-timeline--oldest-rendered nil
+  "created_at of the oldest note rendered in this buffer, the paging cursor.")
+
+(defvar-local nostr-timeline--last-page-until nil
+  "Cursor of the last history page requested, so an in-flight page is not
+re-requested on every scroll event.")
+
 (defcustom nostr-timeline-limit 100
   "Maximum number of notes shown in timeline buffers."
   :type 'integer
   :group 'nostr)
+
+(defun nostr-timeline--limit ()
+  "Return the active render cap for this buffer."
+  (or nostr-timeline--render-limit nostr-timeline-limit))
 
 (defcustom nostr-timeline-metadata-backfill-limit 25
   "Maximum rendered notes whose profiles and interactions are backfilled.
@@ -90,7 +105,9 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
 
 (define-derived-mode nostr-timeline-mode special-mode "Nostr"
   "Mode for the main Nostr feed."
-  (setq-local truncate-lines nil))
+  (setq-local truncate-lines nil)
+  ;; Auto-load older history when the buffer end scrolls into view.
+  (add-hook 'window-scroll-functions #'nostr-timeline--maybe-load-older nil t))
 
 (transient-define-prefix nostr-timeline-actions ()
   "Actions for the selected Nostr item."
@@ -150,21 +167,23 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (_ "Notes from accounts you follow.")))
 
 (defun nostr-timeline--select-events ()
-  "Return events for the current timeline feed kind."
-  (pcase nostr-timeline-feed-kind
-    ((or 'feed 'home)
-     (nostr-db-select-account-feed nostr-timeline-current-pubkey nostr-timeline-limit))
-    ((or 'conversations 'replies)
-     (nostr-db-select-conversations-feed nostr-timeline-current-pubkey nostr-timeline-limit))
-    ('discover (nostr-db-select-discover-feed
-                (symbol-name nostr-discover-provider)
-                nostr-discover-scope
-                nostr-discover-timeframe
-                nostr-timeline-limit))
-    ('global (nostr-db-select-global-feed nostr-timeline-limit))
-    ('my-posts (nostr-db-select-author-feed nostr-timeline-current-pubkey nostr-timeline-limit))
-    ('media (nostr-db-select-media-feed nostr-timeline-current-pubkey nostr-timeline-limit))
-    (_ (nostr-db-select-account-feed nostr-timeline-current-pubkey nostr-timeline-limit))))
+  "Return events for the current timeline feed kind.
+Honors the buffer-local render limit, which grows as the user pages back."
+  (let ((limit (nostr-timeline--limit)))
+    (pcase nostr-timeline-feed-kind
+      ((or 'feed 'home)
+       (nostr-db-select-account-feed nostr-timeline-current-pubkey limit))
+      ((or 'conversations 'replies)
+       (nostr-db-select-conversations-feed nostr-timeline-current-pubkey limit))
+      ('discover (nostr-db-select-discover-feed
+                  (symbol-name nostr-discover-provider)
+                  nostr-discover-scope
+                  nostr-discover-timeframe
+                  limit))
+      ('global (nostr-db-select-global-feed limit))
+      ('my-posts (nostr-db-select-author-feed nostr-timeline-current-pubkey limit))
+      ('media (nostr-db-select-media-feed nostr-timeline-current-pubkey limit))
+      (_ (nostr-db-select-account-feed nostr-timeline-current-pubkey limit)))))
 
 (defun nostr-timeline--backfill-profiles (events)
   "Eagerly fetch missing author profiles for EVENTS in one batched subscription.
@@ -230,6 +249,54 @@ subscriptions."
          (nostr-relay-fetch-my-posts nostr-timeline-current-pubkey)))
       (_ (nostr-relay-close-global)))))
 
+(defun nostr-timeline--view-page-filter (until)
+  "Return the relay filter to load history older than UNTIL for the current view.
+Return nil for views that page through their own provider (Discover)."
+  (pcase nostr-timeline-feed-kind
+    ('my-posts (nostr-relay--my-posts-filter nostr-timeline-current-pubkey until))
+    ((or 'feed 'home 'media 'conversations 'replies)
+     (when-let* ((follows (nostr-db-select-follows nostr-timeline-current-pubkey)))
+       (nostr-relay--feed-filter follows until)))
+    ('global (nostr-relay--global-filter until))
+    (_ nil)))
+
+(defun nostr-timeline-load-older ()
+  "Load older history for the current timeline view.
+Grows the render window so already-cached older notes appear, and asks relays
+for events older than the current oldest note.  No-op while a page for the same
+cursor is already in flight, or for Discover (which has its own paging)."
+  (interactive)
+  (let ((oldest nostr-timeline--oldest-rendered))
+    (when (and oldest
+               (not (equal oldest nostr-timeline--last-page-until))
+               (not (eq nostr-timeline-feed-kind 'discover)))
+      (setq-local nostr-timeline--last-page-until oldest)
+      (setq-local nostr-timeline--render-limit
+                  (+ (nostr-timeline--limit) nostr-timeline-limit))
+      (when-let* ((filter (nostr-timeline--view-page-filter (1- oldest))))
+        (nostr-relay--fetch
+         (nostr-relay--sub-id "page" nostr-timeline-feed-kind oldest)
+         (list filter)))
+      (nostr-timeline-refresh))))
+
+(defun nostr-timeline--maybe-load-older (&rest _)
+  "Auto-load older history when the end of the timeline scrolls into view.
+Runs from `window-scroll-functions', so it defers the load out of redisplay and
+relies on `nostr-timeline-load-older's cursor guard to coalesce the many scroll
+events into one page request."
+  (when (and (derived-mode-p 'nostr-timeline-mode)
+             nostr-timeline--oldest-rendered
+             (not (equal nostr-timeline--oldest-rendered
+                         nostr-timeline--last-page-until))
+             (not (eq nostr-timeline-feed-kind 'discover))
+             (pos-visible-in-window-p (point-max)))
+    (let ((buffer (current-buffer)))
+      (run-at-time 0 nil
+                   (lambda ()
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (nostr-timeline-load-older))))))))
+
 (defun nostr-timeline-refresh (&optional force)
   "Refresh the current timeline buffer."
   (interactive (list t))
@@ -249,6 +316,15 @@ subscriptions."
                                    ('replies 'conversations)
                                    (kind kind)))
     (let ((events (nostr-timeline--select-events)))
+      ;; Track the oldest rendered note as the history-paging cursor.
+      (setq-local nostr-timeline--oldest-rendered
+                  (and events
+                       (apply #'min
+                              (or (delq nil
+                                        (mapcar (lambda (e)
+                                                  (alist-get 'created_at e))
+                                                events))
+                                  '(0)))))
       (nostr-ui-prime-caches events)
       ;; Avatars load eagerly: fetch missing author profiles on every refresh,
       ;; even mid-sync, in a single batched auto-closing subscription.
@@ -292,6 +368,11 @@ subscriptions."
     (nostr-timeline-mode))
   (unless nostr-timeline-current-pubkey
     (setq-local nostr-timeline-current-pubkey nostr-current-pubkey))
+  ;; Reset history paging when switching views so each view starts at its top.
+  (unless (eq nostr-timeline-feed-kind kind)
+    (setq-local nostr-timeline--render-limit nil
+                nostr-timeline--oldest-rendered nil
+                nostr-timeline--last-page-until nil))
   (setq-local nostr-timeline-feed-kind kind)
   (nostr-timeline-refresh))
 
