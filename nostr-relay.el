@@ -7,7 +7,37 @@
 
 ;;; Commentary:
 
-;; Emacs-owned relay IO and subscription state.
+;; Emacs-owned relay subscription state.  The Rust daemon owns the websockets,
+;; verifies events, and writes the cache; this module decides *what* to subscribe
+;; to and reads results back from the database.
+;;
+;; Subscription model
+;; ------------------
+;;
+;; Subscriptions fall into two kinds:
+;;
+;; * Live subscriptions stay open and stream updates: the personal sub, the
+;;   follows feed, the active Global sub, and the visible-reaction sub.  They use
+;;   `nostr-relay-subscribe' directly and are bounded (a handful at a time).
+;;
+;; * One-shot fetches collect a point-in-time result, then close.  Profiles
+;;   (`nostr-relay-fetch-profiles-batch'), author/own-post history, event
+;;   metadata, missing events, addressable events, search, NIP-65 relay lists,
+;;   and history pages all go through `nostr-relay--fetch'.  It opens the
+;;   subscription on every relay and closes it after
+;;   `nostr-relay-fetch-window-seconds'.  Relay-side EOSE auto-close is NOT used:
+;;   it tears the subscription down on the fastest relay's EOSE, truncating
+;;   slower relays that hold most of the results.
+;;
+;; Replaceable kinds (0/3/10002) never carry a `since' bound -- the current value
+;; may be old.  Feed backfill and pagination use `until' to walk history, not
+;; `since'.
+;;
+;; Relay discovery (NIP-65): the account's posts may live on relays that are not
+;; configured.  `nostr-relay-discover-and-connect' queries the indexer relays for
+;; the kind-10002 relay lists of the account and its follows, then connects the
+;; most-advertised write relays.  `nostr-relays-publish-relay-list' advertises
+;; the configured relays so the account itself becomes discoverable.
 
 ;;; Code:
 
@@ -572,17 +602,17 @@ daemon owns the socket, so this only translates intent."
     (dolist (key keys)
       (remhash key nostr-relay--subscriptions))))
 
-(defun nostr-relay-subscribe (url sub-id filters &optional close-on-eose)
-  "Subscribe to URL with SUB-ID and FILTERS.
-With CLOSE-ON-EOSE, the relay subscription auto-closes after EOSE.  Use it for
-one-shot fetches (profiles, event metadata, missing events) so they free the
-relay's subscription slot instead of staying open and exhausting the relay's
-concurrent-subscription limit."
+(defun nostr-relay-subscribe (url sub-id filters)
+  "Subscribe URL to SUB-ID with FILTERS.
+This opens a live subscription (it stays open until closed).  One-shot fetches
+go through `nostr-relay--fetch', which closes the subscription after a window so
+a fast relay's EOSE cannot truncate slow relays.  See the Subscription model
+section in this file's commentary."
   (puthash (nostr-relay--subscription-key url sub-id)
            t
            nostr-relay--subscriptions)
   (when (nostr-daemon-running-p)
-    (nostr-daemon-subscribe sub-id filters (list url) close-on-eose)))
+    (nostr-daemon-subscribe sub-id filters (list url))))
 
 (defun nostr-relay--connection-open-p (url)
   "Return non-nil when URL is registered as connected with the daemon."

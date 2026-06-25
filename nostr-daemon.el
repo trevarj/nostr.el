@@ -119,19 +119,17 @@ restart with different bootstrap configuration."
      nostr-daemon--process
      (concat (nostr-backend--json-encode command) "\n"))))
 
-(defun nostr-daemon-subscribe (id filters &optional relays close-on-eose)
+(defun nostr-daemon-subscribe (id filters &optional relays)
   "Open subscription ID with FILTERS.
 FILTERS is a list of nostr filter alists (array values must be vectors).  With
 RELAYS nil the subscription targets every connected relay and replaces any prior
 one under ID; with RELAYS set it is added to those relays under ID, extending an
-existing subscription rather than replacing it.  With CLOSE-ON-EOSE the relay
-subscription auto-closes after EOSE, freeing the relay slot -- use it for
-one-shot fetches (profiles, metadata) rather than live feeds."
+existing subscription rather than replacing it.  The subscription stays open
+until closed with `nostr-daemon-close'."
   (nostr-daemon--send `((op . "subscribe")
                         (id . ,id)
                         (filters . ,(or (vconcat filters) []))
-                        ,@(when relays `((relays . ,(vconcat relays))))
-                        ,@(when close-on-eose '((close_on_eose . t))))))
+                        ,@(when relays `((relays . ,(vconcat relays)))))))
 
 (defun nostr-daemon-publish (event &optional relays)
   "Publish fully-signed EVENT (an alist) to RELAYS, or every relay when nil."

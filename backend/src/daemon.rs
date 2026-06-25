@@ -65,11 +65,6 @@ enum Command {
         filters: Vec<Value>,
         #[serde(default)]
         relays: Vec<String>,
-        /// When true, the subscription auto-closes once the relay sends EOSE.
-        /// One-shot fetches (profile/metadata/by-id) set this so they free the
-        /// relay's subscription slot instead of staying open and exhausting it.
-        #[serde(default)]
-        close_on_eose: bool,
     },
     /// Close subscription `id` on every relay.
     Close { id: String },
@@ -261,23 +256,17 @@ async fn handle_command(
             id,
             filters,
             relays,
-            close_on_eose,
         } => {
             // A global (all-relay) subscribe replaces any prior one under this
             // id; a relay-targeted subscribe extends the existing id instead.
+            // Subscriptions stay open until an explicit Close: relay-side EOSE
+            // auto-close truncates multi-relay results (it fires on the fastest
+            // relay's EOSE), so Emacs closes one-shot fetches on a timer instead.
             if relays.is_empty() {
                 for derived in registry.take(&id) {
                     client.unsubscribe(&SubscriptionId::new(derived)).await;
                 }
             }
-            // One-shot fetches auto-close on EOSE so they don't hold a relay
-            // subscription slot. They are single-filter (derived == base), so
-            // EOSE still maps back via base_of's fallback without a registry
-            // entry -- skip recording to avoid unbounded growth as profiles are
-            // fetched over a long session.
-            let auto_close = close_on_eose.then(|| {
-                SubscribeAutoCloseOptions::default().exit_policy(ReqExitPolicy::ExitOnEOSE)
-            });
             let derived_ids = SubRegistry::derived_ids(&id, filters.len());
             for (filter_value, derived) in filters.iter().zip(derived_ids.iter()) {
                 let filter = match serde_json::from_value::<Filter>(filter_value.clone()) {
@@ -290,20 +279,17 @@ async fn handle_command(
                 };
                 let sub_id = SubscriptionId::new(derived.clone());
                 let result = if relays.is_empty() {
-                    client
-                        .subscribe_with_id(sub_id, filter, auto_close)
-                        .await
-                        .map(|_| ())
+                    client.subscribe_with_id(sub_id, filter, None).await.map(|_| ())
                 } else {
                     client
-                        .subscribe_with_id_to(relays.iter(), sub_id, filter, auto_close)
+                        .subscribe_with_id_to(relays.iter(), sub_id, filter, None)
                         .await
                         .map(|_| ())
                 };
                 match result {
                     // Record only once per derived id even across targeted calls.
                     Ok(()) => {
-                        if !close_on_eose && !registry.derived_to_base.contains_key(derived) {
+                        if !registry.derived_to_base.contains_key(derived) {
                             registry.record(&id, derived);
                         }
                     }
