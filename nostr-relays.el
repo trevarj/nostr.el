@@ -13,7 +13,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'websocket)
+(require 'nostr-daemon)
 (require 'nostr-db)
 (require 'nostr-relay)
 (require 'nostr-share)
@@ -138,13 +138,11 @@
   (nostr-ui-selected-data))
 
 (defun nostr-relays--live-state (url)
-  "Return live websocket state string for URL."
-  (let ((ws (and (boundp 'nostr-relay--connections)
-                 (gethash url nostr-relay--connections))))
-    (cond
-     ((and ws (websocket-openp ws)) "open")
-     (ws "closed")
-     (t "not-connected"))))
+  "Return the daemon connection state string for URL."
+  (if (and (boundp 'nostr-relay--connections)
+           (gethash url nostr-relay--connections))
+      "open"
+    "not-connected"))
 
 (defun nostr-relays--insert-relay (relay)
   "Insert RELAY as a selectable UI section."
@@ -252,10 +250,9 @@
 (defun nostr-relays-disconnect ()
   "Disconnect the selected relay."
   (interactive)
-  (let* ((url (nostr-relays--selected-url))
-         (ws (gethash url nostr-relay--connections)))
-    (when (and ws (websocket-openp ws))
-      (websocket-close ws))
+  (let ((url (nostr-relays--selected-url)))
+    (when (gethash url nostr-relay--connections)
+      (nostr-daemon-remove-relay url))
     (remhash url nostr-relay--connections)
     (nostr-db-store-relay-status url "closed" "Disconnected locally")
     (nostr-relays-refresh)))

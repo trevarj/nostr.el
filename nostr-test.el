@@ -325,34 +325,9 @@ state set by one test does not bleed into another (e.g. backfill gating)."
                               (buffer-substring-no-properties
                                (point-min) (point-max)))))))
 
-(ert-deftest nostr-relay-websocket-error-records-relay-status ()
-  "Websocket upgrade errors are captured as relay status instead of warnings."
-  (let ((nostr-relay--connections (make-hash-table :test #'equal))
-        captured-error-callback
-        statuses)
-    (cl-letf (((symbol-function 'websocket-open)
-               (lambda (url &rest args)
-                 (should (equal url "wss://relay.example"))
-                 (setq captured-error-callback (plist-get args :on-error))
-                 'nostr-test-websocket))
-              ((symbol-function 'run-at-time)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'nostr-db-store-relay-status)
-               (lambda (url state &optional message)
-                 (push (list url state message) statuses)))
-              ((symbol-function 'nostr-relay--update-mode-line)
-               (lambda () nil)))
-      (should (eq (nostr-relay--open-websocket "wss://relay.example" "me")
-                  'nostr-test-websocket))
-      (should (gethash "wss://relay.example" nostr-relay--connections))
-      (should (functionp captured-error-callback))
-      (funcall captured-error-callback
-               'nostr-test-websocket
-               'on-open
-               '(websocket-received-error-http-response 503))
-      (should-not (gethash "wss://relay.example" nostr-relay--connections))
-      (should (equal (cadar statuses) "error"))
-      (should (string-match-p "503" (caddar statuses))))))
+;; Websocket connection error handling now lives in the Rust daemon (it owns the
+;; socket and records relay_status); the Elisp `--open-websocket' test was
+;; removed with that code.
 
 (ert-deftest nostr-timeline-primary-feeds-render-accumulated-reactions ()
   "Feed, Conversations, and My Posts cards show DB-backed reaction counts."
@@ -1720,147 +1695,39 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       (should (equal (nostr-actions-current-mute-tags nil "alice")
                      nil)))))
 
-(ert-deftest nostr-relay-stores-mention-reaction-and-follow-notifications ()
-  (nostr-test-with-db
-    (let ((nostr-current-pubkey "me")
-          (nostr-relay-verify-events nil))
-      (nostr-relay--handle-event
-       "relay" nil
-       '((id . "my-note")
-         (pubkey . "me")
-         (created_at . 1)
-         (kind . 1)
-         (tags . nil)
-         (content . "mine")
-         (sig . "sig")))
-      (nostr-relay--handle-event
-       "relay" nil
-       '((id . "mention")
-         (pubkey . "alice")
-         (created_at . 2)
-         (kind . 1)
-         (tags . (("p" "me")))
-         (content . "hi")
-         (sig . "sig")))
-      (nostr-relay--handle-event
-       "relay" nil
-       '((id . "reaction")
-         (pubkey . "bob")
-         (created_at . 3)
-         (kind . 7)
-         (tags . (("e" "my-note")))
-         (content . "+")
-         (sig . "sig")))
-      (nostr-relay--handle-event
-       "relay" nil
-       '((id . "follow")
-         (pubkey . "carol")
-         (created_at . 4)
-         (kind . 3)
-         (tags . (("p" "me")))
-         (content . "")
-         (sig . "sig")))
-      (should (equal (sort (mapcar #'car
-                                    (emacsql nostr-db--connection
-                                             [:select [type] :from notifications]))
-                           #'string<)
-                     '("follow" "mention" "reaction"))))))
-
-(ert-deftest nostr-relay-verifies-events-before-storing ()
-  "Relay ingestion verifies event signatures before writing to the cache."
-  (nostr-test-with-db
-    (let ((calls nil))
-      (cl-letf (((symbol-function 'nostr-backend-call)
-                 (lambda (command payload success _error)
-                   (push (list command payload) calls)
-                   (funcall success '((ok . t) (valid . t)))
-                   :process)))
-        (should (eq (nostr-relay--handle-event
-                     "relay"
-                     "sub"
-                     '((id . "verified-note")
-                       (pubkey . "alice")
-                       (created_at . 100)
-                       (kind . 1)
-                       (tags . nil)
-                       (content . "verified")
-                       (sig . "sig")))
-                    'pending-verification)))
-      (should (equal (caar calls) "verify-event"))
-      (should (equal (alist-get 'id (alist-get 'event (cadar calls)))
-                     "verified-note"))
-      ;; Verified events are ingested via the background queue; flush it so the
-      ;; store is observable in this synchronous test context.
-      (nostr-relay--flush-ingestion)
-      (should (equal (nostr-db-event-pubkey "verified-note") "alice")))))
-
-(ert-deftest nostr-relay-rejects-invalid-events ()
-  "Invalid relay events are not stored and leave a relay status clue."
-  (nostr-test-with-db
-    (let ((invalid-response '((ok . t)
-                              (valid . nil)
-                              (reason . "bad signature")))
-          handled)
-      (cl-letf (((symbol-function 'nostr-backend-call)
-                 (lambda (_command _payload success _error)
-                   (funcall success invalid-response)
-                   :process)))
-        (setq handled
-              (nostr-relay--handle-event
-               "relay"
-               "sub"
-               '((id . "invalid-note")
-                 (pubkey . "mallory")
-                 (created_at . 100)
-                 (kind . 1)
-                 (tags . nil)
-                 (content . "invalid")
-                 (sig . "sig")))))
-      (should (eq handled 'pending-verification))
-      (should-not (nostr-db-event-pubkey "invalid-note"))
-      (let ((status (emacsql nostr-db--connection
-                             [:select [state message]
-                                      :from relay_status
-                                      :where (= url "relay")])))
-        (should (equal status
-                       '(("invalid-event" "invalid-note bad signature"))))))))
+;; Signature verification, dedup, and notification derivation moved to the Rust
+;; relay daemon (covered by `store::tests` in backend/src/store.rs); the former
+;; Elisp verify/ingest tests were removed with that pipeline.
 
 (ert-deftest nostr-relay-tracks-publish-receipts ()
-  "Publishing records per-relay pending receipts and OK updates."
+  "Publishing records per-relay pending receipts and hands the event to the daemon.
+The daemon performs the actual send and updates the receipts to sent/failed as
+relays answer; Emacs only seeds the pending rows and dispatches."
   (nostr-test-with-db
     (let ((nostr-current-pubkey "me")
           (nostr-relay--connections (make-hash-table :test #'equal))
-          sent)
-      (cl-letf (((symbol-function 'websocket-openp)
-                 (lambda (_ws) t))
-                ((symbol-function 'websocket-send-text)
-                 (lambda (ws message)
-                   (push (list ws message) sent))))
-        (puthash "wss://relay-a.example" 'ws-a nostr-relay--connections)
-        (puthash "wss://relay-b.example" 'ws-b nostr-relay--connections)
+          published)
+      (cl-letf (((symbol-function 'nostr-daemon-publish)
+                 (lambda (event &optional relays)
+                   (push (list event relays) published))))
+        (puthash "wss://relay-a.example" t nostr-relay--connections)
+        (puthash "wss://relay-b.example" t nostr-relay--connections)
         (should (= (nostr-relay-send-client-message
                     "[\"EVENT\",{\"id\":\"event-pub\",\"content\":\"hello\"}]")
                    2)))
-      (should (= (length sent) 2))
+      ;; The signed event is dispatched once, to both connected relays.
+      (should (= (length published) 1))
+      (pcase-let ((`(,event ,relays) (car published)))
+        (should (equal (alist-get 'id event) "event-pub"))
+        (should (equal (sort (copy-sequence relays) #'string<)
+                       '("wss://relay-a.example" "wss://relay-b.example"))))
+      ;; Each target relay gets a pending receipt up front.
       (should (equal (mapcar (lambda (receipt)
                                (list (alist-get 'url receipt)
                                      (alist-get 'state receipt)))
                              (nostr-db-select-publish-receipts "event-pub"))
                      '(("wss://relay-a.example" "pending")
-                       ("wss://relay-b.example" "pending"))))
-      (nostr-relay-handle-frame
-       "wss://relay-a.example"
-       "[\"OK\",\"event-pub\",true,\"stored\"]")
-      (nostr-relay-handle-frame
-       "wss://relay-b.example"
-       "[\"OK\",\"event-pub\",false,\"blocked: policy\"]")
-      (should (equal (mapcar (lambda (receipt)
-                               (list (alist-get 'url receipt)
-                                     (alist-get 'state receipt)
-                                     (alist-get 'message receipt)))
-                             (nostr-db-select-publish-receipts "event-pub"))
-                     '(("wss://relay-a.example" "accepted" "stored")
-                       ("wss://relay-b.example" "rejected" "blocked: policy")))))))
+                       ("wss://relay-b.example" "pending")))))))
 
 (ert-deftest nostr-search-relay-subscribes-connected-relays ()
   (let (sent)
@@ -1934,147 +1801,9 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       (when (timerp nostr-search--refresh-timer)
         (cancel-timer nostr-search--refresh-timer)))))
 
-(ert-deftest nostr-search-primal-cache-profile-hints-require-verification ()
-  "Primal cache profile search hints are signature-verified like other events.
-A compromised Primal cache returning a kind-0 profile with a bogus signature
-cannot bypass verification; only backend-verified hints are stored."
-  (nostr-test-with-db
-    (let ((nostr-relay-verify-events t)
-          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
-          (calls nil))
-      (puthash "search-odell" "ODELL" nostr-relay--search-profile-queries)
-      (cl-letf (((symbol-function 'nostr-backend-call)
-                 (lambda (command payload success _error)
-                   (push (list command payload) calls)
-                   (funcall success '((ok . t) (valid . t)))
-                   :process))
-                ((symbol-function 'nostr-relay-fetch-author)
-                 (lambda (&rest _) nil))
-                ((symbol-function 'nostr-relay-fetch-author-from-urls)
-                 (lambda (&rest _) nil)))
-        (should (eq (nostr-relay--handle-event
-                    "wss://cache2.primal.net/v1"
-                    "search-odell"
-                    '((id . "profile-odell")
-                      (pubkey . "odell-pubkey")
-                      (created_at . 100)
-                      (kind . 0)
-                      (tags . nil)
-                      (content . "{\"name\":\"ODELL\",\"display_name\":\"ODELL\"}")
-                      (sig . "cache-sig")))
-                   'pending-verification))
-        (should (equal (caar calls) "verify-event"))
-        ;; Profile hints are ingested via the background queue; flush it so the
-        ;; stored profile is observable in this synchronous test context.
-        (nostr-relay--flush-ingestion)
-        (should (nostr-db-select-profile "odell-pubkey"))))))
-
-(ert-deftest nostr-search-primal-cache-rejects-forged-profile-hint ()
-  "A Primal cache kind-0 search hint with a bad signature is not stored.
-The former carve-out stored these unverified; they are now rejected like any
-forged relay event so a compromised relay cannot impersonate a pubkey."
-  (nostr-test-with-db
-    (let ((nostr-relay-verify-events t)
-          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
-          (calls nil))
-      (puthash "search-odell" "ODELL" nostr-relay--search-profile-queries)
-      (cl-letf (((symbol-function 'nostr-backend-call)
-                 (lambda (command payload success _error)
-                   (push (list command payload) calls)
-                   (funcall success '((ok . t) (valid . nil)
-                                      (reason . "bad signature")))
-                   :process))
-                ((symbol-function 'nostr-relay-fetch-author)
-                 (lambda (&rest _) nil))
-                ((symbol-function 'nostr-relay-fetch-author-from-urls)
-                 (lambda (&rest _) nil)))
-        (nostr-relay--handle-event
-         "wss://cache2.primal.net/v1"
-         "search-odell"
-         '((id . "profile-odell")
-           (pubkey . "odell-pubkey")
-           (created_at . 100)
-           (kind . 0)
-           (tags . nil)
-           (content . "{\"name\":\"Impostor\"}")
-           (sig . "forged-sig")))
-        (should (equal (caar calls) "verify-event"))
-        (should-not (nostr-db-select-profile "odell-pubkey"))))))
-
-(ert-deftest nostr-relay-skips-verification-for-seen-event-id ()
-  "A repeated event id is not re-verified via the backend subprocess.
-Because event ids are content hashes, a duplicate is byte-identical to the
-already-verified copy, so only the first arrival spawns a verify subprocess."
-  (nostr-test-with-db
-    (let ((nostr-relay-verify-events t)
-          (nostr-relay--verified-event-ids (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
-          (event '((id . "dup-note")
-                   (pubkey . "alice")
-                   (created_at . 100)
-                   (kind . 1)
-                   (tags . nil)
-                   (content . "hello")
-                   (sig . "sig")))
-          (calls nil))
-      (cl-letf (((symbol-function 'nostr-backend-call)
-                 (lambda (command payload success _error)
-                   (push (list command payload) calls)
-                   (funcall success '((ok . t) (valid . t)))
-                   :process))
-                ((symbol-function 'nostr-relay-fetch-profile)
-                 (lambda (&rest _) nil)))
-        (nostr-relay--handle-event "wss://relay-a.example" "feed" event)
-        ;; Second arrival of the same id from a different relay.
-        (should (eq (nostr-relay--handle-event
-                     "wss://relay-b.example" "feed" event)
-                    'already-verified))
-        ;; Only the first arrival spawned a verify subprocess.
-        (should (= (length calls) 1))
-        (should (equal (caar calls) "verify-event"))))))
-
-(ert-deftest nostr-relay-seen-event-records-provenance-without-full-store ()
-  "A duplicate event still records relay provenance but skips the full store.
-Even with verification disabled, the second arrival records the delivering
-relay so per-note relay counts stay correct, while the expensive
-`nostr-db-store-event' path runs only once."
-  (nostr-test-with-db
-    (let ((nostr-relay-verify-events nil)
-          (nostr-relay--verified-event-ids (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-queries (make-hash-table :test #'equal))
-          (nostr-relay--search-profile-author-requests (make-hash-table :test #'equal))
-          (event '((id . "dup-note")
-                   (pubkey . "alice")
-                   (created_at . 100)
-                   (kind . 1)
-                   (tags . nil)
-                   (content . "hello")
-                   (sig . "sig")))
-          (store-calls 0)
-          (relay-calls 0)
-          (orig-store (symbol-function 'nostr-db-store-event))
-          (orig-relay (symbol-function 'nostr-db-store-event-relay)))
-      (cl-letf (((symbol-function 'nostr-db-store-event)
-                 (lambda (e) (cl-incf store-calls) (funcall orig-store e)))
-                ((symbol-function 'nostr-db-store-event-relay)
-                 (lambda (e) (cl-incf relay-calls) (funcall orig-relay e)))
-                ((symbol-function 'nostr-relay-fetch-profile)
-                 (lambda (&rest _) nil)))
-        (nostr-relay--handle-event "wss://relay-a.example" "feed" event)
-        (should (eq (nostr-relay--handle-event
-                     "wss://relay-b.example" "feed" event)
-                    'already-verified))
-        ;; Full store ran once; provenance recorded for both arrivals.
-        (should (= store-calls 1))
-        (should (= relay-calls 2))
-        ;; Both delivering relays are recorded for the note.
-        (should (= 2 (caar (emacsql nostr-db--connection
-                                    [:select [(funcall count *)]
-                                             :from event_relays
-                                             :where (= event_id "dup-note")]))))))))
+;; Primal-cache hint verification and the duplicate-event dedup/provenance fast
+;; path were part of the Elisp ingest pipeline now owned by the Rust daemon, so
+;; their tests were removed along with it.
 
 (ert-deftest nostr-search-progress-appears-in-mode-line ()
   "Relay-backed search requests show and clear compact mode-line progress."
@@ -2161,24 +1890,9 @@ relay so per-note relay counts stay correct, while the expensive
       (nostr-relay--update-mode-line)
       (should (equal nostr-relay--mode-line-string " Nostr ⠋ ◉1")))))
 
-(ert-deftest nostr-relay-stored-notification-updates-mode-line ()
-  "Storing a new notification refreshes the unread mode-line indicator."
-  (nostr-test-with-db
-    (let ((nostr-current-pubkey "me")
-          (nostr-relay--search-request-counts (make-hash-table :test #'equal))
-          (nostr-relay--search-author-request-counts (make-hash-table :test #'equal))
-          (nostr-relay--profile-requests (make-hash-table :test #'equal))
-          (nostr-relay--mode-line-string nil)
-          (nostr-relay--ingested-event-count 0)
-          (nostr-relay--connect-queue nil))
-      (nostr-relay--maybe-store-notification
-       '((id . "note1")
-         (pubkey . "alice")
-         (created_at . 100)
-         (kind . 1)
-         (tags . (("p" "me")))
-         (content . "hello me")))
-      (should (equal nostr-relay--mode-line-string " Nostr ◉1")))))
+;; Notification derivation (and its unread mode-line bump) is now done by the
+;; Rust daemon; the mode-line still refreshes per stored event via
+;; `nostr-relay--note-ingested-event'. The derivation test moved to Rust.
 
 (ert-deftest nostr-search-relay-fetches-authors-from-profile-hits ()
   "Matching profile search events trigger bounded author activity fetches."
@@ -2321,18 +2035,16 @@ relay so per-note relay counts stay correct, while the expensive
     (should (member url nostr-relay-urls))))
 
 (ert-deftest nostr-relay-received-notes-backfill-author-profile ()
-  "Incoming notes request missing kind-0 author metadata."
+  "A daemon-stored note requests missing kind-0 author metadata."
   (nostr-test-with-db
-    (let ((nostr-relay-verify-events nil)
-          (nostr-relay--connections (make-hash-table :test #'equal))
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
           (nostr-relay--profile-requests (make-hash-table :test #'equal))
           sent)
       (puthash "wss://relay.example" t nostr-relay--connections)
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
                  (lambda (url sub-id filters)
                    (push (list url sub-id filters) sent))))
-        (nostr-relay--handle-event
-         "wss://relay.example"
+        (nostr-relay--on-stored-event
          "sub"
          '((id . "note1")
            (pubkey . "alice-pubkey")
@@ -2367,8 +2079,7 @@ relay so per-note relay counts stay correct, while the expensive
             (puthash "wss://relay.example" t nostr-relay--connections)
             (cl-letf (((symbol-function 'nostr-relay-subscribe)
                        (lambda (_url _sub-id _filters) t)))
-              (nostr-relay--handle-event
-               "wss://relay.example"
+              (nostr-relay--on-stored-event
                "sub"
                '((id . "note1")
                  (pubkey . "alice-pubkey")
@@ -2379,8 +2090,7 @@ relay so per-note relay counts stay correct, while the expensive
                  (sig . "sig")))
               (should (string-match-p " Nostr [⠋⠙⠹⢸⣰⣠⣄⣆⡇⠏]"
                                       nostr-relay--mode-line-string))
-              (nostr-relay--handle-event
-               "wss://relay.example"
+              (nostr-relay--on-stored-event
                "profile-sub"
                '((id . "profile1")
                  (pubkey . "alice-pubkey")
@@ -2412,8 +2122,8 @@ relay so per-note relay counts stay correct, while the expensive
         (should (= (nostr-relay-fetch-profile "alice-pubkey") 1)))
       (let ((sub-id (nostr-relay--profile-sub-id "alice-pubkey")))
         (should (gethash "alice-pubkey" nostr-relay--profile-requests))
-        (nostr-relay-handle-frame "wss://relay.example"
-                                  (json-encode `["EOSE" ,sub-id]))
+        (nostr-relay--on-daemon-notification
+         `((event . "eose") (sub . ,sub-id) (relay . "wss://relay.example")))
         (should-not (gethash "alice-pubkey" nostr-relay--profile-requests))
         (should-not nostr-relay--mode-line-string)))))
 
@@ -2525,12 +2235,12 @@ relay so per-note relay counts stay correct, while the expensive
         (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
         callbacks
         sent)
-    (cl-letf (((symbol-function 'websocket-open)
-               (lambda (url &rest args)
-                 (puthash url (plist-get args :on-open) callbacks)
-                 (list :ws url)))
-              ((symbol-function 'run-at-time)
-               (lambda (&rest _args) nil))
+    (ignore callbacks)
+    ;; The daemon owns the socket; `nostr-relay-open' issues the visible-reaction
+    ;; subscription synchronously when a relay is registered.
+    (cl-letf (((symbol-function 'nostr-daemon-running-p) (lambda () t))
+              ((symbol-function 'nostr-daemon-add-relay) #'ignore)
+              ((symbol-function 'nostr-daemon-set-pubkey) #'ignore)
               ((symbol-function 'nostr-db-store-relay-status)
                (lambda (&rest _args) nil))
               ((symbol-function 'nostr-relay-subscribe)
@@ -2538,11 +2248,8 @@ relay so per-note relay counts stay correct, while the expensive
                  (push (list url sub-id filters) sent)))
               ((symbol-function 'nostr-visible-note-ids)
                (lambda () '("note1"))))
-      (setq callbacks (make-hash-table :test #'equal))
-      (nostr-relay--open-websocket "wss://relay-a.example" nil)
-      (funcall (gethash "wss://relay-a.example" callbacks) 'ws-a)
-      (nostr-relay--open-websocket "wss://relay-b.example" nil)
-      (funcall (gethash "wss://relay-b.example" callbacks) 'ws-b)
+      (nostr-relay-open "wss://relay-a.example" nil)
+      (nostr-relay-open "wss://relay-b.example" nil)
       (should (= (length sent) 2))
       (should (equal (sort (mapcar #'car sent) #'string<)
                      '("wss://relay-a.example" "wss://relay-b.example")))
@@ -2631,8 +2338,8 @@ relay so per-note relay counts stay correct, while the expensive
                    1))
                 ((symbol-function 'nostr-relay-fetch-profile)
                  (lambda (&rest _args) 0)))
-        (nostr-relay--store-verified-event
-         "wss://relay.example"
+        (nostr-relay--on-stored-event
+         "sub"
          '((id . "repost-event")
            (pubkey . "alice")
            (created_at . 120)

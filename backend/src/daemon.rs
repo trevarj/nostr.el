@@ -54,10 +54,26 @@ struct InitConfig {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 enum Command {
-    /// Open (or replace) subscription `id` with one or more nostr filters.
-    Subscribe { id: String, filters: Vec<Value> },
+    /// Open subscription `id` with one or more nostr filters.
+    ///
+    /// With `relays` empty the subscription replaces any prior one under `id`
+    /// and targets every connected relay. With `relays` set it is *added* to
+    /// those relays under `id` (extending, not replacing), mirroring the old
+    /// per-relay `nostr-relay-subscribe`.
+    Subscribe {
+        id: String,
+        filters: Vec<Value>,
+        #[serde(default)]
+        relays: Vec<String>,
+    },
     /// Close subscription `id` on every relay.
     Close { id: String },
+    /// Publish a fully-signed event to relays (all, or the given `relays`).
+    Publish {
+        event: Value,
+        #[serde(default)]
+        relays: Vec<String>,
+    },
     /// Connect to an additional relay.
     AddRelay { url: String },
     /// Disconnect and forget a relay.
@@ -236,27 +252,46 @@ async fn handle_command(
     cmd: Command,
 ) {
     match cmd {
-        Command::Subscribe { id, filters } => {
-            // Replace any prior subscription under this base id first.
-            for derived in registry.take(&id) {
-                client.unsubscribe(&SubscriptionId::new(derived)).await;
+        Command::Subscribe {
+            id,
+            filters,
+            relays,
+        } => {
+            // A global (all-relay) subscribe replaces any prior one under this
+            // id; a relay-targeted subscribe extends the existing id instead.
+            if relays.is_empty() {
+                for derived in registry.take(&id) {
+                    client.unsubscribe(&SubscriptionId::new(derived)).await;
+                }
             }
             let derived_ids = SubRegistry::derived_ids(&id, filters.len());
             for (filter_value, derived) in filters.iter().zip(derived_ids.iter()) {
-                match serde_json::from_value::<Filter>(filter_value.clone()) {
-                    Ok(filter) => {
-                        let sub_id = SubscriptionId::new(derived.clone());
-                        if let Err(err) =
-                            client.subscribe_with_id(sub_id, filter, None).await
-                        {
-                            emit(&json!({"event": "error", "code": "subscribe",
-                                         "sub": id, "message": err.to_string()}));
-                        } else {
+                let filter = match serde_json::from_value::<Filter>(filter_value.clone()) {
+                    Ok(f) => f,
+                    Err(err) => {
+                        emit(&json!({"event": "error", "code": "bad-filter",
+                                     "sub": id, "message": err.to_string()}));
+                        continue;
+                    }
+                };
+                let sub_id = SubscriptionId::new(derived.clone());
+                let result = if relays.is_empty() {
+                    client.subscribe_with_id(sub_id, filter, None).await.map(|_| ())
+                } else {
+                    client
+                        .subscribe_with_id_to(relays.iter(), sub_id, filter, None)
+                        .await
+                        .map(|_| ())
+                };
+                match result {
+                    // Record only once per derived id even across targeted calls.
+                    Ok(()) => {
+                        if !registry.derived_to_base.contains_key(derived) {
                             registry.record(&id, derived);
                         }
                     }
                     Err(err) => {
-                        emit(&json!({"event": "error", "code": "bad-filter",
+                        emit(&json!({"event": "error", "code": "subscribe",
                                      "sub": id, "message": err.to_string()}));
                     }
                 }
@@ -266,6 +301,9 @@ async fn handle_command(
             for derived in registry.take(&id) {
                 client.unsubscribe(&SubscriptionId::new(derived)).await;
             }
+        }
+        Command::Publish { event, relays } => {
+            publish_event(client, conn, event, relays).await;
         }
         Command::AddRelay { url } => match client.add_relay(url.as_str()).await {
             Ok(_) => {
@@ -287,6 +325,50 @@ async fn handle_command(
             *current_pubkey = pubkey;
         }
         Command::Shutdown => {} // handled in the loop.
+    }
+}
+
+/// Publish a signed event and record per-relay receipts, mirroring
+/// `nostr-relay-send-client-message` + `nostr-db-store-publish-receipt`.
+async fn publish_event(client: &Client, conn: &Connection, event: Value, relays: Vec<String>) {
+    let event: Event = match serde_json::from_value(event) {
+        Ok(ev) => ev,
+        Err(err) => {
+            emit_error("bad-event", &err.to_string());
+            return;
+        }
+    };
+    let output = if relays.is_empty() {
+        client.send_event(&event).await
+    } else {
+        client.send_event_to(relays.iter(), &event).await
+    };
+    match output {
+        Ok(output) => {
+            let id = output.val.to_hex();
+            for url in &output.success {
+                store_receipt(conn, &id, url.as_str(), "sent", None);
+            }
+            for (url, err) in &output.failed {
+                store_receipt(conn, &id, url.as_str(), "failed", Some(err));
+            }
+            emit(&json!({
+                "event": "published",
+                "id": id,
+                "success": output.success.len(),
+                "failed": output.failed.len(),
+            }));
+        }
+        Err(err) => {
+            emit(&json!({"event": "error", "code": "publish",
+                         "id": event.id.to_hex(), "message": err.to_string()}));
+        }
+    }
+}
+
+fn store_receipt(conn: &Connection, event_id: &str, url: &str, state: &str, message: Option<&str>) {
+    if let Err(err) = store::store_publish_receipt(conn, event_id, url, state, message) {
+        emit_error("publish-receipt", &err.to_string());
     }
 }
 
@@ -464,7 +546,7 @@ mod tests {
         let subscribe: Command =
             serde_json::from_str(r#"{"op":"subscribe","id":"x","filters":[{"kinds":[1]}]}"#)
                 .unwrap();
-        assert!(matches!(subscribe, Command::Subscribe { id, filters }
+        assert!(matches!(subscribe, Command::Subscribe { id, filters, .. }
                          if id == "x" && filters.len() == 1));
         assert!(matches!(
             serde_json::from_str::<Command>(r#"{"op":"add-relay","url":"wss://r"}"#).unwrap(),

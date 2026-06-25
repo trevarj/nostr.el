@@ -111,12 +111,22 @@ restart with different bootstrap configuration."
      nostr-daemon--process
      (concat (nostr-backend--json-encode command) "\n"))))
 
-(defun nostr-daemon-subscribe (id filters)
-  "Open (or replace) subscription ID with FILTERS on every relay.
-FILTERS is a list of nostr filter alists (array values must be vectors)."
+(defun nostr-daemon-subscribe (id filters &optional relays)
+  "Open subscription ID with FILTERS.
+FILTERS is a list of nostr filter alists (array values must be vectors).  With
+RELAYS nil the subscription targets every connected relay and replaces any prior
+one under ID; with RELAYS set it is added to those relays under ID, extending an
+existing subscription rather than replacing it."
   (nostr-daemon--send `((op . "subscribe")
                         (id . ,id)
-                        (filters . ,(or (vconcat filters) [])))))
+                        (filters . ,(or (vconcat filters) []))
+                        ,@(when relays `((relays . ,(vconcat relays)))))))
+
+(defun nostr-daemon-publish (event &optional relays)
+  "Publish fully-signed EVENT (an alist) to RELAYS, or every relay when nil."
+  (nostr-daemon--send `((op . "publish")
+                        (event . ,event)
+                        ,@(when relays `((relays . ,(vconcat relays)))))))
 
 (defun nostr-daemon-close (id)
   "Close subscription ID on every relay."

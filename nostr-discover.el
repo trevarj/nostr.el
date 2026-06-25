@@ -161,16 +161,23 @@ When APPEND is non-nil, ranks continue after the existing cached page."
               :refreshed-at (truncate (float-time))))
   (run-hooks 'nostr-discover-finished-hook))
 
+(defun nostr-discover--store-event (url event)
+  "Store a Primal cache EVENT from URL into the cache.
+The Primal cache is a first-party aggregator on its own socket (not a relay the
+daemon manages), so Discover stores its events directly rather than routing them
+through the relay daemon."
+  (nostr-db-store-event (nostr-event-normalize event url)))
+
 (defun nostr-discover--handle-event (url event state)
   "Handle one Primal cache EVENT from URL, mutating STATE."
   (pcase (alist-get 'kind event)
     (1
      (push (alist-get 'id event) (plist-get state :events))
-     (nostr-relay--handle-event url "nostr-discover" event))
+     (nostr-discover--store-event url event))
     (0
-     (nostr-relay--handle-event url "nostr-discover" event))
+     (nostr-discover--store-event url event))
     (9735
-     (nostr-relay--handle-event url "nostr-discover" event))
+     (nostr-discover--store-event url event))
     (10000100
      (when-let* ((stats (nostr-discover--parse-json-content
                          (alist-get 'content event))))

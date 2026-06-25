@@ -16,8 +16,8 @@
 (require 'seq)
 (require 'subr-x)
 (require 'url-parse)
-(require 'websocket)
 (require 'nostr-backend)
+(require 'nostr-daemon)
 (require 'nostr-db)
 (require 'nostr-event)
 
@@ -306,6 +306,7 @@ drained in bounded batches by `nostr-relay--drain-ingestion-queue'.")
   "Current index into `nostr-relay--mode-line-spinner-frames'.")
 
 (defvar nostr-current-pubkey)
+(defvar nostr-db-path)
 
 (defun nostr-relay--ensure-mode-line ()
   "Install the Nostr relay activity segment in `global-mode-string'."
@@ -509,10 +510,16 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
   (format "profile-%s" (substring (md5 pubkey) 0 12)))
 
 (defun nostr-relay--send (url message)
-  "Send MESSAGE JSON to relay URL."
-  (when-let* ((ws (gethash url nostr-relay--connections)))
-    (when (websocket-openp ws)
-      (websocket-send-text ws (json-encode message)))))
+  "Route relay MESSAGE for URL through the daemon.
+MESSAGE is the client frame vector Emacs used to send over the websocket: a
+`REQ' becomes a relay-targeted daemon subscribe, a `CLOSE' a daemon close.  The
+daemon owns the socket, so this only translates intent."
+  (pcase (append message nil)
+    (`("REQ" ,sub-id . ,filters)
+     (nostr-daemon-subscribe sub-id filters (list url)))
+    (`("CLOSE" ,sub-id)
+     (nostr-daemon-close sub-id))
+    (_ nil)))
 
 (defun nostr-relay--subscription-key (url sub-id)
   "Return the relay-local subscription key for URL and SUB-ID."
@@ -541,11 +548,8 @@ the fallback so a fresh account can bootstrap before NIP-65 metadata arrives."
   (nostr-relay--send url (vconcat `["REQ" ,sub-id] filters)))
 
 (defun nostr-relay--connection-open-p (url)
-  "Return non-nil when URL has an open websocket connection.
-Unit tests use t as a lightweight connection sentinel."
-  (let ((ws (gethash url nostr-relay--connections)))
-    (or (eq ws t)
-        (and (websocket-p ws) (websocket-openp ws)))))
+  "Return non-nil when URL is registered as connected with the daemon."
+  (and (gethash url nostr-relay--connections) t))
 
 (defun nostr-relay--queue-subscription (url sub-id filters)
   "Queue SUB-ID with FILTERS until URL opens."
@@ -575,181 +579,63 @@ Unit tests use t as a lightweight connection sentinel."
            nostr-relay--connections)
   (nostr-relay--remove-subscription-all sub-id))
 
-(defun nostr-relay--client-message-event-id (client-message)
-  "Return event id from relay-ready CLIENT-MESSAGE, when available."
-  (pcase (ignore-errors
-           (json-parse-string client-message
-                              :object-type 'alist
-                              :array-type 'list
-                              :false-object nil))
-    (`("EVENT" ,event)
-     (alist-get 'id event))
-    (_ nil)))
+;; The daemon verifies signatures, writes the cache, and derives notifications.
+;; Emacs no longer parses EVENT frames or runs a verify/ingest pipeline; it
+;; reacts to the daemon's stdout stream below.
 
-(defun nostr-relay--invalid-event (url event message)
-  "Store an invalid EVENT status from URL with MESSAGE."
-  (nostr-db-store-relay-status
-   url
-   "invalid-event"
-   (format "%s %s"
-           (or (alist-get 'id event) "(unknown event)")
-           (or message "signature verification failed"))))
-
-(defun nostr-relay--ingest-event (url event)
-  "Store verified EVENT from URL and run follow-up cache workflows.
-This is the synchronous per-event ingestion step, run from the background drain
-(`nostr-relay--drain-ingestion-queue') so the verification-completion callback
-stays cheap.  `nostr-relay--store-verified-event' delegates here."
-  (let ((normalized (nostr-event-normalize event url)))
-    (nostr-db-store-event normalized)
-    ;; Mark the (content-hashed) id as verified+stored so future duplicate
-    ;; arrivals skip the verification subprocess and re-store work.
-    (puthash (alist-get 'id normalized) t nostr-relay--verified-event-ids)
-    (nostr-relay--note-ingested-event)
-    (nostr-relay--maybe-store-notification normalized)
-    (when (equal (alist-get 'kind normalized) nostr-kind-repost)
-      ;; Repost feed items render the original note, so fetch missing targets
-      ;; as soon as a followed-account repost enters the cache.
-      (when-let* ((target (nostr-event-repost-event-id normalized)))
+(defun nostr-relay--on-stored-event (sub-id event)
+  "Run cache follow-up workflows for a daemon-stored EVENT on SUB-ID.
+EVENT is the normalized alist re-read from the cache; the daemon already stored
+it and derived any notifications, so this only schedules the dependent fetches
+and UI count refreshes the old ingestion step performed."
+  (nostr-relay--maybe-fetch-profile-search-author sub-id event)
+  (nostr-relay--note-ingested-event)
+  (let ((kind (alist-get 'kind event))
+        (pubkey (alist-get 'pubkey event)))
+    (when (equal kind nostr-kind-repost)
+      ;; Repost feed items render the original note, so fetch missing targets.
+      (when-let* ((target (nostr-event-repost-event-id event)))
         (nostr-relay-fetch-events-by-id (list target))))
-    (when (and (equal (alist-get 'kind normalized) nostr-kind-reaction)
+    (when (and (equal kind nostr-kind-reaction)
                (fboundp 'nostr-ui-refresh-note-counts))
-      (when-let* ((target (nostr-event-reaction-event-id normalized)))
+      (when-let* ((target (nostr-event-reaction-event-id event)))
         (nostr-ui-refresh-note-counts target)))
-    (when (equal (alist-get 'kind normalized) nostr-kind-metadata)
-      (nostr-relay--complete-profile-request (alist-get 'pubkey normalized)))
-    (when (memq (alist-get 'kind normalized) (list nostr-kind-text-note
-                                                   nostr-kind-repost
-                                                   nostr-kind-reaction
-                                                   nostr-kind-zap-receipt))
-      (nostr-relay-fetch-profile (alist-get 'pubkey normalized)))
-    (when (and (equal (alist-get 'kind normalized) nostr-kind-relay-list)
+    (when (equal kind nostr-kind-metadata)
+      (nostr-relay--complete-profile-request pubkey))
+    (when (memq kind (list nostr-kind-text-note nostr-kind-repost
+                           nostr-kind-reaction nostr-kind-zap-receipt))
+      (nostr-relay-fetch-profile pubkey))
+    (when (and (equal kind nostr-kind-relay-list)
                (boundp 'nostr-current-pubkey)
-               (equal (alist-get 'pubkey normalized) nostr-current-pubkey))
+               (equal pubkey nostr-current-pubkey))
       (nostr-relay-connect-recommended-deferred nostr-current-pubkey))
-    (run-hook-with-args 'nostr-relay-event-hook normalized)
-    normalized))
+    (run-hook-with-args 'nostr-relay-event-hook event)
+    event))
 
-(defun nostr-relay--store-verified-event (url event)
-  "Store verified EVENT from URL synchronously and run follow-up workflows.
-Thin wrapper over `nostr-relay--ingest-event' kept for direct callers and tests
-that want storage to happen immediately rather than via the background queue."
-  (nostr-relay--ingest-event url event))
+(defun nostr-relay--on-daemon-notification (notification)
+  "Bridge a daemon stdout NOTIFICATION into relay sync/cache bookkeeping.
+`stored' runs the per-event follow-ups, while `eose'/`closed' drive the same
+profile/search/feed EOSE tracking the websocket frame handler used to."
+  (pcase (alist-get 'event notification)
+    ("stored"
+     (when-let* ((event (nostr-db-select-event (alist-get 'id notification))))
+       (nostr-relay--on-stored-event (alist-get 'sub notification) event)))
+    ("eose"
+     (let ((sub-id (alist-get 'sub notification))
+           (relay (alist-get 'relay notification)))
+       (nostr-relay--note-profile-eose sub-id)
+       (nostr-relay--note-search-eose sub-id)
+       (nostr-relay--handle-eose relay sub-id)))
+    ("closed"
+     (let ((sub-id (alist-get 'sub notification))
+           (relay (alist-get 'relay notification)))
+       (remhash (nostr-relay--subscription-key relay sub-id)
+                nostr-relay--subscriptions)
+       (nostr-relay--note-profile-eose sub-id)
+       (nostr-relay--note-search-eose sub-id)
+       (remhash sub-id nostr-relay--search-profile-queries)))))
 
-(defun nostr-relay--enqueue-ingestion (url event)
-  "Queue verified EVENT from URL for background ingestion.
-Marks the event id verified immediately so a duplicate arriving before the
-drain short-circuits via `nostr-relay--handle-event's fast path instead of
-re-verifying, then appends (URL . EVENT) to `nostr-relay--ingestion-queue' and
-arms the drain timer.  Keeps the verification-completion callback cheap."
-  (when-let* ((id (alist-get 'id event)))
-    (puthash id t nostr-relay--verified-event-ids))
-  (setq nostr-relay--ingestion-queue
-        (nconc nostr-relay--ingestion-queue (list (cons url event))))
-  (nostr-relay--schedule-ingestion-drain))
-
-(defun nostr-relay--schedule-ingestion-drain ()
-  "Schedule a background ingestion drain tick if one is not already pending."
-  (unless (timerp nostr-relay--ingestion-drain-timer)
-    (setq nostr-relay--ingestion-drain-timer
-          (run-at-time nostr-relay-ingestion-interval nil
-                       #'nostr-relay--drain-ingestion-queue))))
-
-(defun nostr-relay--drain-ingestion-queue ()
-  "Store up to `nostr-relay-ingestion-batch-size' queued events, then reschedule.
-Each event is ingested inside a `condition-case' so one bad event does not
-abort the batch.  If the queue is not empty after the batch, arm another tick;
-otherwise clear the timer.  Each tick returns to the command loop so redisplay
-and user input interleave with the initial-sync burst."
-  (setq nostr-relay--ingestion-drain-timer nil)
-  (let ((remaining nostr-relay-ingestion-batch-size))
-    (while (and nostr-relay--ingestion-queue (> remaining 0))
-      (let ((next (pop nostr-relay--ingestion-queue)))
-        (cl-decf remaining)
-        (condition-case err
-            (nostr-relay--ingest-event (car next) (cdr next))
-          (error
-           (nostr-relay--log-ingestion-error err))))))
-  (when nostr-relay--ingestion-queue
-    (nostr-relay--schedule-ingestion-drain)))
-
-(defun nostr-relay--flush-ingestion ()
-  "Drain the entire ingestion queue synchronously, with no batch limit.
-Used at teardown and before the final sync render so the UI reflects every
-ingested event.  Cancels any pending drain timer first."
-  (when (timerp nostr-relay--ingestion-drain-timer)
-    (cancel-timer nostr-relay--ingestion-drain-timer)
-    (setq nostr-relay--ingestion-drain-timer nil))
-  (while nostr-relay--ingestion-queue
-    (let ((next (pop nostr-relay--ingestion-queue)))
-      (condition-case err
-          (nostr-relay--ingest-event (car next) (cdr next))
-        (error
-         (nostr-relay--log-ingestion-error err))))))
-
-(defun nostr-relay--log-ingestion-error (err)
-  "Log ingestion ERR when debug logging is enabled.
-`nostr-debug-logging' lives in `nostr.el', which is loaded after this module, so
-gate on `bound-and-true-p' rather than calling `nostr-debug-message' directly."
-  (when (bound-and-true-p nostr-debug-logging)
-    (message "[nostr] ingestion failed: %s" (error-message-string err))))
-
-(defun nostr-relay--schedule-verify-drain ()
-  "Schedule queued event verification work outside the current callback stack."
-  (unless (timerp nostr-relay--verify-drain-timer)
-    (setq nostr-relay--verify-drain-timer
-          (run-at-time 0 nil #'nostr-relay--drain-verify-queue))))
-
-(defun nostr-relay--verify-finished ()
-  "Record that one verification finished and schedule queued work."
-  (when (> nostr-relay--verify-inflight 0)
-    (cl-decf nostr-relay--verify-inflight))
-  ;; Backend process sentinels may run while other sentinels are unwinding.
-  ;; Starting the next verification synchronously here can recurse through
-  ;; `nostr-backend-call' callbacks when a burst of subprocesses finishes
-  ;; together.  Use a timer to return to the command loop between batches.
-  (nostr-relay--schedule-verify-drain))
-
-(defun nostr-relay--drain-verify-queue ()
-  "Start queued event verifications up to the concurrency limit."
-  (setq nostr-relay--verify-drain-timer nil)
-  (while (and nostr-relay--verify-queue
-              (< nostr-relay--verify-inflight
-                 nostr-relay-max-concurrent-verifications))
-    (let ((next (pop nostr-relay--verify-queue)))
-      (nostr-relay--start-verification (car next) (cdr next)))))
-
-(defun nostr-relay--start-verification (url event)
-  "Spawn a verify-event subprocess for EVENT from URL.
-Increments the in-flight counter and decrements it (dispatching the next
-queued event) when the verification resolves."
-  (cl-incf nostr-relay--verify-inflight)
-  (condition-case err
-      (nostr-backend-call
-       "verify-event"
-       `((event . ,event))
-       (lambda (response)
-         (unwind-protect
-             (if (alist-get 'valid response)
-                 (nostr-relay--enqueue-ingestion url event)
-               (nostr-relay--invalid-event
-                url event (alist-get 'reason response)))
-           (nostr-relay--verify-finished)))
-       (lambda (response stderr _status)
-         (unwind-protect
-             (let ((stderr-message (string-trim (or stderr ""))))
-               (nostr-relay--invalid-event
-                url event
-                (or (alist-get 'message (alist-get 'error response))
-                    (unless (string-empty-p stderr-message)
-                      stderr-message)
-                    "signature verification failed")))
-           (nostr-relay--verify-finished))))
-    (error
-     (nostr-relay--invalid-event
-      url event (error-message-string err))
-     (nostr-relay--verify-finished)))
-  'pending-verification)
+(add-hook 'nostr-daemon-event-hook #'nostr-relay--on-daemon-notification)
 
 (defun nostr-relay--search-profile-query-key (query)
   "Return normalized key for profile search QUERY."
@@ -792,117 +678,6 @@ queued event) when the verification resolves."
             (nostr-relay-fetch-author pubkey nostr-default-feed-limit)
             (nostr-relay-fetch-author-from-urls
              pubkey nostr-default-feed-limit nostr-relay-search-author-urls t)))))))
-
-(cl-defun nostr-relay--handle-event (url sub-id event)
-  "Handle EVENT from URL without blocking relay IO.
-When `nostr-relay-verify-events' is non-nil, EVENT is signature-verified via
-the backend before storage; verification subprocesses are bounded by
-`nostr-relay-max-concurrent-verifications'.  Events arriving while at the cap
-are queued up to `nostr-relay-max-queued-verifications'.
-All relay-supplied events are verified the same way, including Primal cache
-profile-search hints, so a compromised relay cannot forge profile metadata by
-returning a kind-0 event with a bogus signature.
-Event ids already verified and stored this session are short-circuited: only
-relay provenance is recorded so per-note relay counts stay correct, while the
-expensive verify subprocess and full store path are skipped."
-  (nostr-relay--maybe-fetch-profile-search-author sub-id event)
-  ;; Event ids are content hashes, so a repeated id is byte-identical to the
-  ;; already-verified copy; re-verifying or re-storing it is pure waste.
-  (when-let* ((id (alist-get 'id event)))
-    (when (gethash id nostr-relay--verified-event-ids)
-      ;; Still record provenance so per-note relay-count stays correct.
-      (nostr-db-store-event-relay (nostr-event-normalize event url))
-      (cl-return-from nostr-relay--handle-event 'already-verified)))
-  (if (not nostr-relay-verify-events)
-      (nostr-relay--store-verified-event url event)
-    (if (>= nostr-relay--verify-inflight
-            nostr-relay-max-concurrent-verifications)
-        (if (>= (length nostr-relay--verify-queue)
-                nostr-relay-max-queued-verifications)
-            (progn
-              (nostr-db-store-relay-status
-               url
-               "dropped-event"
-               (format "%s verification queue full"
-                       (or (alist-get 'id event) "(unknown event)")))
-              'dropped-verification)
-          (setq nostr-relay--verify-queue
-                (nconc nostr-relay--verify-queue (list (cons url event))))
-          'pending-verification)
-      (nostr-relay--start-verification url event))))
-
-(defun nostr-relay--maybe-store-notification (event)
-  "Store notifications caused by EVENT for `nostr-current-pubkey'."
-  (when (and (boundp 'nostr-current-pubkey) nostr-current-pubkey)
-    (let ((before (nostr-relay--unread-notification-count))
-          (event-id (alist-get 'id event))
-          (pubkey (alist-get 'pubkey event))
-          (created-at (or (alist-get 'created_at event)
-                          (alist-get 'created-at event))))
-      (unwind-protect
-          (pcase (alist-get 'kind event)
-            (1
-             (cond
-              ((member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
-               (nostr-db-store-notification
-                (format "%s-mention" event-id) "mention" event-id pubkey nostr-current-pubkey created-at))
-              ((and (alist-get 'reply-id event)
-                    (equal (nostr-db-event-pubkey (alist-get 'reply-id event)) nostr-current-pubkey))
-               (nostr-db-store-notification
-                (format "%s-reply" event-id) "reply" event-id pubkey nostr-current-pubkey created-at))))
-            (7
-             (when-let* ((target (nostr-event-reaction-event-id event)))
-               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-                 (nostr-db-store-notification
-                  (format "%s-reaction" event-id) "reaction" event-id pubkey nostr-current-pubkey created-at))))
-            (6
-             (when-let* ((target (nostr-event-repost-event-id event)))
-               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-                 (nostr-db-store-notification
-                  (format "%s-repost" event-id) "repost" event-id pubkey nostr-current-pubkey created-at))))
-            (9735
-             (when-let* ((target (nostr-event-zap-target-event-id event)))
-               (when (equal (nostr-db-event-pubkey target) nostr-current-pubkey)
-                 (nostr-db-store-notification
-                  (format "%s-zap" event-id) "zap" event-id pubkey nostr-current-pubkey created-at))))
-            (3
-             (when (member nostr-current-pubkey (nostr-event-mentioned-pubkeys event))
-               (nostr-db-store-notification
-                (format "%s-follow" event-id) "follow" event-id pubkey nostr-current-pubkey created-at))))
-        (when (/= before (nostr-relay--unread-notification-count))
-          (nostr-relay--update-mode-line))))))
-
-(defun nostr-relay-handle-frame (url payload)
-  "Handle relay frame PAYLOAD from URL."
-  (pcase (json-parse-string payload :object-type 'alist :array-type 'list :false-object nil)
-    (`("EVENT" ,sub-id ,event)
-     (nostr-relay--handle-event url sub-id event))
-    (`("EOSE" ,sub-id)
-     (nostr-db-store-relay-status url "eose" sub-id)
-     (nostr-relay--note-profile-eose sub-id)
-     (nostr-relay--note-search-eose sub-id)
-     (nostr-relay--handle-eose url sub-id))
-    (`("NOTICE" . ,rest)
-     (nostr-db-store-relay-status url "notice" (car rest)))
-    (`("CLOSED" ,sub-id . ,rest)
-     (remhash (nostr-relay--subscription-key url sub-id)
-              nostr-relay--subscriptions)
-     (nostr-relay--note-profile-eose sub-id)
-     (nostr-relay--note-search-eose sub-id)
-     (remhash sub-id nostr-relay--search-profile-queries)
-     (nostr-db-store-relay-status url "closed" (car rest)))
-    (`("OK" ,event-id ,accepted . ,rest)
-     (let ((message (car rest)))
-       (nostr-db-store-publish-receipt
-        event-id
-        url
-        (if accepted "accepted" "rejected")
-        message)
-       (nostr-db-store-relay-status
-        url
-        (if accepted "ok" "rejected")
-        (format "%s %s" event-id (or message "")))))
-    (_ nil)))
 
 (defun nostr-relay--since-for-pubkeys (pubkeys)
   "Return a since timestamp for PUBKEYS with overlap."
@@ -1015,9 +790,8 @@ timer also marks an in-progress session)."
     (setq nostr-relay--sync-timeout-timer nil)
     (clrhash nostr-relay--syncing-subs)
     (when was-syncing
-      ;; Drain any verified events still queued in the background so the final
-      ;; refresh (scheduled by the hook below) reflects every ingested event.
-      (nostr-relay--flush-ingestion)
+      ;; The daemon stores events as they arrive, so by EOSE the cache already
+      ;; reflects them; just trigger the final refresh.
       (run-hooks 'nostr-relay-sync-finished-hook))))
 
 (defun nostr-relay--note-feed-subscription (url sub-id)
@@ -1066,133 +840,37 @@ timer also marks an in-progress session)."
     (nostr-relay-subscribe-follows-feed url nostr-current-pubkey))
   (nostr-relay--note-feed-eose url sub-id))
 
-(defun nostr-relay--ws-endpoint (url)
-  "Return (HOST . PORT) for websocket URL.
-Defaults the port to 443 for wss and 80 for ws when URL omits it."
-  (let* ((parsed (url-generic-parse-url url))
-         (host (url-host parsed))
-         (raw-port (url-portspec parsed))
-         (port (if (and (integerp raw-port) (> raw-port 0))
-                   raw-port
-                 (if (equal (url-type parsed) "wss") 443 80))))
-    (unless (and (stringp host) (not (string-empty-p host)))
-      (error "Relay URL has no host: %s" url))
-    (cons host port)))
-
-(defun nostr-relay--open-websocket (url pubkey)
-  "Open and register the relay websocket to URL for PUBKEY.
-Called only after URL was shown reachable by `nostr-relay-open's probe, so the
-eager handshake send in `websocket-open' blocks only for the brief remaining
-connect rather than a full unreachable-host timeout.  Returns the websocket or
-nil on failure."
-  (condition-case err
-      (let (timeout-timer ws)
-        (setq ws (websocket-open
-                  url
-                  :nowait t
-                  :on-message (lambda (_ws frame)
-                                (nostr-relay-handle-frame url (websocket-frame-payload frame)))
-                  :on-open (lambda (_ws)
-                             (when (timerp timeout-timer)
-                               (cancel-timer timeout-timer))
-                             (nostr-db-store-relay-status url "open")
-                             (nostr-relay--drain-pending-subscriptions url)
-                             (when pubkey
-                               (nostr-relay-subscribe-personal url pubkey)
-                               (nostr-relay-subscribe-follows-feed url pubkey))
-                             (when (fboundp 'nostr-visible-note-ids)
-                               (nostr-relay-subscribe-visible-reactions
-                                (nostr-visible-note-ids) nil (list url))))
-                  :on-error (lambda (_ws _type err)
-                              ;; HTTP upgrade failures such as relay-side 503s
-                              ;; should mark only that relay unhealthy, not emit
-                              ;; websocket.el's global callback warning.
-                              (when (timerp timeout-timer)
-                                (cancel-timer timeout-timer))
-                              (remhash url nostr-relay--connections)
-                              (nostr-db-store-relay-status
-                               url "error" (websocket-format-error err))
-                              (nostr-relay--update-mode-line))
-                  :on-close (lambda (_ws)
-                              (when (timerp timeout-timer)
-                                (cancel-timer timeout-timer))
-                              (nostr-db-store-relay-status url "closed"))))
-        (setq timeout-timer
-              (run-at-time
-               nostr-relay-open-timeout-seconds
-               nil
-               (lambda ()
-                 (when (and (websocket-p ws) (not (websocket-openp ws)))
-                   (ignore-errors (websocket-close ws))
-                   (nostr-db-store-relay-status
-                    url "timeout" "Connection attempt timed out")))))
-        (puthash url ws nostr-relay--connections)
-        (nostr-relay--update-mode-line)
-        ws)
-    (error
-     (nostr-db-store-relay-status url "error" (error-message-string err))
-     nil)))
+(defun nostr-relay--ensure-daemon (pubkey)
+  "Start the relay daemon for PUBKEY if it is not already running.
+The daemon connects to relays, verifies, and writes the cache; Emacs only drives
+it and reads the database back."
+  (unless (nostr-daemon-running-p)
+    (nostr-daemon-start nostr-db-path
+                        (nostr-relay-urls-for-pubkey pubkey)
+                        pubkey))
+  (nostr-daemon-set-pubkey pubkey))
 
 (defun nostr-relay-open (url pubkey)
-  "Connect to relay URL for PUBKEY without blocking on a slow TCP connect.
-
-`websocket-open' sends the HTTP upgrade with `process-send-string' while the
-`:nowait' socket is still in the `connect' state (its handshake guard only
-matches the connecting status, so the send cannot be deferred to the sentinel).
-Writing to a not-yet-connected socket blocks Emacs in C until the connection
-completes or the OS connect timeout elapses, so a single slow or unreachable
-relay freezes the whole session at startup.
-
-To stay non-blocking, first probe reachability with a `:nowait' socket that is
-never written to -- and therefore cannot block -- bounded by a one-shot timer of
-`nostr-relay-open-timeout-seconds'.  Only once the probe reports `open' do we
-hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
-\"timeout\"/\"error\" status and never reaches `websocket-open'."
-  (unless (or (gethash url nostr-relay--connections)
-              (gethash url nostr-relay--connecting))
-    (condition-case err
-        (let* ((endpoint (nostr-relay--ws-endpoint url))
-               probe timer)
-          (cl-labels
-              ((finish (status-fn)
-                 ;; Tear down probe + timer once, then run STATUS-FN.  Guarded
-                 ;; by the connecting table so a late timer/sentinel after
-                 ;; teardown (or `nostr-relay-disconnect-all') is a no-op.
-                 (when (gethash url nostr-relay--connecting)
-                   (remhash url nostr-relay--connecting)
-                   (when (timerp timer) (cancel-timer timer))
-                   (when (process-live-p probe) (delete-process probe))
-                   (when status-fn (funcall status-fn))
-                   (nostr-relay--update-mode-line))))
-            (setq probe
-                  (make-network-process
-                   :name (format "nostr-probe %s" url)
-                   :host (car endpoint) :service (cdr endpoint)
-                   :nowait t :buffer nil
-                   :filter #'ignore
-                   :sentinel
-                   (lambda (p _change)
-                     (pcase (process-status p)
-                       ('open
-                        (finish (lambda () (nostr-relay--open-websocket url pubkey))))
-                       ((or 'failed 'closed 'exit 'signal)
-                        (finish (lambda ()
-                                  (nostr-db-store-relay-status
-                                   url "error" "Could not connect to relay"))))))))
-            (puthash url probe nostr-relay--connecting)
-            (setq timer
-                  (run-at-time
-                   nostr-relay-open-timeout-seconds nil
-                   (lambda ()
-                     (finish (lambda ()
-                               (nostr-db-store-relay-status
-                                url "timeout" "Connection attempt timed out"))))))
-            (nostr-relay--update-mode-line)
-            probe))
-      (error
-       (remhash url nostr-relay--connecting)
-       (nostr-db-store-relay-status url "error" (error-message-string err))
-       nil))))
+  "Connect relay URL for PUBKEY through the daemon and prime its subscriptions.
+The daemon owns the websocket and connects in the background, so this never
+blocks: it registers URL with the daemon, marks it connected for Emacs's own
+bookkeeping, flushes any subscriptions queued before the relay existed, and
+issues the personal/follows/visible-reaction subscriptions the websocket
+`on-open' handler used to send."
+  (nostr-relay--ensure-daemon pubkey)
+  (unless (gethash url nostr-relay--connections)
+    (nostr-daemon-add-relay url)
+    ;; `t' is the connected sentinel; the daemon holds the real socket.
+    (puthash url t nostr-relay--connections)
+    (nostr-relay--drain-pending-subscriptions url)
+    (when pubkey
+      (nostr-relay-subscribe-personal url pubkey)
+      (nostr-relay-subscribe-follows-feed url pubkey))
+    (when (fboundp 'nostr-visible-note-ids)
+      (nostr-relay-subscribe-visible-reactions
+       (nostr-visible-note-ids) nil (list url)))
+    (nostr-relay--update-mode-line))
+  t)
 
 (defun nostr-relay-connect-all (pubkey)
   "Connect all configured relays for PUBKEY."
@@ -1255,23 +933,15 @@ hand off to `nostr-relay--open-websocket'; an unreachable relay simply records a
     (cancel-timer nostr-relay--connect-timer))
   (setq nostr-relay--connect-timer nil
         nostr-relay--connect-queue nil)
-  ;; Tear down in-flight reachability probes.  Clear the table first so any
-  ;; sentinel triggered by `delete-process' finds nothing and no-ops.
-  (let (probes)
-    (maphash (lambda (_url probe) (push probe probes)) nostr-relay--connecting)
-    (clrhash nostr-relay--connecting)
-    (dolist (probe probes)
-      (when (process-live-p probe) (delete-process probe))))
+  ;; The daemon owns every relay socket; stopping it tears them all down.
+  (nostr-daemon-stop)
+  (clrhash nostr-relay--connecting)
   ;; Reset syncing state without running the finished hook (this is a teardown,
   ;; not a completed sync).
   (when (timerp nostr-relay--sync-timeout-timer)
     (cancel-timer nostr-relay--sync-timeout-timer))
   (setq nostr-relay--sync-timeout-timer nil)
   (clrhash nostr-relay--syncing-subs)
-  (maphash (lambda (_url ws)
-             (when (websocket-openp ws)
-               (websocket-close ws)))
-           nostr-relay--connections)
 	  (clrhash nostr-relay--connections)
 	  (clrhash nostr-relay--subscriptions)
 	  (clrhash nostr-relay--profile-requests)
@@ -1315,26 +985,36 @@ open relays.  Otherwise return every open relay."
                          nostr-current-pubkey
                          (nostr-relay--preference-urls nostr-current-pubkey 'write)))
         urls)
-    (maphash (lambda (url ws)
-               (when (and (websocket-openp ws)
+    (maphash (lambda (url _connected)
+               (when (and (nostr-relay--connection-open-p url)
                           (or (not write-urls) (member url write-urls)))
                  (push url urls)))
              nostr-relay--connections)
     (nreverse urls)))
 
+(defun nostr-relay--client-message-event (client-message)
+  "Return the event alist embedded in a relay-ready CLIENT-MESSAGE string."
+  (pcase (ignore-errors
+           (json-parse-string client-message
+                              :object-type 'alist
+                              :array-type 'list
+                              :false-object nil))
+    (`("EVENT" ,event) event)
+    (_ nil)))
+
 (defun nostr-relay-send-client-message-to-urls (client-message urls)
-  "Send relay-ready CLIENT-MESSAGE string to open relay URLS.
-Return the number of relays that received the message."
-  (let ((event-id (nostr-relay--client-message-event-id client-message))
-        (sent 0))
-    (dolist (url urls)
-      (when-let* ((ws (gethash url nostr-relay--connections)))
-        (when (websocket-openp ws)
-                 (when event-id
-                   (nostr-db-store-publish-receipt event-id url "pending"))
-                 (websocket-send-text ws client-message)
-          (setq sent (1+ sent)))))
-    sent))
+  "Publish CLIENT-MESSAGE's signed event to relay URLS through the daemon.
+Records a `pending' receipt per relay immediately (the daemon updates it to
+`sent'/`failed' as relays answer) and returns the number of targeted relays."
+  (let ((event (nostr-relay--client-message-event client-message)))
+    (if (and event urls)
+        (let ((event-id (alist-get 'id event)))
+          (when event-id
+            (dolist (url urls)
+              (nostr-db-store-publish-receipt event-id url "pending")))
+          (nostr-daemon-publish event urls)
+          (length urls))
+      0)))
 
 (defun nostr-relay-send-client-message (client-message)
   "Broadcast relay-ready CLIENT-MESSAGE string to selected open relays.
