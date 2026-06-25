@@ -41,6 +41,12 @@ per event during initial sync."
 (defvar nostr-daemon--stdout-acc ""
   "Accumulator for partial stdout lines from the daemon.")
 
+(defvar nostr-daemon--pending-lines nil
+  "Complete stdout lines parsed but not yet handled, in reverse arrival order.")
+
+(defvar nostr-daemon--draining nil
+  "Non-nil while the outermost filter invocation is handling pending lines.")
+
 (defvar nostr-daemon--refresh-timer nil
   "Pending debounced refresh timer, or nil.")
 
@@ -66,7 +72,9 @@ CURRENT-PUBKEY, when non-nil, lets the daemon derive notification rows.  A
 daemon already running is reused as-is; call `nostr-daemon-stop' first to
 restart with different bootstrap configuration."
   (unless (nostr-daemon-running-p)
-    (setq nostr-daemon--stdout-acc "")
+    (setq nostr-daemon--stdout-acc ""
+          nostr-daemon--pending-lines nil
+          nostr-daemon--draining nil)
     (let* ((stderr (generate-new-buffer " *nostr-daemon-err*"))
            (proc (make-process
                   :name "nostr-relay-daemon"
@@ -147,17 +155,37 @@ existing subscription rather than replacing it."
 ;;;; stdout parsing
 
 (defun nostr-daemon--filter (process chunk)
-  "Process daemon CHUNK from PROCESS, dispatching complete JSON lines."
+  "Queue complete JSON lines from daemon CHUNK and drain them once.
+Line handlers run `emacsql' queries, and `emacsql' pumps process output via
+`accept-process-output', which re-enters this filter.  So parsing and handling
+are kept separate: each invocation only splits whole lines out of the
+accumulator (updating it to the remainder first, so a re-entrant call sees a
+consistent buffer), and only the outermost call drains the queue, in order.
+Without this a re-entrant call corrupts the outer scan and the filter dies
+mid-burst, dropping most events."
   (when (eq process nostr-daemon--process)
     (setq nostr-daemon--stdout-acc (concat nostr-daemon--stdout-acc chunk))
-    ;; Process every complete newline-terminated line, keeping the remainder.
-    (let ((start 0) newline)
-      (while (setq newline (string-search "\n" nostr-daemon--stdout-acc start))
-        (let ((line (substring nostr-daemon--stdout-acc start newline)))
-          (setq start (1+ newline))
+    (let (newline)
+      (while (setq newline (string-search "\n" nostr-daemon--stdout-acc))
+        (let ((line (substring nostr-daemon--stdout-acc 0 newline)))
+          (setq nostr-daemon--stdout-acc
+                (substring nostr-daemon--stdout-acc (1+ newline)))
           (unless (string-empty-p (string-trim line))
-            (nostr-daemon--handle-line line))))
-      (setq nostr-daemon--stdout-acc (substring nostr-daemon--stdout-acc start)))))
+            (push line nostr-daemon--pending-lines)))))
+    (unless nostr-daemon--draining
+      (let ((nostr-daemon--draining t))
+        (while nostr-daemon--pending-lines
+          (let ((batch (nreverse nostr-daemon--pending-lines)))
+            (setq nostr-daemon--pending-lines nil)
+            (dolist (line batch)
+              ;; One malformed line or failing handler must not abort the batch
+              ;; (and so stall every later event in this burst).
+              (condition-case err
+                  (nostr-daemon--handle-line line)
+                (error
+                 (when (bound-and-true-p nostr-debug-logging)
+                   (message "[nostr] daemon line failed: %s"
+                            (error-message-string err))))))))))))
 
 (defun nostr-daemon--handle-line (line)
   "Parse one notification LINE and dispatch it."

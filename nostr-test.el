@@ -2499,6 +2499,8 @@ relays answer; Emacs only seeds the pending rows and dispatches."
   "The stdout filter parses whole JSON lines and buffers partial ones."
   (let ((nostr-daemon--process 'sentinel)
         (nostr-daemon--stdout-acc "")
+        (nostr-daemon--pending-lines nil)
+        (nostr-daemon--draining nil)
         (nostr-daemon--refresh-timer nil)
         seen)
     (let ((nostr-daemon-event-hook
@@ -2517,6 +2519,34 @@ relays answer; Emacs only seeds the pending rows and dispatches."
     (should (timerp nostr-daemon--refresh-timer))
     (cancel-timer nostr-daemon--refresh-timer)
     (setq nostr-daemon--refresh-timer nil)))
+
+(ert-deftest nostr-daemon-filter-is-reentrancy-safe ()
+  "A handler that re-enters the filter (as emacsql does) must not corrupt parsing.
+Line handlers run emacsql queries, which pump process output and re-enter the
+filter mid-handling.  Every line must still be handled exactly once, in order,
+with no `Args out of range' from a mutated accumulator."
+  (let ((nostr-daemon--process 'sentinel)
+        (nostr-daemon--stdout-acc "")
+        (nostr-daemon--pending-lines nil)
+        (nostr-daemon--draining nil)
+        handled)
+    (let ((nostr-daemon-event-hook
+           (list (lambda (n)
+                   (push (alist-get 'id n) handled)
+                   ;; Mimic emacsql pumping output: feed more lines re-entrantly
+                   ;; while handling the first one.
+                   (when (equal (alist-get 'id n) "a")
+                     (nostr-daemon--filter
+                      'sentinel
+                      "{\"event\":\"stored\",\"id\":\"b\"}\n{\"event\":\"stored\",\"id\":\"c\"}\n"))))))
+      (nostr-daemon--filter 'sentinel "{\"event\":\"stored\",\"id\":\"a\"}\n")
+      ;; All three handled exactly once, in arrival order, accumulator drained.
+      (should (equal (reverse handled) '("a" "b" "c")))
+      (should (string-empty-p nostr-daemon--stdout-acc))
+      (should (null nostr-daemon--pending-lines)))
+    (when (timerp nostr-daemon--refresh-timer)
+      (cancel-timer nostr-daemon--refresh-timer)
+      (setq nostr-daemon--refresh-timer nil))))
 
 (ert-deftest nostr-daemon-subscribe-encodes-filter-vectors ()
   "Subscribe commands serialize filters as JSON arrays of objects."
