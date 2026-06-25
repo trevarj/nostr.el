@@ -11,6 +11,13 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+
+    // The relay daemon is long-running and streams stdin line-by-line, so it
+    // must not block on reading stdin to EOF like the one-shot commands do.
+    if args.command == "relay-daemon" {
+        return nostr_el_backend::daemon::run();
+    }
+
     let mut input = String::new();
 
     if let Err(err) = io::stdin().read_to_string(&mut input) {

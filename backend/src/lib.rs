@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
 
+pub mod daemon;
+pub mod lisp;
+pub mod store;
+
 pub struct CommandResult {
     pub ok: bool,
     pub body: String,
@@ -143,7 +147,8 @@ fn capabilities(input: &str) -> Result<Value, ProtocolError> {
             "verify-event",
             "nip19-decode",
             "nip19-encode",
-            "blossom-auth"
+            "blossom-auth",
+            "relay-daemon"
         ],
         "protocol_version": 1,
         "backend": "nostr-el-backend"

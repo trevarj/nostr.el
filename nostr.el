@@ -26,6 +26,7 @@
 (require 'cl-lib)
 (require 'nostr-backend)
 (require 'nostr-actions)
+(require 'nostr-daemon)
 (require 'nostr-db)
 (require 'nostr-discover)
 (require 'nostr-dispatch)

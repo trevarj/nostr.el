@@ -2786,5 +2786,47 @@ relay so per-note relay counts stay correct, while the expensive
       (should (commandp command))
       (should (eq (lookup-key map (kbd "?")) command)))))
 
+;;;; Relay daemon driver
+
+(ert-deftest nostr-daemon-filter-dispatches-complete-lines ()
+  "The stdout filter parses whole JSON lines and buffers partial ones."
+  (let ((nostr-daemon--process 'sentinel)
+        (nostr-daemon--stdout-acc "")
+        (nostr-daemon--refresh-timer nil)
+        seen)
+    (let ((nostr-daemon-event-hook
+           (list (lambda (n) (push (alist-get 'event n) seen)))))
+      ;; Two complete lines plus a partial third.
+      (nostr-daemon--filter
+       'sentinel
+       "{\"event\":\"ready\"}\n{\"event\":\"eose\",\"sub\":\"x\"}\n{\"event\":\"sto")
+      (should (equal (reverse seen) '("ready" "eose")))
+      ;; The partial line is held until its newline arrives.
+      (should (equal nostr-daemon--stdout-acc "{\"event\":\"sto"))
+      (nostr-daemon--filter 'sentinel "red\",\"id\":\"abc\"}\n")
+      (should (equal (reverse seen) '("ready" "eose" "stored")))
+      (should (string-empty-p nostr-daemon--stdout-acc)))
+    ;; A `stored' line arms the debounced refresh timer.
+    (should (timerp nostr-daemon--refresh-timer))
+    (cancel-timer nostr-daemon--refresh-timer)
+    (setq nostr-daemon--refresh-timer nil)))
+
+(ert-deftest nostr-daemon-subscribe-encodes-filter-vectors ()
+  "Subscribe commands serialize filters as JSON arrays of objects."
+  (let (sent)
+    (cl-letf (((symbol-function 'nostr-daemon-running-p) (lambda () t))
+              ((symbol-function 'process-send-string)
+               (lambda (_proc str) (setq sent (concat sent str)))))
+      (let ((nostr-daemon--process 'sentinel))
+        (nostr-daemon-subscribe "feed" (list '((kinds . [1]) (limit . 5))))))
+    (let ((parsed (nostr-backend--json-read (string-trim sent))))
+      (should (equal (alist-get 'op parsed) "subscribe"))
+      (should (equal (alist-get 'id parsed) "feed"))
+      (let ((filter (car (alist-get 'filters parsed))))
+        (should (equal (alist-get 'kinds filter) '(1)))
+        (should (equal (alist-get 'limit filter) 5))))
+    ;; Each command must be newline-terminated so the daemon reads one per line.
+    (should (string-suffix-p "\n" sent))))
+
 (provide 'nostr-test)
 ;;; nostr-test.el ends here
