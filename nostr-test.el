@@ -1126,13 +1126,13 @@ state set by one test does not bleed into another (e.g. backfill gating)."
         (should (= (nostr-db-discover-next-cursor "primal" "global" "trending") 7))))))
 
 (ert-deftest nostr-timeline-refresh-backfills-visible-profile-metadata ()
-  "Rendering a feed requests missing profile and note metadata."
+  "Rendering a feed batch-requests missing avatars and note metadata."
   (nostr-test-with-db
     (nostr-test-store-text-note "global-author" "alice-pubkey" 100 "global note")
     (let (requested-profiles requested-events)
-      (cl-letf (((symbol-function 'nostr-relay-fetch-profile)
-                 (lambda (pubkey &optional _url)
-                   (push pubkey requested-profiles)
+      (cl-letf (((symbol-function 'nostr-relay-fetch-profiles-batch)
+                 (lambda (pubkeys)
+                   (setq requested-profiles (append requested-profiles pubkeys))
                    1))
                 ((symbol-function 'nostr-relay-fetch-event-metadata)
                  (lambda (event-ids &optional _limit)
@@ -2051,29 +2051,57 @@ Profile backfill is bounded and deferred to the visible-notes render path."
            (kind . 1) (tags . nil) (content . "hello") (sig . "sig"))))
       (should (null sent)))))
 
-(ert-deftest nostr-timeline-backfill-fetches-visible-author-profiles ()
+(ert-deftest nostr-timeline-backfill-batches-visible-author-profiles ()
   "The render path backfills missing kind-0 metadata for visible authors.
-Profiles are fetched with auto-closing one-shot subscriptions so they free the
-relay's subscription slot."
+All authors are fetched in one auto-closing batched subscription (eager avatars),
+not one subscription per author."
   (nostr-test-with-db
     (let ((nostr-relay--connections (make-hash-table :test #'equal))
-          (nostr-relay--profile-requests (make-hash-table :test #'equal))
+          (nostr-relay--profile-batch-requests (make-hash-table :test #'equal))
           sent)
       (puthash "wss://relay.example" t nostr-relay--connections)
       (cl-letf (((symbol-function 'nostr-relay-subscribe)
                  (lambda (url sub-id filters &optional close-on-eose)
                    (push (list url sub-id filters close-on-eose) sent))))
         (nostr-timeline--backfill-profiles
-         '(((id . "note1") (pubkey . "alice-pubkey") (kind . 1)))))
+         '(((id . "n1") (pubkey . "alice") (kind . 1))
+           ((id . "n2") (pubkey . "bob") (kind . 1))
+           ((id . "n3") (pubkey . "alice") (kind . 1)))))
+      ;; One subscription for both distinct authors, auto-closing.
       (should (= (length sent) 1))
       (pcase-let ((`(,url ,sub-id ,filters ,close) (car sent)))
         (should (equal url "wss://relay.example"))
-        (should (string-prefix-p "profile-" sub-id))
+        (should (string-prefix-p "profiles-" sub-id))
         (should close)
-        (should (equal (alist-get "authors" (car filters) nil nil #'equal)
-                       '("alice-pubkey")))
+        (should (equal (sort (copy-sequence
+                              (alist-get "authors" (car filters) nil nil #'equal))
+                             #'string<)
+                       '("alice" "bob")))
         (should (equal (alist-get "kinds" (car filters) nil nil #'equal)
-                       (list nostr-kind-metadata)))))))
+                       (list nostr-kind-metadata)))
+        ;; Replaceable kind-0 must not carry a since bound.
+        (should-not (assoc "since" (car filters)))))))
+
+(ert-deftest nostr-relay-fetch-profiles-batch-skips-cached-and-dedupes ()
+  "Batched profile fetch skips already-cached authors and TTL-deduped repeats."
+  (nostr-test-with-db
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
+          (nostr-relay--profile-batch-requests (make-hash-table :test #'equal))
+          authors)
+      (puthash "wss://relay.example" t nostr-relay--connections)
+      (nostr-db-store-profile-event
+       '((pubkey . "cached") (created_at . 1) (kind . 0)
+         (content . "{\"name\":\"c\"}")))
+      (cl-letf (((symbol-function 'nostr-relay-subscribe)
+                 (lambda (_url _sub-id filters &optional _close)
+                   (setq authors (alist-get "authors" (car filters) nil nil #'equal)))))
+        (nostr-relay-fetch-profiles-batch '("cached" "fresh" "fresh"))
+        ;; "cached" is skipped, "fresh" deduped to one entry.
+        (should (equal authors '("fresh")))
+        ;; A second call within the TTL issues nothing for the same author.
+        (setq authors :unset)
+        (nostr-relay-fetch-profiles-batch '("fresh"))
+        (should (eq authors :unset))))))
 
 (ert-deftest nostr-relay-mode-line-shows-ingestion-and-profile-backfill ()
   "Relay ingestion updates a compact global mode-line loading spinner."

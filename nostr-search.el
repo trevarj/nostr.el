@@ -201,6 +201,9 @@
          (profiles (nostr-search--select-profiles nostr-search-query))
          (results (nostr-search--select-local nostr-search-query))
          (total (+ (length profiles) (length results))))
+    ;; Eager avatars for every author in the search results.
+    (nostr-relay-fetch-profiles-batch
+     (mapcar (lambda (event) (alist-get 'pubkey event)) results))
     (let ((ids (mapcar (lambda (event) (alist-get 'id event)) results)))
       (nostr-relay-fetch-event-metadata ids)
       (nostr-relay-subscribe-visible-reactions ids))

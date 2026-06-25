@@ -387,6 +387,10 @@
                    (nostr-notifications--unread-count notifications)
                    (length notifications)))
           (nostr-ui-insert-primary-nav nostr-ui-primary-nav-items 'notifications)
+          ;; Eager avatars for every actor shown in the notifications list.
+          (nostr-relay-fetch-profiles-batch
+           (mapcar (lambda (notification) (alist-get 'actor-pubkey notification))
+                   notifications))
           (let ((ids (mapcar (lambda (notification)
                                 (alist-get 'event-id notification))
                               notifications)))

@@ -162,6 +162,9 @@ so untrusted relay data cannot cause an unbounded loop."
      (if root-id
          (format "Focused conversation for %s." root-id)
        "Focused conversation."))
+    ;; Eager avatars for every author in the thread.
+    (nostr-relay-fetch-profiles-batch
+     (mapcar (lambda (event) (alist-get 'pubkey event)) events))
     (let ((context-ids (nostr-thread--context-ids nostr-thread-root-event events)))
       (nostr-relay-fetch-event-metadata context-ids)
       (nostr-relay-subscribe-visible-reactions context-ids)

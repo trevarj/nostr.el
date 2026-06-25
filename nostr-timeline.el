@@ -167,15 +167,18 @@ reaction, repost, reply, and zap subscriptions across every connected relay."
     (_ (nostr-db-select-account-feed nostr-timeline-current-pubkey nostr-timeline-limit))))
 
 (defun nostr-timeline--backfill-profiles (events)
-  "Request missing profile metadata for authors in EVENTS."
-  (dolist (event events)
-    (nostr-relay-fetch-profile (alist-get 'pubkey event))))
+  "Eagerly fetch missing author profiles for EVENTS in one batched subscription.
+Avatars need the kind-0 profile cached; batching every rendered author into a
+single auto-closing request loads them eagerly without a subscription per note."
+  (nostr-relay-fetch-profiles-batch
+   (mapcar (lambda (event) (alist-get 'pubkey event)) events)))
 
 (defun nostr-timeline--backfill-visible-metadata (events)
-  "Request relay metadata for visible timeline EVENTS."
-  (setq events (seq-take events nostr-timeline-metadata-backfill-limit))
-  (nostr-timeline--backfill-profiles events)
-  (let ((ids (mapcar (lambda (event) (alist-get 'id event)) events)))
+  "Request reaction and interaction metadata for the top visible EVENTS.
+Profiles are handled separately and eagerly; the heavier reaction/reply/zap
+backfill stays capped at `nostr-timeline-metadata-backfill-limit'."
+  (let* ((capped (seq-take events nostr-timeline-metadata-backfill-limit))
+         (ids (mapcar (lambda (event) (alist-get 'id event)) capped)))
     (nostr-relay-fetch-event-metadata ids)
     (nostr-relay-subscribe-visible-reactions ids)))
 
@@ -224,11 +227,12 @@ When FORCE is non-nil, request a fresh provider/relay page."
                                    (kind kind)))
     (let ((events (nostr-timeline--select-events)))
       (nostr-ui-prime-caches events)
-      ;; The initial-sync REQs already cover followed-author metadata and
-      ;; the feed itself; re-issuing profile/event-metadata/reaction backfill
-      ;; subscriptions on every burst refresh just spawns more relay traffic
-      ;; that feeds straight back into verify -> store -> refresh.  Defer it
-      ;; until the sync settles, then run once on the first post-sync refresh.
+      ;; Avatars load eagerly: fetch missing author profiles on every refresh,
+      ;; even mid-sync, in a single batched auto-closing subscription.
+      (nostr-timeline--backfill-profiles events)
+      ;; The heavier reaction/reply/zap/repost backfill stays deferred until the
+      ;; sync settles, so a burst refresh does not spawn waves of relay traffic
+      ;; that feed straight back into store -> refresh.
       (unless (nostr-relay-syncing-p)
         (nostr-timeline--backfill-missing-reposts)
         (nostr-timeline--backfill-visible-metadata events))

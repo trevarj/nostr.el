@@ -238,6 +238,11 @@ drained in bounded batches by `nostr-relay--drain-ingestion-queue'.")
 (defvar nostr-relay--profile-requests (make-hash-table :test #'equal)
   "Pubkeys with in-flight profile metadata requests.")
 
+(defvar nostr-relay--profile-batch-requests (make-hash-table :test #'equal)
+  "Pubkey to last batched profile-fetch time, TTL-suppressed.
+Tracks eager avatar fetches separately from `nostr-relay--profile-requests' so a
+batch does not feed the mode-line pending-profile spinner.")
+
 (defvar nostr-relay--profile-request-counts (make-hash-table :test #'equal)
   "Pubkeys to remaining relay EOSE responses for profile metadata requests.")
 
@@ -955,6 +960,7 @@ issues the personal/follows/visible-reaction subscriptions the websocket
 	  (clrhash nostr-relay--connections)
 	  (clrhash nostr-relay--subscriptions)
 	  (clrhash nostr-relay--profile-requests)
+	  (clrhash nostr-relay--profile-batch-requests)
 	  (clrhash nostr-relay--profile-request-counts)
 	  (clrhash nostr-relay--profile-request-subscriptions)
 	  (clrhash nostr-relay--event-metadata-requests)
@@ -1198,6 +1204,39 @@ Return the number of relay subscriptions started."
                  nostr-relay--connections))
       (nostr-relay--track-profile-request pubkey sub-id sent)
       sent)))
+
+(defun nostr-relay-fetch-profiles-batch (pubkeys)
+  "Fetch kind-0 metadata for all uncached PUBKEYS in one subscription per relay.
+Eager avatar loading: collect the authors that have no cached profile and were
+not fetched within `nostr-relay-event-metadata-request-ttl', then issue a single
+auto-closing kind-0 subscription for the whole batch.  Profiles are replaceable
+and frequently old, so the filter carries no `since'.  One subscription for many
+authors is far cheaper than `nostr-relay-fetch-profile' per author and does not
+exhaust relay subscription slots.  Return the number of relay subscriptions
+started."
+  (let* ((now (float-time))
+         (missing (seq-filter
+                   (lambda (pk)
+                     (and (not (nostr-db-select-profile pk))
+                          (let ((last (gethash pk nostr-relay--profile-batch-requests)))
+                            (or (not last)
+                                (> (- now last)
+                                   nostr-relay-event-metadata-request-ttl)))))
+                   (delete-dups (seq-filter #'stringp (copy-sequence pubkeys)))))
+         (sent 0))
+    (when missing
+      (let ((sub-id (nostr-relay--sub-id "profiles" missing))
+            (filter `(("kinds" . (,nostr-kind-metadata))
+                      ("authors" . ,missing)
+                      ("limit" . ,(length missing)))))
+        (maphash (lambda (url _ws)
+                   (nostr-relay-subscribe url sub-id (list filter) t)
+                   (setq sent (1+ sent)))
+                 nostr-relay--connections)
+        (when (> sent 0)
+          (dolist (pk missing)
+            (puthash pk now nostr-relay--profile-batch-requests)))))
+    sent))
 
 (defun nostr-relay--fresh-event-metadata-ids (event-ids now)
   "Return EVENT-IDS that have not been requested recently as of NOW."

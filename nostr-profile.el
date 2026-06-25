@@ -281,6 +281,9 @@
 
 (defun nostr-profile--backfill-visible-metadata (notes)
   "Request relay metadata for visible profile NOTES."
+  ;; Eager avatars for every author appearing in the profile notes.
+  (nostr-relay-fetch-profiles-batch
+   (mapcar (lambda (event) (alist-get 'pubkey event)) notes))
   (let ((ids (mapcar (lambda (event) (alist-get 'id event)) notes)))
     (nostr-relay-fetch-event-metadata ids)
     (nostr-relay-subscribe-visible-reactions ids)))
