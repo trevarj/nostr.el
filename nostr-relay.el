@@ -90,6 +90,17 @@
   :type 'number
   :group 'nostr)
 
+(defcustom nostr-relay-fetch-window-seconds 12
+  "Seconds a one-shot fetch subscription stays open before it is closed.
+One-shot fetches (profiles, author history, event metadata, missing events) span
+every connected relay under one id.  Relay-side EOSE auto-close cannot be used:
+it tears the subscription down on the FASTEST relay's EOSE, truncating slower
+relays that hold most of the results.  Instead the subscription stays open for
+this window -- long enough for slow relays to answer -- then is closed to free
+the relay's subscription slot."
+  :type 'number
+  :group 'nostr)
+
 (defcustom nostr-relay-max-concurrent-verifications 8
   "Maximum number of concurrent event-signature verification subprocesses.
 Incoming relay events beyond this limit are queued and verified as
@@ -1135,10 +1146,13 @@ open relays.  Otherwise publish to every open relay."
                             url query profile-query limit)))
         (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
-            (nostr-relay-subscribe url sub-id filters t)
+            (nostr-relay-subscribe url sub-id filters)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
+    (when (> sent 0)
+      (run-at-time nostr-relay-fetch-window-seconds nil
+                   #'nostr-relay-close-subscription-all sub-id))
     (nostr-relay--track-search-request sub-id sent)
     sub-id))
 
@@ -1158,10 +1172,28 @@ open relays.  Otherwise publish to every open relay."
   "Request cached profile and public activity for author PUBKEY."
   (let ((sub-id (format "author-%s" (substring (md5 pubkey) 0 12)))
         (filters (nostr-relay--author-filters pubkey (or limit 50))))
-    (maphash (lambda (url _ws)
-               (nostr-relay-subscribe url sub-id filters t))
-             nostr-relay--connections)
+    (nostr-relay--fetch sub-id filters)
     sub-id))
+
+(defun nostr-relay--my-posts-filter (pubkey &optional until)
+  "Return a relay filter for PUBKEY's own posts and reposts.
+With UNTIL, restrict to events older than that timestamp for history paging.
+There is no `since': My Posts backfills the full authored history."
+  (delq nil
+        `(("kinds" . (,nostr-kind-text-note ,nostr-kind-repost))
+          ("authors" . (,pubkey))
+          ,(when until `("until" . ,until))
+          ("limit" . ,nostr-default-feed-limit))))
+
+(defun nostr-relay-fetch-my-posts (pubkey &optional until)
+  "Backfill PUBKEY's own posts via one auto-closing subscription per relay.
+With UNTIL, fetch posts older than that timestamp so the My Posts view can page
+back through the full authored history.  Return the subscriptions started."
+  (let ((sub-id (nostr-relay--sub-id "my-posts" pubkey until))
+        (filter (nostr-relay--my-posts-filter pubkey until)))
+    (if (stringp pubkey)
+        (nostr-relay--fetch sub-id (list filter))
+      0)))
 
 (defun nostr-relay-fetch-author-from-urls (pubkey &optional limit urls track-progress)
   "Request public activity for author PUBKEY from URLS.
@@ -1174,13 +1206,31 @@ When TRACK-PROGRESS is non-nil, show the request as search progress."
       (when (and (stringp url) (not (string-empty-p url)))
         (cl-incf sent)
         (if (nostr-relay--connection-open-p url)
-            (nostr-relay-subscribe url sub-id filters t)
+            (nostr-relay-subscribe url sub-id filters)
           (progn
             (nostr-relay--queue-subscription url sub-id filters)
             (nostr-relay-open url nil)))))
+    (when (> sent 0)
+      (run-at-time nostr-relay-fetch-window-seconds nil
+                   #'nostr-relay-close-subscription-all sub-id))
     (when track-progress
       (nostr-relay--track-search-author-request sub-id sent))
     sub-id))
+
+(defun nostr-relay--fetch (sub-id filters)
+  "Open a one-shot fetch SUB-ID with FILTERS on every connected relay.
+The subscription stays open (no relay-side auto-close, which would truncate slow
+relays) and is closed after `nostr-relay-fetch-window-seconds' so it does not
+linger and exhaust relay subscription slots.  Return the relays subscribed."
+  (let ((sent 0))
+    (maphash (lambda (url _ws)
+               (nostr-relay-subscribe url sub-id filters)
+               (setq sent (1+ sent)))
+             nostr-relay--connections)
+    (when (> sent 0)
+      (run-at-time nostr-relay-fetch-window-seconds nil
+                   #'nostr-relay-close-subscription-all sub-id))
+    sent))
 
 (defun nostr-relay-fetch-profile (pubkey &optional url)
   "Request kind-0 metadata for PUBKEY from URL or all connected relays.
@@ -1194,26 +1244,27 @@ Return the number of relay subscriptions started."
                     ("authors" . (,pubkey))
                     ("limit" . 1)))
           (sent 0))
-      (if url
-          (when (gethash url nostr-relay--connections)
-            (nostr-relay-subscribe url sub-id (list filter) t)
-            (setq sent 1))
-        (maphash (lambda (relay-url _ws)
-                   (nostr-relay-subscribe relay-url sub-id (list filter) t)
-                   (setq sent (1+ sent)))
-                 nostr-relay--connections))
+      (setq sent
+            (if url
+                (if (gethash url nostr-relay--connections)
+                    (progn
+                      (nostr-relay-subscribe url sub-id (list filter))
+                      (run-at-time nostr-relay-fetch-window-seconds nil
+                                   #'nostr-relay-close-subscription-all sub-id)
+                      1)
+                  0)
+              (nostr-relay--fetch sub-id (list filter))))
       (nostr-relay--track-profile-request pubkey sub-id sent)
       sent)))
 
 (defun nostr-relay-fetch-profiles-batch (pubkeys)
-  "Fetch kind-0 metadata for all uncached PUBKEYS in one subscription per relay.
+  "Fetch kind-0 metadata for all uncached PUBKEYS in one subscription.
 Eager avatar loading: collect the authors that have no cached profile and were
 not fetched within `nostr-relay-event-metadata-request-ttl', then issue a single
-auto-closing kind-0 subscription for the whole batch.  Profiles are replaceable
-and frequently old, so the filter carries no `since'.  One subscription for many
-authors is far cheaper than `nostr-relay-fetch-profile' per author and does not
-exhaust relay subscription slots.  Return the number of relay subscriptions
-started."
+windowed kind-0 subscription for the whole batch.  Profiles are replaceable and
+frequently old, so the filter carries no `since'.  One subscription for many
+authors is far cheaper than `nostr-relay-fetch-profile' per author.  Return the
+number of relay subscriptions started."
   (let* ((now (float-time))
          (missing (seq-filter
                    (lambda (pk)
@@ -1229,10 +1280,7 @@ started."
             (filter `(("kinds" . (,nostr-kind-metadata))
                       ("authors" . ,missing)
                       ("limit" . ,(length missing)))))
-        (maphash (lambda (url _ws)
-                   (nostr-relay-subscribe url sub-id (list filter) t)
-                   (setq sent (1+ sent)))
-                 nostr-relay--connections)
+        (setq sent (nostr-relay--fetch sub-id (list filter)))
         (when (> sent 0)
           (dolist (pk missing)
             (puthash pk now nostr-relay--profile-batch-requests)))))
@@ -1269,10 +1317,7 @@ suppressed so frequent UI refreshes do not spam relays."
               (filter `(("kinds" . (,kind))
                         ("#e" . ,ids)
                         ("limit" . ,(or limit (* 4 (length ids)))))))
-          (maphash (lambda (url _ws)
-                     (nostr-relay-subscribe url sub-id (list filter) t)
-                     (setq sent (1+ sent)))
-                   nostr-relay--connections)))
+          (setq sent (+ sent (nostr-relay--fetch sub-id (list filter))))))
         (when (> sent 0)
           (dolist (event-id ids)
             (puthash event-id now nostr-relay--event-metadata-requests))))
@@ -1348,10 +1393,7 @@ that opens after the UI render catch up without disturbing existing relays."
       (let ((sub-id (nostr-relay--sub-id "event-ids" ids))
             (filter `(("ids" . ,ids)
                       ("limit" . ,(or limit (length ids))))))
-        (maphash (lambda (url _ws)
-                   (nostr-relay-subscribe url sub-id (list filter) t)
-                   (setq sent (1+ sent)))
-                 nostr-relay--connections)
+        (setq sent (nostr-relay--fetch sub-id (list filter)))
         (when (> sent 0)
           (dolist (event-id ids)
             (puthash event-id now nostr-relay--event-id-requests)))))
@@ -1388,13 +1430,15 @@ RELAYS, when non-nil, are preferred over the currently connected relay set."
       (dolist (url urls)
         (if (gethash url nostr-relay--connections)
             (progn
-              (nostr-relay-subscribe url sub-id (list filter) t)
+              (nostr-relay-subscribe url sub-id (list filter))
               (setq sent (1+ sent)))
           (nostr-relay--queue-subscription url sub-id (list filter))
           (nostr-relay-open url (and (boundp 'nostr-current-pubkey)
                                      nostr-current-pubkey))))
       (when (> sent 0)
-        (puthash key now nostr-relay--addressable-event-requests)))
+        (puthash key now nostr-relay--addressable-event-requests)
+        (run-at-time nostr-relay-fetch-window-seconds nil
+                     #'nostr-relay-close-subscription-all sub-id)))
     sent))
 
 (provide 'nostr-relay)

@@ -1169,6 +1169,40 @@ state set by one test does not bleed into another (e.g. backfill gating)."
       (should (eq nostr-timeline-feed-kind 'feed))
       (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))))
 
+(ert-deftest nostr-relay-my-posts-filter-has-no-since-and-pages-with-until ()
+  "My Posts backfills full authored history: no since, optional until paging."
+  (let ((filter (nostr-relay--my-posts-filter "me")))
+    (should-not (assoc "since" filter))
+    (should (equal (alist-get "authors" filter nil nil #'equal) '("me")))
+    (should (member nostr-kind-text-note (alist-get "kinds" filter nil nil #'equal)))
+    (should (member nostr-kind-repost (alist-get "kinds" filter nil nil #'equal))))
+  ;; With until, restrict to older history for pagination.
+  (let ((filter (nostr-relay--my-posts-filter "me" 1234)))
+    (should (equal (alist-get "until" filter nil nil #'equal) 1234))))
+
+(ert-deftest nostr-timeline-my-posts-backfills-once-on-entry ()
+  "Entering My Posts backfills own history; refreshing in place does not respawn."
+  (nostr-test-with-db
+    (let ((nostr-relay--connections (make-hash-table :test #'equal))
+          (calls 0))
+      (puthash "wss://relay.example" t nostr-relay--connections)
+      (cl-letf (((symbol-function 'nostr-relay-fetch-my-posts)
+                 (lambda (&rest _) (setq calls (1+ calls)) 1))
+                ;; isolate the test from avatar/metadata relay calls
+                ((symbol-function 'nostr-relay-fetch-profiles-batch) #'ignore)
+                ((symbol-function 'nostr-relay-fetch-event-metadata) #'ignore)
+                ((symbol-function 'nostr-relay-subscribe-visible-reactions) #'ignore))
+        (with-temp-buffer
+          (nostr-timeline-mode)
+          (setq-local nostr-timeline-current-pubkey "me")
+          (nostr-timeline-my-posts)        ; enter -> 1 backfill
+          (should (= calls 1))
+          (nostr-timeline-refresh)          ; in-place refresh -> no respawn
+          (should (= calls 1))
+          (nostr-timeline-feed)             ; leave
+          (nostr-timeline-my-posts)         ; re-enter -> backfill again
+          (should (= calls 2)))))))
+
 (ert-deftest nostr-compose-content-reads-editable-region ()
   (with-temp-buffer
     (nostr-compose-mode)
@@ -2067,12 +2101,11 @@ not one subscription per author."
          '(((id . "n1") (pubkey . "alice") (kind . 1))
            ((id . "n2") (pubkey . "bob") (kind . 1))
            ((id . "n3") (pubkey . "alice") (kind . 1)))))
-      ;; One subscription for both distinct authors, auto-closing.
+      ;; One subscription (per relay) for both distinct authors.
       (should (= (length sent) 1))
-      (pcase-let ((`(,url ,sub-id ,filters ,close) (car sent)))
+      (pcase-let ((`(,url ,sub-id ,filters ,_close) (car sent)))
         (should (equal url "wss://relay.example"))
         (should (string-prefix-p "profiles-" sub-id))
-        (should close)
         (should (equal (sort (copy-sequence
                               (alist-get "authors" (car filters) nil nil #'equal))
                              #'string<)

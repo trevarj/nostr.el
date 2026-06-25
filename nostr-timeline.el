@@ -190,22 +190,45 @@ backfill stays capped at `nostr-timeline-metadata-backfill-limit'."
       nostr-timeline-current-pubkey
       nostr-timeline-limit))))
 
+(defvar-local nostr-timeline--synced-token nil
+  "Token identifying the feed last backfilled, so view-entry backfill subscriptions
+fire once per view switch rather than on every burst refresh.")
+
+(defun nostr-timeline--feed-entered-p (force)
+  "Return non-nil when the active feed was just entered (or FORCE).
+Updates the per-buffer sync token so repeated refreshes of the same view do not
+re-issue the view backfill subscription."
+  (let ((token (list nostr-timeline-feed-kind nostr-timeline-current-pubkey)))
+    (prog1 (or force (not (equal token nostr-timeline--synced-token)))
+      (setq-local nostr-timeline--synced-token token))))
+
 (defun nostr-timeline--sync-active-feed (&optional force)
   "Start or stop relay work for the active timeline feed.
-When FORCE is non-nil, request a fresh provider/relay page."
-  (pcase nostr-timeline-feed-kind
-    ('global (nostr-relay-subscribe-global force))
-    ('discover
-     (nostr-relay-close-global)
-     (unless nostr-discover--loading
-       (pcase-let ((`(,provider ,scope ,timeframe)
-                    (list (symbol-name nostr-discover-provider)
-                          nostr-discover-scope
-                          nostr-discover-timeframe)))
-         (when (or force
-                   (not (nostr-db-select-discover-feed provider scope timeframe 1)))
-           (nostr-discover-refresh)))))
-    (_ (nostr-relay-close-global))))
+When FORCE is non-nil, request a fresh provider/relay page.
+
+Each view drives the subscription that backfills what it shows: My Posts asks
+relays for the account's own authored history (the follows feed already covers
+Feed/Conversations/Media, and Global/Discover have their own paths).  View
+backfill is issued on view entry only, so refreshing mid-burst does not respawn
+subscriptions."
+  (let ((entered (nostr-timeline--feed-entered-p force)))
+    (pcase nostr-timeline-feed-kind
+      ('global (nostr-relay-subscribe-global force))
+      ('discover
+       (nostr-relay-close-global)
+       (unless nostr-discover--loading
+         (pcase-let ((`(,provider ,scope ,timeframe)
+                      (list (symbol-name nostr-discover-provider)
+                            nostr-discover-scope
+                            nostr-discover-timeframe)))
+           (when (or force
+                     (not (nostr-db-select-discover-feed provider scope timeframe 1)))
+             (nostr-discover-refresh)))))
+      ('my-posts
+       (nostr-relay-close-global)
+       (when entered
+         (nostr-relay-fetch-my-posts nostr-timeline-current-pubkey)))
+      (_ (nostr-relay-close-global)))))
 
 (defun nostr-timeline-refresh (&optional force)
   "Refresh the current timeline buffer."
