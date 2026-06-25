@@ -123,7 +123,17 @@ Reset each render and primed once per feed so the per-note author lookups
 
 (defvar nostr-ui--image-cache (make-hash-table :test #'equal)
   "Cache of decoded image descriptors keyed by (FILE SIZE MTIME).
-Persists across renders so a repeated avatar is decoded once, not per note.")
+Persists across renders so a repeated avatar is decoded once, not per note.
+Bounded by `nostr-ui-image-cache-max' so scrolling a large feed cannot grow it
+without limit.")
+
+(defcustom nostr-ui-image-cache-max 512
+  "Maximum number of decoded images kept in `nostr-ui--image-cache'.
+When exceeded, older entries are evicted so memory stays bounded while scrolling
+large feeds.  Displayed images keep their own descriptor, so an evicted image
+only re-decodes (cheaply, for small avatars) when it next renders."
+  :type 'integer
+  :group 'nostr)
 
 (defvar nostr-ui--verified-nip05-cache (make-hash-table :test #'equal)
   "Verified NIP-05 identifiers keyed by pubkey and identifier.")
@@ -684,10 +694,31 @@ modification time changes."
   (let* ((mtime (file-attribute-modification-time (file-attributes file)))
          (key (list file size mtime)))
     (or (gethash key nostr-ui--image-cache)
-        (puthash key
-                 (apply #'create-image file nil nil
-                        (nostr-ui--image-display-props size))
-                 nostr-ui--image-cache))))
+        (progn
+          (nostr-ui--evict-image-cache)
+          (puthash key
+                   (apply #'create-image file nil nil
+                          (nostr-ui--image-display-props size))
+                   nostr-ui--image-cache)))))
+
+(defun nostr-ui--evict-image-cache ()
+  "Evict cached images to half capacity when at `nostr-ui-image-cache-max'.
+Keeps memory bounded during heavy scrolling.  Eviction order is arbitrary (the
+cache has no access tracking), but visible images repopulate on the next
+render, so this only costs a cheap re-decode."
+  (when (>= (hash-table-count nostr-ui--image-cache) nostr-ui-image-cache-max)
+    (let ((target (- (hash-table-count nostr-ui--image-cache)
+                     (max 1 (/ nostr-ui-image-cache-max 2))))
+          (removed 0)
+          keys)
+      (catch 'done
+        (maphash (lambda (k _v)
+                   (when (>= removed target) (throw 'done nil))
+                   (push k keys)
+                   (setq removed (1+ removed)))
+                 nostr-ui--image-cache))
+      (dolist (k keys)
+        (remhash k nostr-ui--image-cache)))))
 
 (defun nostr-ui--display-image-string (file label size &optional url)
   "Return display string for FILE with LABEL constrained to SIZE.

@@ -52,7 +52,14 @@ Defaults to `nostr-timeline-limit'.")
 re-requested on every scroll event.")
 
 (defcustom nostr-timeline-limit 100
-  "Maximum number of notes shown in timeline buffers."
+  "Maximum number of notes shown in timeline buffers initially and per page."
+  :type 'integer
+  :group 'nostr)
+
+(defcustom nostr-timeline-max-notes 1000
+  "Hard cap on notes rendered in one timeline buffer after history paging.
+Bounds memory (and image decoding) so scrolling a deep feed cannot grow the
+buffer without limit.  Reaching the cap stops further auto-paging."
   :type 'integer
   :group 'nostr)
 
@@ -269,10 +276,13 @@ cursor is already in flight, or for Discover (which has its own paging)."
   (let ((oldest nostr-timeline--oldest-rendered))
     (when (and oldest
                (not (equal oldest nostr-timeline--last-page-until))
-               (not (eq nostr-timeline-feed-kind 'discover)))
+               (not (eq nostr-timeline-feed-kind 'discover))
+               ;; Stop paging once the render cap is reached, bounding memory.
+               (< (nostr-timeline--limit) nostr-timeline-max-notes))
       (setq-local nostr-timeline--last-page-until oldest)
       (setq-local nostr-timeline--render-limit
-                  (+ (nostr-timeline--limit) nostr-timeline-limit))
+                  (min nostr-timeline-max-notes
+                       (+ (nostr-timeline--limit) nostr-timeline-limit)))
       (when-let* ((filter (nostr-timeline--view-page-filter (1- oldest))))
         (nostr-relay--fetch
          (nostr-relay--sub-id "page" nostr-timeline-feed-kind oldest)
@@ -289,7 +299,13 @@ events into one page request."
              (not (equal nostr-timeline--oldest-rendered
                          nostr-timeline--last-page-until))
              (not (eq nostr-timeline-feed-kind 'discover))
-             (pos-visible-in-window-p (point-max)))
+             (< (nostr-timeline--limit) nostr-timeline-max-notes)
+             ;; Only when the buffer actually OVERFLOWS the window and the user
+             ;; has scrolled to its end: end visible but start scrolled off.  A
+             ;; buffer that fits entirely must not auto-page, or a short feed
+             ;; would page itself on every redisplay.
+             (pos-visible-in-window-p (point-max))
+             (not (pos-visible-in-window-p (point-min))))
     (let ((buffer (current-buffer)))
       (run-at-time 0 nil
                    (lambda ()
