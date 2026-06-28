@@ -205,8 +205,7 @@ Profiles are handled separately and eagerly; the heavier reaction/reply/zap
 backfill stays capped at `nostr-timeline-metadata-backfill-limit'."
   (let* ((capped (seq-take events nostr-timeline-metadata-backfill-limit))
          (ids (mapcar (lambda (event) (alist-get 'id event)) capped)))
-    (nostr-relay-fetch-event-metadata ids)
-    (nostr-relay-subscribe-visible-reactions ids)))
+    (nostr-relay-fetch-event-metadata ids)))
 
 (defun nostr-timeline--backfill-missing-reposts ()
   "Request reposted notes that are referenced by followed accounts."
@@ -370,6 +369,7 @@ events into one page request."
          '("g refresh" "> more" "RET thread" "c compose" "? actions")
        '("g refresh" "c compose" "/ search" "L relays" "? actions")))
     (nostr-ui-finish-refresh position-state)
+    (nostr-relay-sync-visible-reactions)
     (when start
       (nostr-debug-message "timeline refresh: %d notes in %.1f ms"
                            rendered (* 1000 (- (float-time) start))))))

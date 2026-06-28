@@ -2,8 +2,8 @@
 
 ;;; Commentary:
 
-;; This test is skipped by default.  Set NOSTR_LIVE_RELAY_TEST=1 to exercise a
-;; real public relay through the same frame handler used by nostr.el.
+;; These tests are skipped by default.  Set NOSTR_LIVE_RELAY_TEST=1 to exercise
+;; a real public relay through the Rust relay daemon used by nostr.el.
 
 ;;; Code:
 
@@ -18,14 +18,20 @@
 (require 'nostr-search)
 
 (defmacro nostr-live-relay-smoke-test-with-db (&rest body)
-  "Run BODY with an isolated in-memory Nostr database."
+  "Run BODY with an isolated file-backed Nostr database."
   (declare (indent 0))
-  `(let ((nostr-db--connection (emacsql-sqlite-open nil)))
-     (unwind-protect
-         (progn
-           (nostr-db-init)
-           ,@body)
-       (emacsql-close nostr-db--connection))))
+  `(let ((path (make-temp-file "nostr-live-smoke" nil ".sqlite")))
+     (let ((nostr-db-path path)
+           (nostr-db--connection (emacsql-sqlite-open path)))
+       (unwind-protect
+           (progn
+             (nostr-db-init)
+             ,@body)
+         (when (fboundp 'nostr-relay-disconnect-all)
+           (nostr-relay-disconnect-all))
+         (emacsql-close nostr-db--connection)
+         (when (file-exists-p path)
+           (delete-file path))))))
 
 (defun nostr-live-relay-smoke-test-wait-until (predicate &optional timeout)
   "Wait until PREDICATE returns non-nil or TIMEOUT seconds pass."
@@ -37,7 +43,7 @@
     result))
 
 (ert-deftest nostr-live-relay-smoke-receives-and-stores-public-event ()
-  "Connect to a public relay, receive one event, verify it, and store it."
+  "Connect to a public relay through the daemon and store one metadata event."
   (skip-unless (getenv "NOSTR_LIVE_RELAY_TEST"))
   (skip-unless (executable-find nostr-backend-command))
   (nostr-live-relay-smoke-test-with-db
@@ -46,61 +52,25 @@
            (sub-id "nostr-el-live-smoke")
            (nostr-relay--connections (make-hash-table :test #'equal))
            (nostr-relay--subscriptions (make-hash-table :test #'equal))
-           (nostr-relay-verify-events t)
-           client stored-pubkey error-message last-rejection)
+           (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+           stored-pubkey)
       (unwind-protect
           (progn
-            (setq client
-                  (websocket-open
-                   url
-                   :on-open
-                   (lambda (ws)
-                     (websocket-send-text
-                      ws
-                       (json-encode
-                       (vector "REQ"
-                               sub-id
-                               `(("kinds" . (,nostr-kind-metadata))
-                                 ("limit" . 10))))))
-                   :on-message
-                   (lambda (ws frame)
-                     (let ((payload (websocket-frame-payload frame)))
-                       (pcase (json-parse-string payload
-                                                 :object-type 'alist
-                                                 :array-type 'list
-                                                 :false-object nil)
-                         (`("EVENT" ,_sub-id ,event)
-                          (unless stored-pubkey
-                            (if (nostr-relay-handle-frame url payload)
-                                (progn
-                                  (setq stored-pubkey (alist-get 'pubkey event))
-                                  (websocket-send-text
-                                   ws
-                                   (json-encode (vector "CLOSE" sub-id)))
-                                  (websocket-close ws))
-                              (setq last-rejection
-                                    (emacsql nostr-db--connection
-                                             [:select [state message]
-                                                      :from relay_status
-                                                      :where (= url $s1)]
-                                             url)))))
-                         (`("EOSE" ,_sub-id)
-                          (unless stored-pubkey
-                            (setq error-message
-                                  (format "no verified metadata event before EOSE: %S"
-                                          last-rejection)))))))
-                   :on-error
-                   (lambda (_ws type err)
-                     (setq error-message (format "%s %s" type err))))))
+            (nostr-relay-open url nil)
+            (nostr-relay-subscribe
+             url
+             sub-id
+             `((("kinds" . (,nostr-kind-metadata))
+                ("limit" . 10))))
             (should
              (nostr-live-relay-smoke-test-wait-until
               (lambda ()
-                (or (and stored-pubkey
-                         (nostr-db-select-profile stored-pubkey))
-                    error-message)))))
-        (when (and client (websocket-openp client))
-          (websocket-close client))
-      (should-not error-message)
+                (setq stored-pubkey
+                      (caar (emacsql nostr-db--connection
+                                     [:select [pubkey]
+                                      :from profiles
+                                      :limit 1])))))))
+        (nostr-relay-close-subscription-all sub-id))
       (should stored-pubkey)
       (should (nostr-db-select-profile stored-pubkey)))))
 
@@ -190,10 +160,7 @@
                 (nostr-search--select-local "ODELL" 5))
               20))
             (should (nostr-search--select-local "@ODELL" 5)))
-        (maphash (lambda (_url ws)
-                   (when (and (websocket-p ws) (websocket-openp ws))
-                     (websocket-close ws)))
-                 nostr-relay--connections)))))
+        (nostr-relay-disconnect-all)))))
 
 (provide 'nostr-live-relay-smoke-test)
 ;;; nostr-live-relay-smoke-test.el ends here

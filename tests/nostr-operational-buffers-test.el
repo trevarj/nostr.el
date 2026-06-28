@@ -117,9 +117,13 @@
     (emacsql nostr-db--connection
              [:insert :into notifications :values [$s1 $s2 $s3 $s4 $s5 $s6 $s7]]
              "notif-reaction" "reaction" "reaction1" "alice" "me" 31 0)
-    (let (opened-thread)
+    (let (opened-thread requested-metadata)
       (cl-letf (((symbol-function 'nostr-thread-open)
-                 (lambda (event) (setq opened-thread event))))
+                 (lambda (event) (setq opened-thread event)))
+                ((symbol-function 'nostr-relay-fetch-event-metadata)
+                 (lambda (event-ids)
+                   (setq requested-metadata event-ids)
+                   0)))
         (with-temp-buffer
           (nostr-notifications-mode)
           (nostr-notifications-refresh)
@@ -131,6 +135,8 @@
           (should (equal (alist-get 'context-event-id
                                     (nostr-notifications-selected))
                          "my-note"))
+          (should (member "my-note" requested-metadata))
+          (should-not (member "reaction1" requested-metadata))
           (nostr-notifications-open-at-point)
           (should (equal (alist-get 'id opened-thread) "my-note")))))))
 
@@ -458,15 +464,12 @@
         (nostr-relay--profile-requests (make-hash-table :test #'equal))
         (nostr-relay--connect-queue nil)
         (nostr-relay--connect-timer nil)
-        opened-relays
+        added-relays
         opened-buffers)
-    (cl-letf (((symbol-function 'websocket-open)
+    (cl-letf (((symbol-function 'nostr-daemon-add-relay)
                (lambda (url &rest _args)
-                 (push url opened-relays)
-                 (if (equal url "wss://slow.example")
-                     (sleep-for 1)
-                   (let ((proc (start-process "nostr-test-sleep" nil "sleep" "1")))
-                     (make-websocket :conn proc :url url)))))
+                 (push url added-relays)))
+              ((symbol-function 'nostr-relay-discover-and-connect) #'ignore)
               ((symbol-function 'switch-to-buffer)
                (lambda (buffer &rest _args)
                  (push (buffer-name buffer) opened-buffers)
@@ -476,11 +479,11 @@
             (progn
               (nostr-open)
               (should (member nostr-buffer-name opened-buffers))
-              (with-current-buffer nostr-buffer-name
-                (should (eq major-mode 'nostr-timeline-mode))
-                (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))
-              (should-not opened-relays)
-              (should (= (length nostr-relay--connect-queue) 2)))
+	              (with-current-buffer nostr-buffer-name
+	                (should (eq major-mode 'nostr-timeline-mode))
+	                (should (string-match-p "\\[Nostr\\]  Feed" (buffer-string))))
+	              (should-not added-relays)
+	              (should (= (length nostr-relay--connect-queue) 2)))
           (nostr-close)
           (when (get-buffer nostr-buffer-name)
             (kill-buffer nostr-buffer-name))

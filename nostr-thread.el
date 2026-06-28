@@ -167,7 +167,6 @@ so untrusted relay data cannot cause an unbounded loop."
      (mapcar (lambda (event) (alist-get 'pubkey event)) events))
     (let ((context-ids (nostr-thread--context-ids nostr-thread-root-event events)))
       (nostr-relay-fetch-event-metadata context-ids)
-      (nostr-relay-subscribe-visible-reactions context-ids)
       (nostr-relay-fetch-events-by-id context-ids))
     (if events
         (dolist (event events)
@@ -180,6 +179,7 @@ so untrusted relay data cannot cause an unbounded loop."
     (nostr-ui-insert-footer
      '("g refresh" "r reply" "l react" "R repost" "Q quote" "w copy" "? actions"))
     (nostr-ui-finish-refresh position-state)
+    (nostr-relay-sync-visible-reactions)
     (when (or (not (alist-get 'id point-state))
               (not (nostr-ui-section-at-point)))
       (nostr-thread--goto-focus focus-id))))

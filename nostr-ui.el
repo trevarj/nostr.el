@@ -337,7 +337,23 @@ them, but timeline navigation should move between primary cards only."
     (mapcar (lambda (section)
               (when (eq (nostr-ui-section-type section) 'note)
                 (nostr-ui-section-id section)))
-            (nostr-ui--top-level-sections-by-start)))))
+	            (nostr-ui--top-level-sections-by-start)))))
+
+(defun nostr-ui-visible-note-ids (window)
+  "Return rendered note ids whose sections overlap WINDOW's visible text."
+  (when (eq (window-buffer window) (current-buffer))
+    (let ((start (window-start window))
+          (end (window-end window t)))
+      (delete-dups
+       (seq-filter
+        #'stringp
+        (mapcar (lambda (section)
+                  (when (and (eq (nostr-ui-section-type section) 'note)
+                             (not (nostr-ui-section-folded section))
+                             (< (nostr-ui-section-start section) end)
+                             (> (nostr-ui-section-end section) start))
+                    (nostr-ui-section-id section)))
+                (nostr-ui--top-level-sections-by-start)))))))
 
 (defun nostr-ui-section-at-point ()
   "Return the nearest Nostr UI section at point."

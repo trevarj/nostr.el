@@ -31,6 +31,8 @@
 (defvar nostr-search--refresh-timer nil
   "Pending timer for visible search-result refreshes.")
 
+(defvar nostr--refresh-dirty)
+
 (defcustom nostr-search-auto-relay t
   "Whether opening a search buffer immediately queries connected relays."
   :type 'boolean
@@ -205,8 +207,7 @@
     (nostr-relay-fetch-profiles-batch
      (mapcar (lambda (event) (alist-get 'pubkey event)) results))
     (let ((ids (mapcar (lambda (event) (alist-get 'id event)) results)))
-      (nostr-relay-fetch-event-metadata ids)
-      (nostr-relay-subscribe-visible-reactions ids))
+      (nostr-relay-fetch-event-metadata ids))
     (nostr-ui-clear)
     (nostr-ui-insert-status-header
      "Search"
@@ -229,7 +230,8 @@
        "Use s to query connected relays."))
     (nostr-ui-insert-footer
      '("g refresh" "s relay search" "RET open" "w copy" "b browse" "? actions"))
-    (nostr-ui-finish-refresh position-state)))
+    (nostr-ui-finish-refresh position-state)
+    (nostr-relay-sync-visible-reactions)))
 
 (defun nostr-search-open-at-point ()
   "Open the selected search result."
@@ -241,14 +243,19 @@
       ('note (nostr-thread-open data)))))
 
 (defun nostr-search-refresh-visible-buffers ()
-  "Refresh visible search buffers after relay-backed results arrive."
+  "Refresh visible search buffers after relay-backed results arrive.
+Hidden search buffers are marked dirty for the shared window-change
+refresh path."
   (setq nostr-search--refresh-timer nil)
   (dolist (buffer (buffer-list))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (and (eq major-mode 'nostr-search-mode)
-                   (get-buffer-window buffer 'visible))
-          (nostr-search-refresh))))))
+        (when (eq major-mode 'nostr-search-mode)
+          (if (get-buffer-window buffer 'visible)
+              (progn
+                (setq nostr--refresh-dirty nil)
+                (nostr-search-refresh))
+            (setq nostr--refresh-dirty t)))))))
 
 (defun nostr-search--schedule-refresh (&rest _ignored)
   "Schedule a debounced refresh for visible search buffers."

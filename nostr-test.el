@@ -1092,7 +1092,8 @@ state set by one test does not bleed into another (e.g. backfill gating)."
           (nostr-discover-provider 'primal)
           (nostr-discover-scope "global")
           (nostr-discover-timeframe "trending")
-          (state (list :events nil :order nil)))
+          (state (list :events nil :order nil))
+          (nostr-discover--active-websocket 'discover-ws))
       (nostr-discover--handle-frame
        "wss://cache.example"
        (json-encode
@@ -1104,7 +1105,7 @@ state set by one test does not bleed into another (e.g. backfill gating)."
            (tags . [])
            (content . "top")
            (sig . "sig"))])
-       state nil)
+       state nil 'discover-ws)
       (nostr-discover--handle-frame
        "wss://cache.example"
        (json-encode
@@ -1124,7 +1125,7 @@ state set by one test does not bleed into another (e.g. backfill gating)."
                           (score . 8)
                           (score24h . 7))))
            (sig . "sig"))])
-       state nil)
+       state nil 'discover-ws)
       (nostr-discover--handle-frame
        "wss://cache.example"
        (json-encode
@@ -1136,16 +1137,34 @@ state set by one test does not bleed into another (e.g. backfill gating)."
            (tags . [])
            (content . ,(json-encode '((elements . ["note-a"]))))
            (sig . "sig"))])
-       state nil)
+       state nil 'discover-ws)
       (nostr-discover--handle-frame
        "wss://cache.example"
        (json-encode ["EOSE" "sub"])
-       state nil)
+       state nil 'discover-ws)
       (let ((events (nostr-db-select-discover-feed "primal" "global" "trending" 10)))
         (should (= (length events) 1))
-        (should (equal (alist-get 'id (car events)) "note-a"))
-        (should (= (alist-get 'reactions (car events)) 4))
-        (should (= (nostr-db-discover-next-cursor "primal" "global" "trending") 7))))))
+	      (should (equal (alist-get 'id (car events)) "note-a"))
+	      (should (= (alist-get 'reactions (car events)) 4))
+	      (should (= (nostr-db-discover-next-cursor "primal" "global" "trending") 7))))))
+
+(ert-deftest nostr-discover-ignores-stale-websocket-callbacks ()
+  "A replaced Discover websocket cannot finish or clear the active request."
+  (let ((nostr-discover--active-websocket 'new-ws)
+        (nostr-discover--loading t)
+        (nostr-discover--last-status '(:state loading))
+        (finished 0))
+    (let ((nostr-discover-finished-hook
+           (list (lambda () (setq finished (1+ finished))))))
+      (nostr-discover--handle-frame
+       "wss://cache.example"
+       (json-encode ["EOSE" "sub"])
+       (list :events nil :order nil)
+       nil
+       'old-ws)
+      (should (eq nostr-discover--active-websocket 'new-ws))
+      (should nostr-discover--loading)
+      (should (= finished 0)))))
 
 (ert-deftest nostr-timeline-refresh-backfills-visible-profile-metadata ()
   "Rendering a feed batch-requests missing avatars and note metadata."
@@ -2523,6 +2542,57 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
         (should (equal (alist-get "#e" (car filters) nil nil #'equal)
                        '("note2")))))))
 
+(ert-deftest nostr-visible-note-ids-tracks-window-range ()
+  "Visible note ids come from sections overlapping window start/end."
+  (nostr-test-with-db
+    (let ((buffer (get-buffer-create " *nostr-visible-note-ids-test*"))
+          first-end
+          second-start)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (nostr-timeline-mode)
+              (let ((inhibit-read-only t))
+                (nostr-ui-clear)
+                (nostr-ui-insert-note
+                 '((id . "note-a")
+                   (pubkey . "alice")
+                   (created_at . 100)
+                   (kind . 1)
+                   (tags . nil)
+                   (content . "first")))
+                (setq first-end (point))
+                (dotimes (_ 80)
+                  (insert "\n"))
+                (setq second-start (point))
+                (nostr-ui-insert-note
+                 '((id . "note-b")
+                   (pubkey . "bob")
+                   (created_at . 101)
+                   (kind . 1)
+                   (tags . nil)
+                   (content . "second")))))
+            (cl-letf (((symbol-function 'window-list)
+                       (lambda (&rest _) '(fake-window)))
+                      ((symbol-function 'window-buffer)
+                       (lambda (_window) buffer))
+                      ((symbol-function 'window-start)
+                       (lambda (_window) (point-min)))
+                      ((symbol-function 'window-end)
+                       (lambda (&rest _) first-end)))
+              (should (equal (nostr-visible-note-ids) '("note-a"))))
+            (cl-letf (((symbol-function 'window-list)
+                       (lambda (&rest _) '(fake-window)))
+                      ((symbol-function 'window-buffer)
+                       (lambda (_window) buffer))
+                      ((symbol-function 'window-start)
+                       (lambda (_window) second-start))
+                      ((symbol-function 'window-end)
+                       (lambda (&rest _) (point-max))))
+              (should (equal (nostr-visible-note-ids) '("note-b")))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest nostr-relay-visible-reactions-honor-configured-window ()
   "Configured visible-reaction windows add a since cutoff."
   (let ((nostr-relay--connections (make-hash-table :test #'equal))
@@ -2538,8 +2608,281 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
               ((symbol-function 'nostr-relay-subscribe)
                (lambda (_url _sub-id filters &optional _close-on-eose)
                  (push filters sent))))
-      (should (= (nostr-relay-subscribe-visible-reactions '("note1")) 1))
-      (should (= (alist-get "since" (caar sent) nil nil #'equal) 700)))))
+	      (should (= (nostr-relay-subscribe-visible-reactions '("note1")) 1))
+	      (should (= (alist-get "since" (caar sent) nil nil #'equal) 700)))))
+
+(ert-deftest nostr-relay-sync-visible-reactions-uses-visible-note-union ()
+  "UI reconciliation subscribes to the union of notes visible in Nostr windows."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--visible-reaction-sub-id nil)
+        (nostr-relay--visible-reaction-event-ids nil)
+        (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
+        sent)
+    (puthash "wss://relay.example" t nostr-relay--connections)
+    (cl-letf (((symbol-function 'nostr-visible-note-ids)
+               (lambda () '("note-a" "note-b")))
+              ((symbol-function 'nostr-relay-subscribe)
+               (lambda (_url _sub-id filters &optional _close-on-eose)
+                 (push filters sent))))
+      (should (= (nostr-relay-sync-visible-reactions) 1))
+      (should (equal (alist-get "#e" (caar sent) nil nil #'equal)
+                     '("note-a" "note-b"))))))
+
+(ert-deftest nostr-relay-sync-visible-reactions-closes-when-no-notes-visible ()
+  "UI reconciliation closes the live reaction subscription when no notes remain."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--visible-reaction-sub-id "visible-reactions-old")
+        (nostr-relay--visible-reaction-event-ids '("note-old"))
+        (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
+        closed)
+    (cl-letf (((symbol-function 'nostr-visible-note-ids) (lambda () nil))
+              ((symbol-function 'nostr-relay-close-subscription-all)
+               (lambda (sub-id) (push sub-id closed))))
+      (should (= (nostr-relay-sync-visible-reactions) 0))
+      (should (equal closed '("visible-reactions-old")))
+      (should-not nostr-relay--visible-reaction-sub-id)
+      (should-not nostr-relay--visible-reaction-event-ids))))
+
+(ert-deftest nostr-search-refresh-empty-results-preserves-visible-reactions ()
+  "An empty search refresh must not close reactions for notes visible elsewhere."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--visible-reaction-sub-id nil)
+        (nostr-relay--visible-reaction-event-ids nil)
+        (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
+        sent
+        closed)
+    (puthash "wss://relay.example" t nostr-relay--connections)
+    (with-temp-buffer
+      (nostr-search-mode)
+      (setq-local nostr-search-query "missing")
+      (cl-letf (((symbol-function 'nostr-search--select-profiles) (lambda (&rest _) nil))
+                ((symbol-function 'nostr-search--select-local) (lambda (&rest _) nil))
+                ((symbol-function 'nostr-relay-fetch-profiles-batch) (lambda (&rest _) 0))
+                ((symbol-function 'nostr-relay-fetch-event-metadata) (lambda (&rest _) 0))
+                ((symbol-function 'nostr-visible-note-ids) (lambda () '("still-visible")))
+                ((symbol-function 'nostr-relay-subscribe)
+                 (lambda (_url _sub-id filters &optional _close-on-eose)
+                   (push filters sent)))
+                ((symbol-function 'nostr-relay-close-subscription-all)
+                 (lambda (sub-id) (push sub-id closed))))
+        (nostr-search-refresh)
+        (should-not closed)
+        (should (equal (alist-get "#e" (caar sent) nil nil #'equal)
+                       '("still-visible")))))))
+
+(ert-deftest nostr-search-refresh-hidden-buffer-marks-dirty ()
+  "Relay-search updates mark hidden search buffers for refresh when shown."
+  (let ((buffer (get-buffer-create " *nostr-hidden-search-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (nostr-search-mode)
+            (setq-local nostr-search-query "hidden")
+            (setq-local nostr--refresh-dirty nil))
+          (cl-letf (((symbol-function 'nostr-search-refresh)
+                     (lambda () (error "hidden buffer should not refresh"))))
+            (nostr-search-refresh-visible-buffers))
+          (with-current-buffer buffer
+            (should nostr--refresh-dirty)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest nostr-relay-close-subscription-all-clears-pending-requests ()
+  "Closing a subscription id also removes queued copies not yet sent to relays."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--syncing-subs (make-hash-table :test #'equal))
+        (nostr-relay--sync-timeout-timer nil))
+    (puthash "wss://relay.example"
+             '(("drop-me" (((kinds . (1))))) ("keep-me" (((kinds . (0))))))
+             nostr-relay--pending-subscriptions)
+    (puthash "wss://relay.example\0drop-me" t nostr-relay--syncing-subs)
+    (puthash "wss://relay.example\0keep-me" t nostr-relay--syncing-subs)
+    (nostr-relay-close-subscription-all "drop-me")
+    (should (equal (mapcar #'car (gethash "wss://relay.example"
+                                          nostr-relay--pending-subscriptions))
+                   '("keep-me")))
+    (should-not (gethash "wss://relay.example\0drop-me" nostr-relay--syncing-subs))
+    (should (gethash "wss://relay.example\0keep-me" nostr-relay--syncing-subs))))
+
+(ert-deftest nostr-relay-forget-relay-scrubs-local-subscription-state ()
+  "Disconnecting one relay clears its local subscription and catch-up state."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--connecting (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--syncing-subs (make-hash-table :test #'equal))
+        (nostr-relay--sync-timeout-timer nil)
+        (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
+        (nostr-relay--connect-queue '(("wss://drop.example" . "me")
+                                      ("wss://keep.example" . "me"))))
+    (puthash "wss://drop.example" t nostr-relay--connections)
+    (puthash "wss://drop.example" t nostr-relay--connecting)
+    (puthash "wss://drop.example\0sub" t nostr-relay--subscriptions)
+    (puthash "wss://keep.example\0sub" t nostr-relay--subscriptions)
+    (puthash "wss://drop.example\0sub" t nostr-relay--syncing-subs)
+    (puthash "wss://keep.example\0sub" t nostr-relay--syncing-subs)
+    (puthash "wss://drop.example" '(("sub" nil)) nostr-relay--pending-subscriptions)
+    (puthash "wss://drop.example" t nostr-relay--visible-reaction-relays)
+    (cl-letf (((symbol-function 'nostr-relay--update-mode-line) #'ignore))
+      (nostr-relay-forget-relay "wss://drop.example"))
+    (should-not (gethash "wss://drop.example" nostr-relay--connections))
+    (should-not (gethash "wss://drop.example" nostr-relay--connecting))
+    (should-not (gethash "wss://drop.example\0sub" nostr-relay--subscriptions))
+    (should (gethash "wss://keep.example\0sub" nostr-relay--subscriptions))
+    (should-not (gethash "wss://drop.example\0sub" nostr-relay--syncing-subs))
+    (should (gethash "wss://keep.example\0sub" nostr-relay--syncing-subs))
+    (should-not (gethash "wss://drop.example" nostr-relay--pending-subscriptions))
+    (should-not (gethash "wss://drop.example" nostr-relay--visible-reaction-relays))
+    (should (equal nostr-relay--connect-queue '(("wss://keep.example" . "me"))))))
+
+(ert-deftest nostr-relay-daemon-add-relay-error-forgets-local-relay ()
+  "Daemon add-relay failures clear optimistic local relay bookkeeping."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--connecting (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--syncing-subs (make-hash-table :test #'equal))
+        (nostr-relay--sync-timeout-timer nil)
+        (nostr-relay--visible-reaction-relays (make-hash-table :test #'equal))
+        (nostr-relay--connect-queue nil))
+    (puthash "wss://bad.example" t nostr-relay--connections)
+    (puthash "wss://bad.example\0sub" t nostr-relay--subscriptions)
+    (cl-letf (((symbol-function 'nostr-relay--update-mode-line) #'ignore))
+      (nostr-relay--on-daemon-notification
+       '((event . "error") (code . "add-relay") (url . "wss://bad.example"))))
+    (should-not (gethash "wss://bad.example" nostr-relay--connections))
+    (should-not (gethash "wss://bad.example\0sub" nostr-relay--subscriptions))))
+
+(ert-deftest nostr-relay-daemon-subscribe-error-clears-subscription-state ()
+  "Daemon subscribe failures clear active, pending, and syncing state for SUB."
+  (let ((nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--syncing-subs (make-hash-table :test #'equal))
+        (nostr-relay--sync-timeout-timer nil))
+    (puthash "wss://relay.example\0bad-sub" t nostr-relay--subscriptions)
+    (puthash "wss://relay.example" '(("bad-sub" nil) ("keep-sub" nil))
+             nostr-relay--pending-subscriptions)
+    (puthash "wss://relay.example\0bad-sub" t nostr-relay--syncing-subs)
+    (nostr-relay--on-daemon-notification
+     '((event . "error") (code . "subscribe") (sub . "bad-sub")))
+    (should-not (gethash "wss://relay.example\0bad-sub" nostr-relay--subscriptions))
+    (should (equal (mapcar #'car (gethash "wss://relay.example"
+                                          nostr-relay--pending-subscriptions))
+                   '("keep-sub")))
+    (should-not (gethash "wss://relay.example\0bad-sub" nostr-relay--syncing-subs))))
+
+(ert-deftest nostr-relay-addressable-fetch-closes-queued-disconnected-relays ()
+  "Queued naddr fetches still arm the one-shot close timer."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--addressable-event-requests (make-hash-table :test #'equal))
+        scheduled
+        opened)
+    (cl-letf (((symbol-function 'nostr-relay-open)
+               (lambda (url _pubkey) (push url opened) t))
+              ((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn &rest args)
+                 (push (cons fn args) scheduled)
+                 'timer)))
+      (should (= (nostr-relay-fetch-addressable-event
+                  30023 "author" "article" '("wss://relay.example"))
+                 1))
+      (should (equal opened '("wss://relay.example")))
+      (should (gethash "wss://relay.example" nostr-relay--pending-subscriptions))
+      (pcase-let ((`(,fn . ,args) (car scheduled)))
+        (should (eq fn #'nostr-relay-close-subscription-all))
+        (should (string-prefix-p "naddr-" (car args)))))))
+
+(ert-deftest nostr-relay-reconcile-account-replaces-personal-subscriptions ()
+  "Changing accounts updates daemon pubkey and re-primes personal/follows feeds."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--daemon-pubkey "old")
+        closed
+        pubkeys
+        personal
+        follows)
+    (puthash "wss://relay-a.example" t nostr-relay--connections)
+    (puthash "wss://relay-b.example" t nostr-relay--connections)
+    (puthash "wss://relay-a.example\0personal-old" t nostr-relay--subscriptions)
+    (puthash "wss://relay-a.example\0follows-old" t nostr-relay--subscriptions)
+    (puthash "wss://relay-a.example\0visible-reactions-old" t nostr-relay--subscriptions)
+    (cl-letf (((symbol-function 'nostr-daemon-running-p) (lambda () t))
+              ((symbol-function 'nostr-daemon-set-pubkey)
+               (lambda (pubkey) (push pubkey pubkeys)))
+              ((symbol-function 'nostr-relay-close-subscription-all)
+               (lambda (sub-id) (push sub-id closed)))
+              ((symbol-function 'nostr-relay-subscribe-personal)
+               (lambda (url pubkey) (push (list url pubkey) personal)))
+              ((symbol-function 'nostr-relay-subscribe-follows-feed)
+               (lambda (url pubkey) (push (list url pubkey) follows))))
+      (nostr-relay-reconcile-account "new")
+      (should (equal pubkeys '("new")))
+      (should (member "personal-old" closed))
+      (should (member "follows-old" closed))
+      (should-not (member "visible-reactions-old" closed))
+      (should (= (length personal) 2))
+      (should (= (length follows) 2))
+      (should (equal nostr-relay--daemon-pubkey "new")))))
+
+(ert-deftest nostr-relay-reconcile-account-drops-stale-connect-queue ()
+  "Account switches discard deferred relay opens for the previous account."
+  (let ((nostr-relay--connections (make-hash-table :test #'equal))
+        (nostr-relay--subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--pending-subscriptions (make-hash-table :test #'equal))
+        (nostr-relay--connect-queue '(("wss://old.example" . "old")
+                                      ("wss://new.example" . "new")))
+        (nostr-relay--daemon-pubkey "old")
+        opened
+        pubkeys)
+    (cl-letf (((symbol-function 'nostr-daemon-running-p) (lambda () t))
+              ((symbol-function 'nostr-daemon-set-pubkey)
+               (lambda (pubkey) (push pubkey pubkeys)))
+              ((symbol-function 'nostr-relay--update-mode-line) #'ignore)
+              ((symbol-function 'nostr-daemon-add-relay)
+               (lambda (url) (push url opened)))
+              ((symbol-function 'nostr-relay-subscribe-personal) #'ignore)
+              ((symbol-function 'nostr-relay-subscribe-follows-feed) #'ignore))
+      (nostr-relay-reconcile-account "new")
+      (should (equal pubkeys '("new")))
+      (should (equal nostr-relay--connect-queue '(("wss://new.example" . "new"))))
+      (nostr-relay--drain-connect-queue)
+      (should (equal opened '("wss://new.example")))
+      (should (equal nostr-relay--daemon-pubkey "new")))))
+
+(ert-deftest nostr-close-removes-search-refresh-hook ()
+  "Closing the client removes the relay-search refresh hook too."
+  (let ((nostr-relay-event-hook '(nostr--schedule-refresh
+                                  nostr-search--schedule-refresh)))
+    (cl-letf (((symbol-function 'nostr-relay--flush-ingestion) #'ignore)
+              ((symbol-function 'nostr-discover-close) #'ignore)
+              ((symbol-function 'nostr-relay-disconnect-all) #'ignore)
+              ((symbol-function 'nostr-db-close) #'ignore))
+      (nostr-close)
+      (should-not (memq #'nostr-search--schedule-refresh nostr-relay-event-hook)))))
+
+(ert-deftest nostr-sync-ui-relay-interests-closes-hidden-view-work ()
+  "UI reconciliation closes view-owned live work when those views are hidden."
+  (let (visible-synced
+        global-closed
+        discover-closed)
+    (cl-letf (((symbol-function 'nostr-relay-sync-visible-reactions)
+               (lambda (&rest _) (setq visible-synced t)))
+              ((symbol-function 'nostr-relay-close-global)
+               (lambda () (setq global-closed t)))
+              ((symbol-function 'nostr-discover-close)
+               (lambda (&optional quiet)
+                 (setq discover-closed quiet))))
+      (nostr-sync-ui-relay-interests)
+      (should visible-synced)
+      (should global-closed)
+      (should discover-closed))))
 
 (ert-deftest nostr-relay-fetch-events-by-id-requests-missing-context ()
   "Thread backfill requests missing root/parent events directly by id."

@@ -161,7 +161,8 @@
       (cl-letf (((symbol-function 'nostr-relay-open)
                  (lambda (url _pubkey)
                    (push url opened)
-                   (puthash url :ws nostr-relay--connections))))
+                   (puthash url :ws nostr-relay--connections)))
+                ((symbol-function 'nostr-relay-discover-and-connect) #'ignore))
         (unwind-protect
             (progn
               (nostr-relay-connect-all-deferred "alice")
@@ -194,13 +195,13 @@
                         ("r" "wss://write.example" "write")))
                (content . "")
                (sig . "sig")))
-            (puthash "wss://read.example" :read nostr-relay--connections)
-            (puthash "wss://write.example" :write nostr-relay--connections)
-            (cl-letf (((symbol-function 'websocket-openp) (lambda (_ws) t))
-                      ((symbol-function 'websocket-send-text)
-                       (lambda (ws _message) (push ws sent))))
-              (nostr-relay-send-client-message "[\"EVENT\",{}]"))
-            (should (equal sent '(:write))))
+            (puthash "wss://read.example" t nostr-relay--connections)
+            (puthash "wss://write.example" t nostr-relay--connections)
+            (cl-letf (((symbol-function 'nostr-daemon-publish)
+                       (lambda (_event urls) (setq sent urls))))
+              (nostr-relay-send-client-message
+               "[\"EVENT\",{\"id\":\"note-1\",\"pubkey\":\"alice\"}]"))
+            (should (equal sent '("wss://write.example"))))
         (setq nostr-current-pubkey old-pubkey)))))
 
 (ert-deftest nostr-relay-retry-publish-targets-failed-stale-and-missing ()
@@ -230,7 +231,7 @@
                            "wss://fresh.example"
                            "wss://stale.example"
                            "wss://missing.example"))
-              (puthash url url nostr-relay--connections))
+              (puthash url t nostr-relay--connections))
             (nostr-db-store-publish-receipt "note-1" "wss://accepted.example" "accepted")
             (nostr-db-store-publish-receipt "note-1" "wss://rejected.example" "rejected")
             (nostr-db-store-publish-receipt "note-1" "wss://fresh.example" "pending")
@@ -240,9 +241,8 @@
                               :set (= updated_at 1)
                               :where (and (= event_id "note-1")
                                           (= url "wss://stale.example"))])
-            (cl-letf (((symbol-function 'websocket-openp) (lambda (_ws) t))
-                      ((symbol-function 'websocket-send-text)
-                       (lambda (ws _message) (push ws sent))))
+            (cl-letf (((symbol-function 'nostr-daemon-publish)
+                       (lambda (_event urls) (setq sent urls))))
               (should
                (= 3
                   (nostr-relay-retry-publish

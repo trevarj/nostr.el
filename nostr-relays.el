@@ -257,7 +257,7 @@
   (let ((url (nostr-relays--selected-url)))
     (when (gethash url nostr-relay--connections)
       (nostr-daemon-remove-relay url))
-    (remhash url nostr-relay--connections)
+    (nostr-relay-forget-relay url)
     (nostr-db-store-relay-status url "closed" "Disconnected locally")
     (nostr-relays-refresh)))
 

@@ -60,6 +60,18 @@
 (defvar nostr-discover--active-websocket nil
   "Current Discover websocket, when one is active.")
 
+(defun nostr-discover-close (&optional quiet)
+  "Close the active Discover websocket.
+When QUIET is non-nil, do not update the user-visible Discover status."
+  (when (and (websocket-p nostr-discover--active-websocket)
+             (websocket-openp nostr-discover--active-websocket))
+    (websocket-close nostr-discover--active-websocket))
+  (setq nostr-discover--active-websocket nil)
+  (when nostr-discover--loading
+    (if quiet
+        (setq nostr-discover--loading nil)
+      (nostr-discover--finish 'closed))))
+
 (defun nostr-discover--provider-name ()
   "Return the current Discover provider name for DB keys."
   (symbol-name nostr-discover-provider))
@@ -188,33 +200,39 @@ through the relay daemon."
                  (elements (alist-get 'elements paging)))
        (plist-put state :order elements)))))
 
-(defun nostr-discover--handle-frame (url payload state append)
+(defun nostr-discover--handle-frame (url payload state append websocket)
   "Handle one Primal cache websocket PAYLOAD from URL.
-STATE accumulates the page; APPEND controls final persistence behavior."
-  (pcase (ignore-errors
-           (json-parse-string payload
-                              :object-type 'alist
-                              :array-type 'list
-                              :false-object nil
-                              :null-object nil))
-    (`("EVENT" ,_sub-id ,event)
-     (nostr-discover--handle-event url event state))
-    (`("EOSE" . ,_)
-     (nostr-discover--store-page
-      (nreverse (plist-get state :events))
-      (plist-get state :order)
-      append)
-     (when (and (websocket-p nostr-discover--active-websocket)
-                (websocket-openp nostr-discover--active-websocket))
-       (websocket-close nostr-discover--active-websocket))
-     (setq nostr-discover--active-websocket nil)
-     (nostr-discover--finish 'ok))
-    (`("NOTICE" . ,rest)
-     (nostr-discover--finish 'error (string-join (mapcar (lambda (item)
-                                                            (format "%s" item))
-                                                          rest)
-                                                 " ")))
-    (_ nil)))
+STATE accumulates the page; APPEND controls final persistence behavior.
+WEBSOCKET must still be the active request; stale callbacks are ignored."
+  (when (eq websocket nostr-discover--active-websocket)
+    (pcase (ignore-errors
+             (json-parse-string payload
+                                :object-type 'alist
+                                :array-type 'list
+                                :false-object nil
+                                :null-object nil))
+      (`("EVENT" ,_sub-id ,event)
+       (nostr-discover--handle-event url event state))
+      (`("EOSE" . ,_)
+       (nostr-discover--store-page
+        (nreverse (plist-get state :events))
+        (plist-get state :order)
+        append)
+       (when (and (websocket-p websocket)
+                  (websocket-openp websocket))
+         (websocket-close websocket))
+       (setq nostr-discover--active-websocket nil)
+       (nostr-discover--finish 'ok))
+      (`("NOTICE" . ,rest)
+       (when (and (websocket-p websocket)
+                  (websocket-openp websocket))
+         (websocket-close websocket))
+       (setq nostr-discover--active-websocket nil)
+       (nostr-discover--finish 'error (string-join (mapcar (lambda (item)
+                                                              (format "%s" item))
+                                                            rest)
+                                                   " ")))
+      (_ nil))))
 
 (defun nostr-discover-refresh (&optional append)
   "Refresh the Discover cache.
@@ -230,14 +248,12 @@ When APPEND is non-nil, request the next provider-ranked page."
          (state (list :events nil :order nil)))
     (when (and append (not cursor))
       (user-error "No Discover page cursor available"))
+    (nostr-discover-close t)
     (setq nostr-discover--loading t
           nostr-discover--last-status
           (list :state 'loading
                 :message nil
                 :refreshed-at (plist-get nostr-discover--last-status :refreshed-at)))
-    (when (and (websocket-p nostr-discover--active-websocket)
-               (websocket-openp nostr-discover--active-websocket))
-      (websocket-close nostr-discover--active-websocket))
     (condition-case err
         (setq nostr-discover--active-websocket
               (websocket-open
@@ -246,12 +262,14 @@ When APPEND is non-nil, request the next provider-ranked page."
                :on-open (lambda (ws)
                           (websocket-send-text ws
                                                (nostr-discover--request-message cursor)))
-               :on-message (lambda (_ws frame)
+               :on-message (lambda (ws frame)
                              (nostr-discover--handle-frame
-                              url (websocket-frame-payload frame) state append))
-               :on-close (lambda (_ws)
-                           (when nostr-discover--loading
-                             (nostr-discover--finish 'closed)))))
+                              url (websocket-frame-payload frame) state append ws))
+               :on-close (lambda (ws)
+                           (when (eq ws nostr-discover--active-websocket)
+                             (setq nostr-discover--active-websocket nil)
+                             (when nostr-discover--loading
+                               (nostr-discover--finish 'closed))))))
       (error
        (nostr-discover--finish 'error (error-message-string err))))))
 

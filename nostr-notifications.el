@@ -13,6 +13,7 @@
 
 (require 'cl-lib)
 (require 'emacsql)
+(require 'seq)
 (require 'subr-x)
 (require 'nostr-db)
 (require 'nostr-relay)
@@ -391,11 +392,14 @@
           (nostr-relay-fetch-profiles-batch
            (mapcar (lambda (notification) (alist-get 'actor-pubkey notification))
                    notifications))
-          (let ((ids (mapcar (lambda (notification)
-                                (alist-get 'event-id notification))
-                              notifications)))
-            (nostr-relay-fetch-event-metadata ids)
-            (nostr-relay-subscribe-visible-reactions ids))
+          (let ((ids (delete-dups
+                      (seq-filter
+                       #'stringp
+                       (mapcar (lambda (notification)
+                                 (or (alist-get 'context-event-id notification)
+                                     (alist-get 'event-id notification)))
+                               notifications)))))
+            (nostr-relay-fetch-event-metadata ids))
           (if notifications
               (dolist (notification notifications)
                 (nostr-notifications--insert-notification notification))
@@ -405,7 +409,8 @@
       (insert (propertize "Database is not open.\n" 'face 'nostr-ui-meta)))
     (nostr-ui-insert-footer
      '("g refresh" "f feed" "C conv" "d discover" "P posts" "RET open" "? actions"))
-    (nostr-ui-finish-refresh position-state)))
+    (nostr-ui-finish-refresh position-state)
+    (nostr-relay-sync-visible-reactions)))
 
 ;;;###autoload
 (defun nostr-notifications-open ()

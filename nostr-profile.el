@@ -285,8 +285,7 @@
   (nostr-relay-fetch-profiles-batch
    (mapcar (lambda (event) (alist-get 'pubkey event)) notes))
   (let ((ids (mapcar (lambda (event) (alist-get 'id event)) notes)))
-    (nostr-relay-fetch-event-metadata ids)
-    (nostr-relay-subscribe-visible-reactions ids)))
+    (nostr-relay-fetch-event-metadata ids)))
 
 (defun nostr-profile-edit--display-action ()
   "Return automatic display action for profile edit buffers."
@@ -568,7 +567,8 @@ With FORCE, close without prompting."
      (append '("g refresh" "RET open" "i my profile")
              (when (nostr-profile--own-profile-p) '("e edit"))
              '("f follow" "u unfollow" "M mute" "U unmute" "v verify" "w copy" "b browse" "? actions")))
-    (nostr-ui-finish-refresh position-state)))
+    (nostr-ui-finish-refresh position-state)
+    (nostr-relay-sync-visible-reactions)))
 
 (defun nostr-profile-open-at-point ()
   "Open the note or profile at point."

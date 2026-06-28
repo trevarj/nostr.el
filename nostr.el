@@ -71,6 +71,9 @@
   "Non-nil when this buffer skipped a refresh because it was not visible.
 The buffer is repainted the next time it becomes visible.")
 
+(defvar nostr--ui-interest-timer nil
+  "Pending timer that reconciles relay subscriptions with visible UI state.")
+
 (defvar nostr--opening-account nil
   "Non-nil while `nostr-open' is deriving the account asynchronously.")
 
@@ -154,7 +157,7 @@ interrupts typing/scrolling) but never defer a pending refresh longer than
     ('nostr-setup-mode #'nostr-setup-status-refresh)))
 
 (defun nostr-visible-note-ids ()
-  "Return rendered note ids from visible Nostr buffers."
+  "Return rendered note ids from visible text in Nostr windows."
   (delete-dups
    (apply #'append
           (delq nil
@@ -163,10 +166,42 @@ interrupts typing/scrolling) but never defer a pending refresh longer than
                    (let ((buffer (window-buffer window)))
                      (when (buffer-live-p buffer)
                        (with-current-buffer buffer
-                         (when (and (nostr--buffer-refresh-function)
-                                    (fboundp 'nostr-ui-rendered-note-ids))
-                           (nostr-ui-rendered-note-ids))))))
-                 (window-list nil 'no-minibuf))))))
+		                         (when (and (nostr--buffer-refresh-function)
+		                                    (fboundp 'nostr-ui-visible-note-ids))
+		                           (nostr-ui-visible-note-ids window))))))
+		                 (window-list nil 'no-minibuf))))))
+
+(defun nostr--visible-timeline-kind-p (kind)
+  "Return non-nil when a visible timeline buffer is showing KIND."
+  (catch 'found
+    (dolist (window (window-list nil 'no-minibuf))
+      (let ((buffer (window-buffer window)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (and (eq major-mode 'nostr-timeline-mode)
+                       (eq nostr-timeline-feed-kind kind))
+              (throw 'found t))))))
+    nil))
+
+(defun nostr-sync-ui-relay-interests ()
+  "Reconcile live relay subscriptions with currently visible Nostr buffers."
+  (setq nostr--ui-interest-timer nil)
+  (nostr-relay-sync-visible-reactions)
+  (unless (nostr--visible-timeline-kind-p 'global)
+    (nostr-relay-close-global))
+  (unless (nostr--visible-timeline-kind-p 'discover)
+    (nostr-discover-close t)))
+
+(defun nostr--schedule-ui-interest-sync (&rest _ignored)
+  "Schedule a deferred UI-to-relay lifecycle reconciliation."
+  (unless (timerp nostr--ui-interest-timer)
+    (setq nostr--ui-interest-timer
+          (run-at-time 0 nil #'nostr-sync-ui-relay-interests))))
+
+(defun nostr--maybe-schedule-ui-interest-sync ()
+  "Schedule relay interest sync when the current buffer is a Nostr buffer."
+  (when (nostr--buffer-refresh-function)
+    (nostr--schedule-ui-interest-sync)))
 
 (defvar nostr--refreshing nil
   "Non-nil while `nostr-refresh-visible-buffers' is running.
@@ -192,13 +227,15 @@ buffers do no rendering work during a sync burst."
                   (progn
                     (setq nostr--refresh-dirty nil)
                     (funcall refresh))
-                (setq nostr--refresh-dirty t)))))))))
+                (setq nostr--refresh-dirty t)))))
+      (nostr-sync-ui-relay-interests)))))
 
 (defun nostr--refresh-on-window-change (&rest _ignored)
   "Schedule a repaint when a visible Nostr buffer skipped a refresh while hidden.
 Runs from `window-buffer-change-functions' during redisplay, so it must stay
 cheap: it only inspects windows and schedules a deferred refresh, never
 refreshing synchronously (which would re-enter redisplay and recurse)."
+  (nostr--schedule-ui-interest-sync)
   (when (and (not nostr--refreshing)
              (not (timerp nostr--refresh-timer))
              (catch 'found
@@ -273,6 +310,9 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
   (add-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
   (add-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (add-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
+  (add-hook 'window-configuration-change-hook #'nostr--refresh-on-window-change)
+  (add-hook 'window-scroll-functions #'nostr--refresh-on-window-change)
+  (add-hook 'kill-buffer-hook #'nostr--maybe-schedule-ui-interest-sync)
   (let ((buffer (get-buffer-create nostr-buffer-name)))
     (if nostr-current-pubkey
         (with-current-buffer buffer
@@ -292,18 +332,26 @@ refreshing synchronously (which would re-enter redisplay and recurse)."
   (when (timerp nostr--refresh-timer)
     (cancel-timer nostr--refresh-timer)
     (setq nostr--refresh-timer nil))
+  (when (timerp nostr--ui-interest-timer)
+    (cancel-timer nostr--ui-interest-timer)
+    (setq nostr--ui-interest-timer nil))
   (setq nostr--opening-account nil
         nostr--refresh-pending-since nil)
   (remove-hook 'nostr-relay-event-hook #'nostr--schedule-refresh)
+  (remove-hook 'nostr-relay-event-hook #'nostr-search--schedule-refresh)
   (remove-hook 'nostr-actions-after-send-hook #'nostr--schedule-refresh)
   (remove-hook 'nostr-relay-sync-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'nostr-discover-finished-hook #'nostr--schedule-refresh)
   (remove-hook 'window-buffer-change-functions #'nostr--refresh-on-window-change)
+  (remove-hook 'window-configuration-change-hook #'nostr--refresh-on-window-change)
+  (remove-hook 'window-scroll-functions #'nostr--refresh-on-window-change)
+  (remove-hook 'kill-buffer-hook #'nostr--maybe-schedule-ui-interest-sync)
   (cl-incf nostr--open-generation)
   ;; Flush any verified events still queued for background ingestion before
   ;; closing the DB, so nothing is dropped and no drain fires after teardown.
   (when (fboundp 'nostr-relay--flush-ingestion)
     (nostr-relay--flush-ingestion))
+  (nostr-discover-close t)
   (nostr-relay-disconnect-all)
   (nostr-db-close))
 

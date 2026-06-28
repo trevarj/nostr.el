@@ -318,6 +318,9 @@ batch does not feed the mode-line pending-profile spinner.")
 (defvar nostr-relay--visible-reaction-relays (make-hash-table :test #'equal)
   "Relay URLs that received the active visible-card reaction subscription.")
 
+(defvar nostr-relay--daemon-pubkey nil
+  "Pubkey currently installed in the running daemon, or nil.")
+
 (defvar nostr-relay--event-id-requests (make-hash-table :test #'equal)
   "Event ids recently requested directly by id.")
 
@@ -602,6 +605,70 @@ daemon owns the socket, so this only translates intent."
     (dolist (key keys)
       (remhash key nostr-relay--subscriptions))))
 
+(defun nostr-relay--remove-syncing-all (sub-id)
+  "Forget syncing state for SUB-ID across every relay."
+  (let (keys)
+    (maphash (lambda (key _value)
+               (when (string-suffix-p (concat "\0" sub-id) key)
+                 (push key keys)))
+             nostr-relay--syncing-subs)
+    (dolist (key keys)
+      (remhash key nostr-relay--syncing-subs))
+    (unless (nostr-relay-syncing-p)
+      (nostr-relay--clear-syncing))))
+
+(defun nostr-relay--remove-pending-subscription-all (sub-id)
+  "Forget queued SUB-ID subscriptions across every relay."
+  (let (empty-urls)
+    (maphash
+     (lambda (url pending)
+       (let ((kept (seq-remove (lambda (request)
+                                 (equal (car request) sub-id))
+                               pending)))
+         (if kept
+             (puthash url kept nostr-relay--pending-subscriptions)
+           (push url empty-urls))))
+     nostr-relay--pending-subscriptions)
+    (dolist (url empty-urls)
+      (remhash url nostr-relay--pending-subscriptions))))
+
+(defun nostr-relay--remove-subscriptions-for-url (url)
+  "Forget every subscription tracked for relay URL."
+  (let ((prefix (concat url "\0"))
+        keys)
+    (maphash (lambda (key _value)
+               (when (string-prefix-p prefix key)
+                 (push key keys)))
+             nostr-relay--subscriptions)
+    (dolist (key keys)
+      (remhash key nostr-relay--subscriptions))))
+
+(defun nostr-relay--remove-syncing-for-url (url)
+  "Forget syncing state tracked for relay URL."
+  (let ((prefix (concat url "\0"))
+        keys)
+    (maphash (lambda (key _value)
+               (when (string-prefix-p prefix key)
+                 (push key keys)))
+             nostr-relay--syncing-subs)
+    (dolist (key keys)
+      (remhash key nostr-relay--syncing-subs))
+    (unless (nostr-relay-syncing-p)
+      (nostr-relay--clear-syncing))))
+
+(defun nostr-relay-forget-relay (url)
+  "Forget local relay bookkeeping for URL after it disconnects."
+  (remhash url nostr-relay--connections)
+  (remhash url nostr-relay--connecting)
+  (remhash url nostr-relay--pending-subscriptions)
+  (remhash url nostr-relay--visible-reaction-relays)
+  (nostr-relay--remove-subscriptions-for-url url)
+  (nostr-relay--remove-syncing-for-url url)
+  (setq nostr-relay--connect-queue
+        (seq-remove (lambda (request) (equal (car request) url))
+                    nostr-relay--connect-queue))
+  (nostr-relay--update-mode-line))
+
 (defun nostr-relay-subscribe (url sub-id filters)
   "Subscribe URL to SUB-ID with FILTERS.
 This opens a live subscription (it stays open until closed).  One-shot fetches
@@ -644,7 +711,29 @@ section in this file's commentary."
              (when (nostr-relay--subscription-active-p url sub-id)
                (nostr-relay--send url `["CLOSE" ,sub-id])))
            nostr-relay--connections)
-  (nostr-relay--remove-subscription-all sub-id))
+  (nostr-relay--remove-pending-subscription-all sub-id)
+  (nostr-relay--remove-subscription-all sub-id)
+  (nostr-relay--remove-syncing-all sub-id))
+
+(defun nostr-relay--active-subscription-ids ()
+  "Return all locally tracked subscription ids."
+  (let (ids)
+    (maphash (lambda (key _value)
+               (when-let* ((pos (string-search "\0" key)))
+                 (cl-pushnew (substring key (1+ pos)) ids :test #'equal)))
+             nostr-relay--subscriptions)
+    (maphash (lambda (_url pending)
+               (dolist (request pending)
+                 (cl-pushnew (car request) ids :test #'equal)))
+             nostr-relay--pending-subscriptions)
+    ids))
+
+(defun nostr-relay--close-subscriptions-with-prefixes (prefixes)
+  "Close all subscriptions whose ids start with one of PREFIXES."
+  (dolist (sub-id (nostr-relay--active-subscription-ids))
+    (when (seq-some (lambda (prefix) (string-prefix-p prefix sub-id))
+                    prefixes)
+      (nostr-relay-close-subscription-all sub-id))))
 
 ;; The daemon verifies signatures, writes the cache, and derives notifications.
 ;; Emacs no longer parses EVENT frames or runs a verify/ingest pipeline; it
@@ -709,7 +798,17 @@ profile/search/feed EOSE tracking the websocket frame handler used to."
                 nostr-relay--subscriptions)
        (nostr-relay--note-profile-eose sub-id)
        (nostr-relay--note-search-eose sub-id)
-       (remhash sub-id nostr-relay--search-profile-queries)))))
+       (remhash sub-id nostr-relay--search-profile-queries)))
+    ("error"
+     (pcase (alist-get 'code notification)
+       ("add-relay"
+        (when-let* ((url (alist-get 'url notification)))
+          (nostr-relay-forget-relay url)))
+       ("subscribe"
+        (when-let* ((sub-id (alist-get 'sub notification)))
+          (nostr-relay--remove-subscription-all sub-id)
+          (nostr-relay--remove-pending-subscription-all sub-id)
+          (nostr-relay--remove-syncing-all sub-id)))))))
 
 (add-hook 'nostr-daemon-event-hook #'nostr-relay--on-daemon-notification)
 
@@ -934,8 +1033,26 @@ it and reads the database back."
   (unless (nostr-daemon-running-p)
     (nostr-daemon-start nostr-db-path
                         (nostr-relay-urls-for-pubkey pubkey)
-                        pubkey))
-  (nostr-daemon-set-pubkey pubkey))
+                        pubkey)
+    (setq nostr-relay--daemon-pubkey pubkey))
+  (nostr-relay-reconcile-account pubkey))
+
+(defun nostr-relay-reconcile-account (pubkey)
+  "Make live relay subscriptions and daemon notification state match PUBKEY."
+  (unless (equal pubkey nostr-relay--daemon-pubkey)
+    (setq nostr-relay--connect-queue
+          (seq-filter (lambda (request) (equal (cdr request) pubkey))
+                      nostr-relay--connect-queue)))
+  (when (and (nostr-daemon-running-p)
+             (not (equal pubkey nostr-relay--daemon-pubkey)))
+    (nostr-relay--close-subscriptions-with-prefixes '("personal-" "follows-"))
+    (setq nostr-relay--daemon-pubkey pubkey)
+    (nostr-daemon-set-pubkey pubkey)
+    (when pubkey
+      (maphash (lambda (url _connected)
+                 (nostr-relay-subscribe-personal url pubkey)
+                 (nostr-relay-subscribe-follows-feed url pubkey))
+               nostr-relay--connections))))
 
 (defun nostr-relay-open (url pubkey)
   "Connect relay URL for PUBKEY through the daemon and prime its subscriptions.
@@ -954,8 +1071,7 @@ issues the personal/follows/visible-reaction subscriptions the websocket
       (nostr-relay-subscribe-personal url pubkey)
       (nostr-relay-subscribe-follows-feed url pubkey))
     (when (fboundp 'nostr-visible-note-ids)
-      (nostr-relay-subscribe-visible-reactions
-       (nostr-visible-note-ids) nil (list url)))
+      (nostr-relay-sync-visible-reactions (list url)))
     (nostr-relay--update-mode-line))
   t)
 
@@ -1098,6 +1214,7 @@ deferred until the fetch window has had time to populate relay preferences."
     (cancel-timer nostr-relay--verify-drain-timer))
   (setq nostr-relay--activity-timer nil
         nostr-relay--mode-line-timer nil
+        nostr-relay--daemon-pubkey nil
         nostr-relay--global-last-request-time nil
         nostr-relay--ingested-event-count 0
         nostr-relay--verify-inflight 0
@@ -1473,9 +1590,25 @@ that opens after the UI render catch up without disturbing existing relays."
             (puthash url t nostr-relay--visible-reaction-relays)
             (setq sent (1+ sent))))
         (when (or (> sent 0) nostr-relay--visible-reaction-sub-id)
-          (setq nostr-relay--visible-reaction-sub-id sub-id
-                nostr-relay--visible-reaction-event-ids ids-key))))
+	          (setq nostr-relay--visible-reaction-sub-id sub-id
+	                nostr-relay--visible-reaction-event-ids ids-key))))
     sent))
+
+(defun nostr-relay-close-visible-reactions ()
+  "Close the live visible-reaction subscription, if any."
+  (when nostr-relay--visible-reaction-sub-id
+    (nostr-relay-close-subscription-all nostr-relay--visible-reaction-sub-id))
+  (setq nostr-relay--visible-reaction-sub-id nil
+        nostr-relay--visible-reaction-event-ids nil)
+  (clrhash nostr-relay--visible-reaction-relays))
+
+(defun nostr-relay-sync-visible-reactions (&optional urls)
+  "Sync live reaction subscriptions to note ids visible in Nostr windows.
+When URLS is non-nil, only catch up those newly connected relay URLs."
+  (if (fboundp 'nostr-visible-note-ids)
+      (nostr-relay-subscribe-visible-reactions
+       (nostr-visible-note-ids) nil urls)
+    (nostr-relay-close-visible-reactions)))
 
 (defun nostr-relay--fresh-missing-event-ids (event-ids now)
   "Return EVENT-IDS that are missing locally and not recently requested."
@@ -1537,6 +1670,7 @@ RELAYS, when non-nil, are preferred over the currently connected relay set."
               (nostr-relay-subscribe url sub-id (list filter))
               (setq sent (1+ sent)))
           (nostr-relay--queue-subscription url sub-id (list filter))
+          (setq sent (1+ sent))
           (nostr-relay-open url (and (boundp 'nostr-current-pubkey)
                                      nostr-current-pubkey))))
       (when (> sent 0)

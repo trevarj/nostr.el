@@ -29,6 +29,15 @@ file and GPG prompts locally for its passphrase."
 (defvar nostr-current-pubkey nil
   "Current local account public key.")
 
+(declare-function nostr-relay-reconcile-account "nostr-relay" (pubkey))
+
+(defun nostr-setup--set-current-pubkey (pubkey)
+  "Set `nostr-current-pubkey' to PUBKEY and reconcile live relay state."
+  (setq nostr-current-pubkey pubkey)
+  (when (fboundp 'nostr-relay-reconcile-account)
+    (nostr-relay-reconcile-account pubkey))
+  pubkey)
+
 (defconst nostr-setup-status-buffer-name "*Nostr Setup*"
   "Buffer name for Nostr account setup status.")
 
@@ -169,7 +178,7 @@ over stdin, never argv.  Return the backend pubkey response."
          (pubkey (alist-get 'pubkey response)))
     (unless (and (stringp pubkey) (not (string-empty-p pubkey)))
       (error "Backend returned no pubkey while deriving Nostr account status."))
-    (setq nostr-current-pubkey pubkey)
+    (nostr-setup--set-current-pubkey pubkey)
     (when (called-interactively-p 'interactive)
       (message "Nostr account pubkey: %s" pubkey))
     response))
@@ -194,7 +203,7 @@ available."
                    (let ((pubkey (alist-get 'pubkey response)))
                      (if (and (stringp pubkey) (not (string-empty-p pubkey)))
                          (progn
-                           (setq nostr-current-pubkey pubkey)
+                           (nostr-setup--set-current-pubkey pubkey)
                            (funcall success response))
                        (funcall error
                                 "Backend returned no pubkey while deriving Nostr account status."))))
@@ -282,7 +291,7 @@ an existing keyfile.  Interactively, a prefix argument allows replacement."
       (error "Nostr private key file already exists: %s" path))
     (setq account (nostr-setup--validate-secret secret))
     (nostr-setup--encrypt-secret-file secret path)
-    (setq nostr-current-pubkey (alist-get 'pubkey account))
+    (nostr-setup--set-current-pubkey (alist-get 'pubkey account))
     (when (called-interactively-p 'interactive)
       (message "Stored encrypted Nostr private key for pubkey %s"
                nostr-current-pubkey))
@@ -307,7 +316,7 @@ prefix argument allows replacement."
     (unless (and (stringp secret) (not (string-empty-p secret)))
       (error "Backend returned no secret key while generating Nostr private key."))
     (nostr-setup--encrypt-secret-file secret path)
-    (setq nostr-current-pubkey (alist-get 'pubkey response))
+    (nostr-setup--set-current-pubkey (alist-get 'pubkey response))
     (when (called-interactively-p 'interactive)
       (message "Generated encrypted Nostr private key for pubkey %s"
                nostr-current-pubkey))
