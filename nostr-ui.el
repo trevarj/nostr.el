@@ -388,12 +388,12 @@ them, but timeline navigation should move between primary cards only."
     (delete-overlay nostr-ui--selection-overlay)
     (setq nostr-ui--selection-overlay nil))
   (when-let* ((section (nostr-ui-section-at-point)))
-    (setq nostr-ui--selection-overlay
-          (make-overlay
-           (nostr-ui-section-start section)
-           (max (nostr-ui-section-start section)
-                (or (nostr-ui-section-content-start section)
-                    (nostr-ui-section-start section)))))
+    (let* ((start (nostr-ui-section-start section))
+           (content-start (or (nostr-ui-section-content-start section)
+                              start))
+           (end (min content-start (1+ start))))
+      (setq nostr-ui--selection-overlay
+            (make-overlay start (max start end))))
     (overlay-put nostr-ui--selection-overlay 'face 'nostr-ui-selected-section)
     (overlay-put nostr-ui--selection-overlay 'priority 10)
     (overlay-put nostr-ui--selection-overlay 'nostr-ui-selection t)))

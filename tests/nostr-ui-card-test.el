@@ -135,7 +135,7 @@ alone, which would let a forged checkmark render on an unverified profile."
     (should (nostr-ui-section-folded (nostr-ui-section-at-point)))))
 
 (ert-deftest nostr-ui-selection-highlights-heading-only ()
-  "Section selection highlights the heading line without covering card body."
+  "Section selection marks the heading gutter without covering header text."
   (with-temp-buffer
     (let ((inhibit-read-only t))
       (nostr-ui-clear)
@@ -153,8 +153,14 @@ alone, which would let a forged checkmark render on an unverified profile."
       (should (overlayp nostr-ui--selection-overlay))
       (should (= (overlay-start nostr-ui--selection-overlay)
                  (nostr-ui-section-start section)))
-      (should (= (overlay-end nostr-ui--selection-overlay)
-                 (nostr-ui-section-content-start section)))
+      (should (<= (overlay-end nostr-ui--selection-overlay)
+                  (1+ (nostr-ui-section-start section))))
+      (save-excursion
+        (search-forward "Alice")
+        (should-not
+         (cl-find-if (lambda (overlay)
+                       (overlay-get overlay 'nostr-ui-selection))
+                     (overlays-at (point)))))
       (save-excursion
         (search-forward "body should not be selected")
         (should-not
@@ -173,8 +179,8 @@ alone, which would let a forged checkmark render on an unverified profile."
     (nostr-ui-goto-first-section)
     (let ((section (nostr-ui-section-at-point)))
       (should (overlayp nostr-ui--selection-overlay))
-      (should (= (overlay-end nostr-ui--selection-overlay)
-                 (nostr-ui-section-content-start section)))
+      (should (<= (overlay-end nostr-ui--selection-overlay)
+                  (nostr-ui-section-content-start section)))
       (goto-char (nostr-ui-section-content-start section))
       (should (looking-at-p "Body"))
       (should-not
