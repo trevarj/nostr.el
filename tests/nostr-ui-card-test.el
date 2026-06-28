@@ -782,10 +782,39 @@ alone, which would let a forged checkmark render on an unverified profile."
         (nostr-ui-prev-section)
         (should (equal (alist-get 'id (nostr-ui-selected-data)) "parent-note"))))))
 
-(ert-deftest nostr-ui-section-navigation-reveals-selected-heading ()
-  "Explicit n/p section movement recenters the selected heading into view."
+(ert-deftest nostr-ui-section-navigation-keeps-visible-header-stationary ()
+  "Moving between visible sections does not scroll page headers away."
   (save-window-excursion
     (let ((buffer (generate-new-buffer " *nostr-ui-navigation-test*")))
+      (unwind-protect
+          (progn
+            (let ((window (selected-window)))
+              (set-window-buffer window buffer)
+              (with-current-buffer buffer
+                (insert "Page Header\nViews  [f Feed]  N Notifications\n\n")
+                (let ((body-lines 2))
+                  (dotimes (section-index 2)
+                    (nostr-ui-with-section
+                        'test
+                        (format "section-%d" section-index)
+                        `((id . ,(format "section-%d" section-index)))
+                        (format "Section %d" section-index)
+                      (dotimes (line body-lines)
+                        (insert (format "body %d.%d\n" section-index line)))))
+                  (nostr-ui-goto-first-section)
+                  (let ((initial-window-start (window-start window)))
+                    (nostr-ui-next-section)
+                    (should (equal (alist-get 'id (nostr-ui-selected-data))
+                                   "section-1"))
+                    (should (= (window-start window) initial-window-start))
+                    (should (<= (window-start window) (point)))
+                    (should (< (point) (window-end window t))))))))
+        (kill-buffer buffer)))))
+
+(ert-deftest nostr-ui-section-navigation-reveals-hidden-heading ()
+  "Explicit n/p section movement scrolls only when the selected heading is hidden."
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *nostr-ui-hidden-navigation-test*")))
       (unwind-protect
           (progn
             (let ((window (selected-window)))
