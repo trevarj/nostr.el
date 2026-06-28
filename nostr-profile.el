@@ -99,9 +99,11 @@
     (define-key map (kbd "g") #'nostr-profile-list-refresh)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
+    (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "RET") #'nostr-profile-list-open-at-point)
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "?") #'nostr-profile-list-actions)
     map)
   "Keymap for `nostr-profile-list-mode'.")
 
@@ -147,6 +149,18 @@
     ("C-c C-c" "Publish" nostr-profile-edit-publish)
     ("C-c C-a" "Upload avatar" nostr-profile-edit-attach-avatar)
     ("C-c C-k" "Cancel" nostr-profile-edit-cancel)]])
+
+(transient-define-prefix nostr-profile-list-actions ()
+  "Actions for cached Nostr profile relationship lists."
+  [["Profile List"
+    ("RET" "Open profile" nostr-profile-list-open-at-point)
+    ("g" "Refresh" nostr-profile-list-refresh)
+    ("i" "My profile" nostr-profile-open-self)
+    ("q" "Quit" quit-window)]
+   ["Navigation"
+    ("n" "Next profile" nostr-ui-next-section)
+    ("p" "Previous profile" nostr-ui-prev-section)
+    ("TAB" "Toggle profile" nostr-ui-toggle-section)]])
 
 (defun nostr-profile--row-to-alist (row pubkey)
   "Convert profile ROW for PUBKEY to an alist."
@@ -574,10 +588,12 @@ With FORCE, close without prompting."
   "Open the note or profile at point."
   (interactive)
   (unless (nostr-ui-activate-button-at-point)
-    (when-let* ((section (nostr-ui-section-at-point)))
+    (let ((section (or (nostr-ui-section-at-point)
+                       (user-error "No profile item selected"))))
       (pcase (nostr-ui-section-type section)
         ('note (nostr-thread-open (nostr-ui-section-data section)))
-        ('profile (message "Profile %s" (alist-get 'pubkey (nostr-ui-section-data section))))))))
+        ('profile (message "Profile %s" (alist-get 'pubkey (nostr-ui-section-data section))))
+        (_ (user-error "Selected item cannot be opened"))))))
 
 (defun nostr-profile--refresh-buffer-after-action (buffer)
   "Return callback that refreshes profile BUFFER after an action succeeds."
@@ -744,16 +760,23 @@ With FORCE, close without prompting."
        "No cached profiles for this list."
        "Refresh relays or open more profiles to grow the local cache."))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open profile" "i my profile" "n next" "p prev" "q quit"))
+     '("g refresh" "RET open profile" "i my profile" "n next" "p prev" "TAB toggle" "q quit" "? actions"))
     (nostr-ui-finish-refresh position-state)))
+
+(defun nostr-profile-list--selected-pubkey ()
+  "Return the selected profile-list pubkey or signal a user error."
+  (let ((section (nostr-ui-section-at-point)))
+    (unless section
+      (user-error "No profile selected"))
+    (unless (eq (nostr-ui-section-type section) 'profile)
+      (user-error "Selected item is not a profile"))
+    (or (alist-get 'pubkey (nostr-ui-section-data section))
+        (user-error "Selected profile has no pubkey"))))
 
 (defun nostr-profile-list-open-at-point ()
   "Open the selected profile list row."
   (interactive)
-  (when-let* ((section (nostr-ui-section-at-point))
-              ((eq (nostr-ui-section-type section) 'profile))
-              (pubkey (alist-get 'pubkey (nostr-ui-section-data section))))
-    (nostr-profile-open pubkey)))
+  (nostr-profile-open (nostr-profile-list--selected-pubkey)))
 
 (defun nostr-profile-open-list (pubkey kind)
   "Open cached social list KIND for profile PUBKEY."

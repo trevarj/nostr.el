@@ -389,12 +389,23 @@ them, but timeline navigation should move between primary cards only."
     (setq nostr-ui--selection-overlay nil))
   (when-let* ((section (nostr-ui-section-at-point)))
     (setq nostr-ui--selection-overlay
-          (make-overlay (nostr-ui-section-start section)
-                        (max (nostr-ui-section-start section)
-                             (1- (nostr-ui-section-end section)))))
+          (make-overlay
+           (nostr-ui-section-start section)
+           (max (nostr-ui-section-start section)
+                (or (nostr-ui-section-content-start section)
+                    (nostr-ui-section-start section)))))
     (overlay-put nostr-ui--selection-overlay 'face 'nostr-ui-selected-section)
     (overlay-put nostr-ui--selection-overlay 'priority 10)
     (overlay-put nostr-ui--selection-overlay 'nostr-ui-selection t)))
+
+(defun nostr-ui--reveal-selected-section ()
+  "Reveal the selected section heading after explicit navigation."
+  (when-let* ((target (point))
+              (window (get-buffer-window (current-buffer) t)))
+    (with-selected-window window
+      (goto-char target)
+      (set-window-point window target)
+      (recenter 2))))
 
 (defun nostr-ui-toggle-section ()
   "Toggle visibility of the section at point."
@@ -420,7 +431,8 @@ them, but timeline navigation should move between primary cards only."
                        (lambda (section) (> (nostr-ui-section-start section) pos))
                        (nostr-ui--top-level-sections-by-start))))
       (goto-char (nostr-ui-section-start next))
-      (nostr-ui-update-selection))))
+      (nostr-ui-update-selection)
+      (nostr-ui--reveal-selected-section))))
 
 (defun nostr-ui-prev-section ()
   "Move point to the previous section."
@@ -435,7 +447,8 @@ them, but timeline navigation should move between primary cards only."
         (setq best section)))
     (when best
       (goto-char (nostr-ui-section-start best))
-      (nostr-ui-update-selection))))
+      (nostr-ui-update-selection)
+      (nostr-ui--reveal-selected-section))))
 
 (defun nostr-ui-goto-first-section ()
   "Move point to the first rendered section and highlight it."

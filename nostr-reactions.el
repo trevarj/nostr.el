@@ -15,6 +15,7 @@
 (require 'nostr-db)
 (require 'nostr-relay)
 (require 'nostr-ui)
+(require 'transient)
 
 (declare-function nostr-profile-open "nostr-profile" (pubkey))
 (declare-function nostr-profile-open-self "nostr-profile" ())
@@ -41,15 +42,29 @@
     (define-key map (kbd "g") #'nostr-reactions-refresh)
     (define-key map (kbd "n") #'nostr-ui-next-section)
     (define-key map (kbd "p") #'nostr-ui-prev-section)
+    (define-key map (kbd "TAB") #'nostr-ui-toggle-section)
     (define-key map (kbd "i") #'nostr-profile-open-self)
     (define-key map (kbd "RET") #'nostr-reactions-open-profile)
     (define-key map (kbd "q") #'nostr-reactions-quit)
+    (define-key map (kbd "?") #'nostr-reactions-actions)
     map)
   "Keymap for `nostr-reactions-mode'.")
 
 (define-derived-mode nostr-reactions-mode special-mode "Nostr-Reactions"
   "Mode for Nostr reaction detail buffers."
   (setq-local truncate-lines nil))
+
+(transient-define-prefix nostr-reactions-actions ()
+  "Actions for cached reaction detail buffers."
+  [["Reaction"
+    ("RET" "Open profile" nostr-reactions-open-profile)
+    ("g" "Refresh" nostr-reactions-refresh)
+    ("i" "My profile" nostr-profile-open-self)
+    ("q" "Quit" nostr-reactions-quit)]
+   ["Navigation"
+    ("n" "Next reactor" nostr-ui-next-section)
+    ("p" "Previous reactor" nostr-ui-prev-section)
+    ("TAB" "Toggle reactor" nostr-ui-toggle-section)]])
 
 (defun nostr-reactions--display-name (reaction)
   "Return display name for REACTION's reactor."
@@ -158,16 +173,23 @@
        "No cached reactions for this note."
        "Keep the note visible while relay sync backfills reaction events."))
     (nostr-ui-insert-footer
-     '("g refresh" "RET open profile" "n next" "p prev" "q quit"))
+     '("g refresh" "RET open profile" "n next" "p prev" "TAB toggle" "q quit" "? actions"))
     (nostr-ui-finish-refresh position-state)))
+
+(defun nostr-reactions--selected-profile-pubkey ()
+  "Return the selected reactor pubkey or signal a user error."
+  (let ((section (nostr-ui-section-at-point)))
+    (unless section
+      (user-error "No reactor selected"))
+    (unless (eq (nostr-ui-section-type section) 'profile)
+      (user-error "Selected item is not a reactor profile"))
+    (or (alist-get 'pubkey (nostr-ui-section-data section))
+        (user-error "Selected reactor has no pubkey"))))
 
 (defun nostr-reactions-open-profile ()
   "Open the selected reaction actor profile."
   (interactive)
-  (when-let* ((section (nostr-ui-section-at-point))
-              ((eq (nostr-ui-section-type section) 'profile))
-              (pubkey (alist-get 'pubkey (nostr-ui-section-data section))))
-    (nostr-profile-open pubkey)))
+  (nostr-profile-open (nostr-reactions--selected-profile-pubkey)))
 
 (defun nostr-reactions-quit ()
   "Quit the reaction popup and kill its temporary buffer."

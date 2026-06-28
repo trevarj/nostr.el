@@ -442,47 +442,47 @@ events into one page request."
 (defun nostr-timeline-reply ()
   "Reply to the selected timeline note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-compose-open event)))
+  (nostr-compose-open (nostr-timeline--selected-note)))
 
 (defun nostr-timeline-like ()
   "React to the selected timeline note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-react-menu event)))
+  (nostr-actions-react-menu (nostr-timeline--selected-note)))
 
 (defun nostr-timeline-view-reactions ()
   "Show cached reactions for the selected timeline note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-reactions-open event)))
+  (nostr-reactions-open (nostr-timeline--selected-note)))
 
 (defun nostr-timeline-repost ()
   "Repost the selected timeline note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-repost event)))
+  (nostr-actions-repost (nostr-timeline--selected-note)))
 
 (defun nostr-timeline-quote ()
   "Quote the selected timeline note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-quote event)))
+  (nostr-actions-quote (nostr-timeline--selected-note)))
 
 (defun nostr-timeline-open-author ()
   "Open the selected timeline note's author profile."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data))
-              (pubkey (alist-get 'pubkey event)))
+  (let ((pubkey (alist-get 'pubkey (nostr-timeline--selected-note))))
+    (unless pubkey
+      (user-error "Selected note has no author pubkey"))
     (nostr-profile-open pubkey)))
+
+(defun nostr-timeline--selected-note ()
+  "Return selected timeline note data or signal a user error."
+  (or (nostr-ui-selected-data)
+      (user-error "No note selected")))
 
 (defun nostr-timeline-open-thread ()
   "Open selected note thread."
   (interactive)
   (unless (nostr-ui-activate-button-at-point)
-    (when-let* ((event (nostr-ui-selected-data)))
-      (require 'nostr-thread)
-      (nostr-thread-open event))))
+    (require 'nostr-thread)
+    (nostr-thread-open (nostr-timeline--selected-note))))
 
 (provide 'nostr-timeline)
 ;;; nostr-timeline.el ends here

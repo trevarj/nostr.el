@@ -188,11 +188,25 @@
             (should (string-match-p "1 follower" text))
             (should (string-match-p "0 following" text))
             (should (string-match-p "Builder of useful Nostr tools" text))
+            (should (string-match-p "TAB toggle" text))
+            (should (string-match-p "\\? actions" text))
             (should-not (string-match-p "Pubkey     bob-pubkey" text)))
           (goto-char (point-min))
           (search-forward "Bob Example")
           (nostr-profile-list-open-at-point)))
       (should (equal opened "bob-pubkey")))))
+
+(ert-deftest nostr-profile-list-open-without-selection-errors ()
+  "Profile list open reports an actionable error when no profile is selected."
+  (with-temp-buffer
+    (nostr-profile-list-mode)
+    (should-error (nostr-profile-list-open-at-point) :type 'user-error)))
+
+(ert-deftest nostr-profile-open-at-point-without-selection-errors ()
+  "Profile open reports an actionable error when no item is selected."
+  (with-temp-buffer
+    (nostr-profile-mode)
+    (should-error (nostr-profile-open-at-point) :type 'user-error)))
 
 (ert-deftest nostr-profile-list-refresh-preserves-selected-profile ()
   "Profile list refreshes keep point on the selected profile row."
@@ -277,12 +291,20 @@
             (should (string-match-p "\\[Avatar\\]" text))
             (should (string-match-p "Bob Example" text))
             (should (string-match-p "@bob" text))
-            (should (string-match-p "bob@example.test" text)))
+            (should (string-match-p "bob@example.test" text))
+            (should (string-match-p "TAB toggle" text))
+            (should (string-match-p "\\? actions" text)))
           (goto-char (point-min))
           (search-forward "Bob Example")
           (nostr-reactions-open-profile)))
       (should (equal fetched '("bob-pubkey")))
       (should (equal opened "bob-pubkey")))))
+
+(ert-deftest nostr-reactions-open-profile-without-selection-errors ()
+  "Reaction profile open reports an actionable error when no reactor is selected."
+  (with-temp-buffer
+    (nostr-reactions-mode)
+    (should-error (nostr-reactions-open-profile) :type 'user-error)))
 
 (ert-deftest nostr-reactions-refresh-preserves-selected-profile ()
   "Reaction detail refreshes keep point on the selected reactor."
@@ -643,6 +665,12 @@
                          "alice-pubkey"))
           (nostr-search-open-at-point)
           (should (equal opened "alice-pubkey")))))))
+
+(ert-deftest nostr-search-open-without-selection-errors ()
+  "Search open reports an actionable error when no result is selected."
+  (with-temp-buffer
+    (nostr-search-mode)
+    (should-error (nostr-search-open-at-point) :type 'user-error)))
 
 (ert-deftest nostr-ui-note-renders-publish-receipts ()
   "Note rendering shows cached per-relay publish receipt status."

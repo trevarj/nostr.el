@@ -236,11 +236,14 @@
 (defun nostr-search-open-at-point ()
   "Open the selected search result."
   (interactive)
-  (when-let* ((section (nostr-ui-section-at-point))
-              (data (nostr-ui-section-data section)))
+  (let* ((section (or (nostr-ui-section-at-point)
+                      (user-error "No search result selected")))
+         (data (or (nostr-ui-section-data section)
+                   (user-error "Selected search result has no data"))))
     (pcase (nostr-ui-section-type section)
       ('profile (nostr-profile-open (alist-get 'pubkey data)))
-      ('note (nostr-thread-open data)))))
+      ('note (nostr-thread-open data))
+      (_ (user-error "Selected search result cannot be opened")))))
 
 (defun nostr-search-refresh-visible-buffers ()
   "Refresh visible search buffers after relay-backed results arrive.

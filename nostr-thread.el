@@ -187,38 +187,34 @@ so untrusted relay data cannot cause an unbounded loop."
 (defun nostr-thread-reply ()
   "Reply to selected thread note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-compose-open event)))
+  (nostr-compose-open (nostr-thread--selected-note)))
 
 (defun nostr-thread-like ()
   "React to selected thread note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-react-menu event)))
+  (nostr-actions-react-menu (nostr-thread--selected-note)))
 
 (defun nostr-thread-view-reactions ()
   "Show cached reactions for the selected thread note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-reactions-open event)))
+  (nostr-reactions-open (nostr-thread--selected-note)))
 
 (defun nostr-thread-repost ()
   "Repost selected thread note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-repost event)))
+  (nostr-actions-repost (nostr-thread--selected-note)))
 
 (defun nostr-thread-quote ()
   "Quote selected thread note."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data)))
-    (nostr-actions-quote event)))
+  (nostr-actions-quote (nostr-thread--selected-note)))
 
 (defun nostr-thread-open-author ()
   "Open selected thread note's author profile."
   (interactive)
-  (when-let* ((event (nostr-ui-selected-data))
-              (pubkey (alist-get 'pubkey event)))
+  (let ((pubkey (alist-get 'pubkey (nostr-thread--selected-note))))
+    (unless pubkey
+      (user-error "Selected note has no author pubkey"))
     (require 'nostr-profile)
     (nostr-profile-open pubkey)))
 
@@ -249,12 +245,16 @@ so untrusted relay data cannot cause an unbounded loop."
 (defalias 'nostr-thread-open-embedded-nevent
   #'nostr-thread-open-embedded-reference)
 
+(defun nostr-thread--selected-note ()
+  "Return selected thread note data or signal a user error."
+  (or (nostr-ui-selected-data)
+      (user-error "No note selected")))
+
 (defun nostr-thread-open-at-point ()
   "Open an actionable item at point in a thread buffer."
   (interactive)
   (unless (nostr-ui-activate-button-at-point)
-    (when-let* ((event (nostr-ui-selected-data)))
-      (nostr-thread-open event))))
+    (nostr-thread-open (nostr-thread--selected-note))))
 
 (defun nostr-thread-open (event)
   "Open the conversation containing EVENT and focus EVENT."

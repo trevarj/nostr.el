@@ -134,6 +134,54 @@ alone, which would let a forged checkmark render on an unverified profile."
     (nostr-ui-toggle-section)
     (should (nostr-ui-section-folded (nostr-ui-section-at-point)))))
 
+(ert-deftest nostr-ui-selection-highlights-heading-only ()
+  "Section selection highlights the heading line without covering card body."
+  (with-temp-buffer
+    (let ((inhibit-read-only t))
+      (nostr-ui-clear)
+      (nostr-ui-insert-note
+       '((id . "selected-note")
+         (pubkey . "alice-pubkey")
+         (author . "Alice")
+         (created-at . 1736776800)
+         (content . "body should not be selected")
+         (replies . 0)
+         (reactions . 0)
+         (reposts . 0))))
+    (nostr-ui-goto-first-section)
+    (let ((section (nostr-ui-section-at-point)))
+      (should (overlayp nostr-ui--selection-overlay))
+      (should (= (overlay-start nostr-ui--selection-overlay)
+                 (nostr-ui-section-start section)))
+      (should (= (overlay-end nostr-ui--selection-overlay)
+                 (nostr-ui-section-content-start section)))
+      (save-excursion
+        (search-forward "body should not be selected")
+        (should-not
+         (cl-find-if (lambda (overlay)
+                       (overlay-get overlay 'nostr-ui-selection))
+                     (overlays-at (point))))))))
+
+(ert-deftest nostr-ui-selection-uses-section-content-start ()
+  "Custom section headings do not highlight same-line body text."
+  (with-temp-buffer
+    (nostr-ui-with-section 'test "same-line" '((id . "same-line"))
+        (lambda (section)
+          (insert (propertize "Heading"
+                              'nostr-ui-section section)))
+      (insert "Body\n"))
+    (nostr-ui-goto-first-section)
+    (let ((section (nostr-ui-section-at-point)))
+      (should (overlayp nostr-ui--selection-overlay))
+      (should (= (overlay-end nostr-ui--selection-overlay)
+                 (nostr-ui-section-content-start section)))
+      (goto-char (nostr-ui-section-content-start section))
+      (should (looking-at-p "Body"))
+      (should-not
+       (cl-find-if (lambda (overlay)
+                     (overlay-get overlay 'nostr-ui-selection))
+                   (overlays-at (point)))))))
+
 (ert-deftest nostr-ui-with-section-does-not-capture-body-bindings ()
   "Section macro internals do not shadow same-named caller bindings."
   (with-temp-buffer
@@ -727,6 +775,71 @@ alone, which would let a forged checkmark render on an unverified profile."
         (should (equal (alist-get 'id (nostr-ui-selected-data)) "next-note"))
         (nostr-ui-prev-section)
         (should (equal (alist-get 'id (nostr-ui-selected-data)) "parent-note"))))))
+
+(ert-deftest nostr-ui-section-navigation-reveals-selected-heading ()
+  "Explicit n/p section movement recenters the selected heading into view."
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *nostr-ui-navigation-test*")))
+      (unwind-protect
+          (progn
+            (let ((window (selected-window)))
+              (set-window-buffer window buffer)
+              (with-current-buffer buffer
+                (let ((body-lines (+ (window-body-height window) 8)))
+                  (dotimes (section-index 3)
+                    (nostr-ui-with-section
+                        'test
+                        (format "section-%d" section-index)
+                        `((id . ,(format "section-%d" section-index)))
+                        (format "Section %d" section-index)
+                      (dotimes (line body-lines)
+                        (insert (format "body %d.%d\n" section-index line)))))
+                  (nostr-ui-goto-first-section)
+                  (let ((initial-window-start (window-start window)))
+                    (nostr-ui-next-section)
+                    (should (equal (alist-get 'id (nostr-ui-selected-data))
+                                   "section-1"))
+                    (should (<= (window-start window) (point)))
+                    (should (< (point) (window-end window t)))
+                    (should (> (window-start window) initial-window-start)))
+                  (nostr-ui-next-section)
+                  (let ((third-start (point)))
+                    (set-window-start window third-start t)
+                    (nostr-ui-prev-section)
+                    (should (equal (alist-get 'id (nostr-ui-selected-data))
+                                   "section-1"))
+                    (should (<= (window-start window) (point)))
+                    (should (< (point) (window-end window t)))
+                    (should (< (window-start window) third-start)))))))
+        (kill-buffer buffer)))))
+
+(ert-deftest nostr-ui-section-navigation-keeps-target-in-nonselected-window ()
+  "Revealing a section in a non-selected window preserves navigation point."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((buffer (generate-new-buffer " *nostr-ui-nonselected-window-test*"))
+          (main-window (selected-window))
+          target-window)
+      (unwind-protect
+          (progn
+            (setq target-window (split-window-right))
+            (set-window-buffer target-window buffer)
+            (select-window main-window)
+            (with-current-buffer buffer
+              (dotimes (section-index 2)
+                (nostr-ui-with-section
+                    'test
+                    (format "section-%d" section-index)
+                    `((id . ,(format "section-%d" section-index)))
+                    (format "Section %d" section-index)
+                  (insert "body\n")))
+              (nostr-ui-goto-first-section)
+              (set-window-point target-window (point))
+              (nostr-ui-next-section)
+              (should (equal (alist-get 'id (nostr-ui-selected-data))
+                             "section-1"))
+              (should (= (window-point target-window) (point)))))
+        (kill-buffer buffer)))))
 
 (ert-deftest nostr-ui-note-card-keeps-uncached-nevent-text ()
   "An uncached nevent renders as a clickable friendly note reference."

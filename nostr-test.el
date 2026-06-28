@@ -3056,13 +3056,38 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
   (should (commandp #'nostr-timeline-view-reactions))
   (should (commandp #'nostr-thread-view-reactions)))
 
+(ert-deftest nostr-note-buffer-selected-note-commands-error-without-selection ()
+  "Timeline and thread note actions report a missing selected note."
+  (with-temp-buffer
+    (nostr-timeline-mode)
+    (dolist (command '(nostr-timeline-reply
+                       nostr-timeline-like
+                       nostr-timeline-view-reactions
+                       nostr-timeline-repost
+                       nostr-timeline-quote
+                       nostr-timeline-open-author
+                       nostr-timeline-open-thread))
+      (should-error (call-interactively command) :type 'user-error)))
+  (with-temp-buffer
+    (nostr-thread-mode)
+    (dolist (command '(nostr-thread-reply
+                       nostr-thread-like
+                       nostr-thread-view-reactions
+                       nostr-thread-repost
+                       nostr-thread-quote
+                       nostr-thread-open-author
+                       nostr-thread-open-at-point))
+      (should-error (call-interactively command) :type 'user-error))))
+
 (ert-deftest nostr-ui-pages-bind-question-mark-to-transients ()
   "Every Nostr UI page exposes its action menu on `?'."
   (dolist (entry `((,nostr-timeline-mode-map . nostr-timeline-actions)
                    (,nostr-thread-mode-map . nostr-thread-actions)
                    (,nostr-profile-mode-map . nostr-profile-actions)
+                   (,nostr-profile-list-mode-map . nostr-profile-list-actions)
                    (,nostr-search-mode-map . nostr-search-actions)
                    (,nostr-notifications-mode-map . nostr-notifications-actions)
+                   (,nostr-reactions-mode-map . nostr-reactions-actions)
                    (,nostr-relays-mode-map . nostr-relays-actions)
                    (,nostr-setup-mode-map . nostr-setup-actions)))
     (let ((map (car entry))
@@ -3070,6 +3095,18 @@ Otherwise a few recently-cached events (e.g. mentions) collapse the feed since t
       (should (fboundp command))
       (should (commandp command))
       (should (eq (lookup-key map (kbd "?")) command)))))
+
+(ert-deftest nostr-sectioned-buffers-bind-tab-to-toggle ()
+  "Sectioned Nostr buffers expose folding on TAB."
+  (dolist (map (list nostr-timeline-mode-map
+                     nostr-thread-mode-map
+                     nostr-profile-mode-map
+                     nostr-profile-list-mode-map
+                     nostr-search-mode-map
+                     nostr-notifications-mode-map
+                     nostr-reactions-mode-map
+                     nostr-relays-mode-map))
+    (should (eq (lookup-key map (kbd "TAB")) #'nostr-ui-toggle-section))))
 
 (ert-deftest nostr-compose-binds-actions-off-question-mark ()
   "Compose buffers expose their menu on `C-c ?' so `?' self-inserts."
