@@ -88,7 +88,13 @@ mod tests {
 
     #[test]
     fn prin1_string_round_trips_through_read_string() {
-        for s in ["", "alice", "hello\nworld", "a\"b\\c", "wss://relay.example/x"] {
+        for s in [
+            "",
+            "alice",
+            "hello\nworld",
+            "a\"b\\c",
+            "wss://relay.example/x",
+        ] {
             assert_eq!(read_string(&prin1_string(s)).as_deref(), Some(s));
         }
     }

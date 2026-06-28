@@ -279,7 +279,10 @@ async fn handle_command(
                 };
                 let sub_id = SubscriptionId::new(derived.clone());
                 let result = if relays.is_empty() {
-                    client.subscribe_with_id(sub_id, filter, None).await.map(|_| ())
+                    client
+                        .subscribe_with_id(sub_id, filter, None)
+                        .await
+                        .map(|_| ())
                 } else {
                     client
                         .subscribe_with_id_to(relays.iter(), sub_id, filter, None)
