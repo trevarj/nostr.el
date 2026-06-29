@@ -10,6 +10,17 @@
 (require 'ert)
 (require 'nostr-ui)
 
+(defun nostr-ui-card-test--window-row (window position)
+  "Return POSITION's visual row within WINDOW."
+  (with-current-buffer (window-buffer window)
+    (count-screen-lines (window-start window) position nil window)))
+
+(defun nostr-ui-card-test--should-point-be-centered (window)
+  "Assert point is centered in WINDOW, allowing odd-height rounding."
+  (let ((row (nostr-ui-card-test--window-row window (point)))
+        (middle (/ (window-body-height window) 2)))
+    (should (<= (abs (- row middle)) 1))))
+
 (ert-deftest nostr-ui-formats-relative-dates ()
   "Feed dates are compact and tolerate future timestamps."
   (should (equal (nostr-ui-format-relative-time 1000 1000) "just now"))
@@ -782,8 +793,8 @@ alone, which would let a forged checkmark render on an unverified profile."
         (nostr-ui-prev-section)
         (should (equal (alist-get 'id (nostr-ui-selected-data)) "parent-note"))))))
 
-(ert-deftest nostr-ui-section-navigation-keeps-visible-header-stationary ()
-  "Moving between visible sections does not scroll page headers away."
+(ert-deftest nostr-ui-section-navigation-centers-visible-target ()
+  "Moving between visible sections centers the selected section."
   (save-window-excursion
     (let ((buffer (generate-new-buffer " *nostr-ui-navigation-test*")))
       (unwind-protect
@@ -792,8 +803,8 @@ alone, which would let a forged checkmark render on an unverified profile."
               (set-window-buffer window buffer)
               (with-current-buffer buffer
                 (insert "Page Header\nViews  [f Feed]  N Notifications\n\n")
-                (let ((body-lines 2))
-                  (dotimes (section-index 2)
+                (let ((body-lines 16))
+                  (dotimes (section-index 4)
                     (nostr-ui-with-section
                         'test
                         (format "section-%d" section-index)
@@ -802,17 +813,14 @@ alone, which would let a forged checkmark render on an unverified profile."
                       (dotimes (line body-lines)
                         (insert (format "body %d.%d\n" section-index line)))))
                   (nostr-ui-goto-first-section)
-                  (let ((initial-window-start (window-start window)))
-                    (nostr-ui-next-section)
-                    (should (equal (alist-get 'id (nostr-ui-selected-data))
-                                   "section-1"))
-                    (should (= (window-start window) initial-window-start))
-                    (should (<= (window-start window) (point)))
-                    (should (< (point) (window-end window t))))))))
+                  (nostr-ui-next-section)
+                  (should (equal (alist-get 'id (nostr-ui-selected-data))
+                                 "section-1"))
+                  (nostr-ui-card-test--should-point-be-centered window)))))
         (kill-buffer buffer)))))
 
-(ert-deftest nostr-ui-section-navigation-reveals-hidden-heading ()
-  "Explicit n/p section movement scrolls only when the selected heading is hidden."
+(ert-deftest nostr-ui-section-navigation-centers-hidden-heading ()
+  "Explicit n/p section movement centers the selected section heading."
   (save-window-excursion
     (let ((buffer (generate-new-buffer " *nostr-ui-hidden-navigation-test*")))
       (unwind-protect
@@ -834,8 +842,7 @@ alone, which would let a forged checkmark render on an unverified profile."
                     (nostr-ui-next-section)
                     (should (equal (alist-get 'id (nostr-ui-selected-data))
                                    "section-1"))
-                    (should (<= (window-start window) (point)))
-                    (should (< (point) (window-end window t)))
+                    (nostr-ui-card-test--should-point-be-centered window)
                     (should (> (window-start window) initial-window-start)))
                   (nostr-ui-next-section)
                   (let ((third-start (point)))
@@ -843,8 +850,7 @@ alone, which would let a forged checkmark render on an unverified profile."
                     (nostr-ui-prev-section)
                     (should (equal (alist-get 'id (nostr-ui-selected-data))
                                    "section-1"))
-                    (should (<= (window-start window) (point)))
-                    (should (< (point) (window-end window t)))
+                    (nostr-ui-card-test--should-point-be-centered window)
                     (should (< (window-start window) third-start)))))))
         (kill-buffer buffer)))))
 

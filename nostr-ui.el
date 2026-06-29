@@ -399,16 +399,13 @@ them, but timeline navigation should move between primary cards only."
     (overlay-put nostr-ui--selection-overlay 'nostr-ui-selection t)))
 
 (defun nostr-ui--reveal-selected-section ()
-  "Reveal the selected section heading after explicit navigation.
-Keep the window start unchanged when the heading is already visible, so page
-headers and navigation remain on screen while moving through visible notes."
+  "Center the selected section heading after explicit navigation."
   (when-let* ((target (point))
               (window (get-buffer-window (current-buffer) t)))
     (with-selected-window window
       (goto-char target)
       (set-window-point window target)
-      (unless (pos-visible-in-window-p target window t)
-        (recenter -1)))))
+      (recenter))))
 
 (defun nostr-ui-toggle-section ()
   "Toggle visibility of the section at point."
