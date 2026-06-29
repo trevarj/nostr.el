@@ -382,7 +382,7 @@ them, but timeline navigation should move between primary cards only."
     t))
 
 (defun nostr-ui-update-selection ()
-  "Highlight the section at point."
+  "Highlight the selected section heading at point."
   (interactive)
   (when (overlayp nostr-ui--selection-overlay)
     (delete-overlay nostr-ui--selection-overlay)
@@ -391,7 +391,10 @@ them, but timeline navigation should move between primary cards only."
     (let* ((start (nostr-ui-section-start section))
            (content-start (or (nostr-ui-section-content-start section)
                               start))
-           (end (min content-start (1+ start))))
+           (heading-end (save-excursion
+                          (goto-char start)
+                          (min (point-max) (1+ (line-end-position)))))
+           (end (min content-start heading-end)))
       (setq nostr-ui--selection-overlay
             (make-overlay start (max start end))))
     (overlay-put nostr-ui--selection-overlay 'face 'nostr-ui-selected-section)
