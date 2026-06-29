@@ -76,9 +76,9 @@
   :group 'nostr)
 
 (defface nostr-ui-selected-section
-  '((((class color) (background light)) :background "gray90" :extend t)
-    (((class color) (background dark)) :background "gray20" :extend t)
-    (t :inverse-video t :extend t))
+  '((((class color) (background light)) :background "gray90")
+    (((class color) (background dark)) :background "gray20")
+    (t :inverse-video t))
   "Face for the currently selected section."
   :group 'nostr)
 
@@ -393,13 +393,25 @@ them, but timeline navigation should move between primary cards only."
                               start))
            (heading-end (save-excursion
                           (goto-char start)
-                          (min (point-max) (1+ (line-end-position)))))
-           (end (min content-start heading-end)))
+                          (line-end-position)))
+           (end (min content-start heading-end))
+           (padding (when (and (eq (nostr-ui-section-type section) 'note)
+                               (< heading-end content-start))
+                      (save-excursion
+                        (goto-char heading-end)
+                        (let ((width (- nostr-ui-card-fill-column
+                                        (current-column))))
+                          (when (> width 0)
+                            (propertize (make-string width ?\s)
+                                        'face 'nostr-ui-selected-section
+                                        'nostr-ui-selection t)))))))
       (setq nostr-ui--selection-overlay
-            (make-overlay start (max start end))))
-    (overlay-put nostr-ui--selection-overlay 'face 'nostr-ui-selected-section)
-    (overlay-put nostr-ui--selection-overlay 'priority 10)
-    (overlay-put nostr-ui--selection-overlay 'nostr-ui-selection t)))
+            (make-overlay start (max start end)))
+      (overlay-put nostr-ui--selection-overlay 'face 'nostr-ui-selected-section)
+      (overlay-put nostr-ui--selection-overlay 'priority 10)
+      (when padding
+        (overlay-put nostr-ui--selection-overlay 'after-string padding))
+      (overlay-put nostr-ui--selection-overlay 'nostr-ui-selection t))))
 
 (defun nostr-ui--reveal-selected-section ()
   "Center the selected section heading after explicit navigation."

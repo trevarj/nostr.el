@@ -147,37 +147,69 @@ alone, which would let a forged checkmark render on an unverified profile."
 
 (ert-deftest nostr-ui-selection-highlights-title-line-only ()
   "Section selection marks the title line without covering body text."
+  (let ((nostr-ui-card-fill-column 32)
+        (nostr-ui-show-avatars nil))
+    (with-temp-buffer
+      (let ((inhibit-read-only t))
+        (nostr-ui-clear)
+        (nostr-ui-insert-note
+         '((id . "selected-note")
+           (pubkey . "alice-pubkey")
+           (author . "Alice")
+           (created-at . 1736776800)
+           (content . "body should not be selected")
+           (replies . 0)
+           (reactions . 0)
+           (reposts . 0))))
+      (nostr-ui-goto-first-section)
+      (let ((section (nostr-ui-section-at-point)))
+        (should (overlayp nostr-ui--selection-overlay))
+        (should (= (overlay-start nostr-ui--selection-overlay)
+                   (nostr-ui-section-start section)))
+        (should (= (overlay-end nostr-ui--selection-overlay)
+                   (1- (nostr-ui-section-content-start section))))
+        (should (= (+ (string-width
+                       (buffer-substring-no-properties
+                        (overlay-start nostr-ui--selection-overlay)
+                        (overlay-end nostr-ui--selection-overlay)))
+                      (string-width
+                       (or (overlay-get nostr-ui--selection-overlay
+                                        'after-string)
+                           "")))
+                   nostr-ui-card-fill-column))
+        (save-excursion
+          (search-forward "Alice")
+          (should
+           (cl-find-if (lambda (overlay)
+                         (overlay-get overlay 'nostr-ui-selection))
+                       (overlays-at (point)))))
+        (save-excursion
+          (search-forward "body should not be selected")
+          (should-not
+           (cl-find-if (lambda (overlay)
+                         (overlay-get overlay 'nostr-ui-selection))
+                       (overlays-at (point)))))))))
+
+(ert-deftest nostr-ui-selection-does-not-pad-same-line-body ()
+  "Custom section selection does not insert visual padding before same-line body."
   (with-temp-buffer
-    (let ((inhibit-read-only t))
-      (nostr-ui-clear)
-      (nostr-ui-insert-note
-       '((id . "selected-note")
-         (pubkey . "alice-pubkey")
-         (author . "Alice")
-         (created-at . 1736776800)
-         (content . "body should not be selected")
-         (replies . 0)
-         (reactions . 0)
-         (reposts . 0))))
+    (nostr-ui-with-section 'test "same-line" '((id . "same-line"))
+        (lambda (section)
+          (insert (propertize "Heading"
+                              'nostr-ui-section section)))
+      (insert "Body\n"))
     (nostr-ui-goto-first-section)
     (let ((section (nostr-ui-section-at-point)))
       (should (overlayp nostr-ui--selection-overlay))
-      (should (= (overlay-start nostr-ui--selection-overlay)
-                 (nostr-ui-section-start section)))
-      (should (= (overlay-end nostr-ui--selection-overlay)
-                 (nostr-ui-section-content-start section)))
-      (save-excursion
-        (search-forward "Alice")
-        (should
-         (cl-find-if (lambda (overlay)
-                       (overlay-get overlay 'nostr-ui-selection))
-                     (overlays-at (point)))))
-      (save-excursion
-        (search-forward "body should not be selected")
-        (should-not
-         (cl-find-if (lambda (overlay)
-                       (overlay-get overlay 'nostr-ui-selection))
-                     (overlays-at (point))))))))
+      (should (<= (overlay-end nostr-ui--selection-overlay)
+                  (nostr-ui-section-content-start section)))
+      (should-not (overlay-get nostr-ui--selection-overlay 'after-string))
+      (goto-char (nostr-ui-section-content-start section))
+      (should (looking-at-p "Body"))
+      (should-not
+       (cl-find-if (lambda (overlay)
+                     (overlay-get overlay 'nostr-ui-selection))
+                   (overlays-at (point)))))))
 
 (ert-deftest nostr-ui-selection-uses-section-content-start ()
   "Custom section headings do not highlight same-line body text."
